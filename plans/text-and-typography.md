@@ -1,8 +1,8 @@
 # Text and typography — the staged programme
 
 - Drafted 2026-08-13. Design pass only; **no product code has moved.**
-- Decisions live in `project-tracker/adr/023-text-typography-and-the-text-matte.md` (D1–D12,
-  T-1–T-10). This file is the **sequence**; it does not re-argue the decisions.
+- Decisions live in `project-tracker/adr/023-text-typography-and-the-text-matte.md` (D1–D12 plus
+  D1a/D4a/D9a, T-1–T-12). This file is the **sequence**; it does not re-argue the decisions.
 - Standing rule applied throughout: **every stage ships a user-visible win on its own.** No stage
   builds infrastructure for a later stage without delivering something a user can see. Where a
   stage is genuinely enabling (S4), its own win is stated and must be real.
@@ -12,26 +12,62 @@
 ## The shape of it
 
 ```
+S0  interim: disable warp on shaping-dependent scripts   independent, immediate   ~half a day
 S1  paint-order + stroke                  no manifest change, no schema change   ~1 day
 S2  font reference + catalogue            manifest change (FontRef)              the big one
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         migration; unblocks S6
 S5  tier-1 texture + CSS depth            rides S4
 S6  caption + text preset library         rides S4; highest product value
-S7  the text matte (tier 2) + matte ops   gated on OQ1 spike; largest blast radius
+S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
+                                                          half only; largest blast radius
 S8  SVG: multi-stroke + path text
 S9  per-character + variable-axis animation
 ```
 
 Ordering rationale, stated because two of these look reorderable and are not:
 
+- **S0 first, ahead of everything, including S1.** It fixes a live, already-shipped defect
+  (D9a/T-12: warp silently renders wrong for shaping-dependent scripts) and depends on nothing else
+  in this programme. There is no reason to sequence it behind S1 just because S1 is also small.
 - **S2 before S6.** A preset that names a font the system cannot provide is a broken preset. The
   library must be able to guarantee its own fonts before it ships presets that use them.
 - **S4 before S5.** S5 adds ~6 style properties. Adding them as loose CSS fields and *then*
   schematising makes S4's migration six fields larger, for no gain.
-- **S7 last among the features.** It is the only stage that widens a core compiler type, and it is
-  the only one gated on a spike. Everything ahead of it ships regardless of how OQ1 resolves.
-- **S1 first** purely on value-per-line: one CSS declaration changes how every stroked title looks.
+- **S7 last among the features.** Its matte-widening half is the only stage that changes a core
+  compiler type, and it is the only one gated on a spike (OQ1). The warp-rework half riding along in
+  S7 is **not** gated by OQ1 — it doesn't touch `FlarexMatteValue` — but is sequenced here anyway
+  because it is the same conceptual reclassification (D10's matte vocabulary) and splitting it into
+  its own stage would mean explaining "matte operation" twice.
+
+---
+
+## S0 — Interim: warp detects a shaping-dependent script and disables itself, visibly
+
+**Win:** warp stops silently rendering wrong. Today, warping Arabic, Devanagari, Thai or any other
+shaping-dependent script text produces incorrect glyphs with no indication anything is wrong — the
+same shape of failure as the empty warp-font-catalogue incident (`font-outlines.ts:50`), where a
+missing feature looked like a working one. This stage makes the gap visible instead of silent.
+
+**Scope**
+- Script detection on the layer's text content (a small, targeted check — Unicode block ranges for
+  the scripts `opentype.js` glyph lookup cannot shape correctly: Arabic, Hebrew, Devanagari and other
+  Indic scripts, Thai, and complex emoji ZWJ sequences).
+- When detected on a layer with warp enabled: warp does not apply, and the layer shows a visible
+  marked state (reuses the same "degraded, needs attention" vocabulary as D3's font substitution
+  banner) rather than rendering the wrong glyphs with no signal.
+- No engine change. This does not touch `text-warp.ts`/`text-warp-mesh.ts`/`font-outlines.ts` — it
+  gates whether they run.
+
+**Not in scope:** the actual fix (S7 folds in the rasterize-then-deform rework, D9a). This stage is
+strictly interim and is retired — the detection code deleted, not merely disabled — the moment S7's
+warp rework ships, per T-12.
+
+**Verification:** a fixture with Arabic text and warp enabled; before this stage it renders wrong
+with no signal, after this stage it renders unwarped with a visible marker. No pixel-comparison
+fixture needed (there's no "correct warped Arabic" render to compare against yet — that's S7).
+
+**Risk:** very low. Additive, narrow, and does not touch any renderer's shared code path.
 
 ---
 
@@ -188,20 +224,25 @@ Gates preset *sharing*; does not gate preset *saving*, so S6 can ship single-use
 
 ---
 
-## S7 — The text matte, and matte edge operations
+## S7 — The text matte, matte edge operations, and the warp rework
 
-**Win:** video inside text. A generator, a procedural texture, a video source, or an **entire Flarex
-comp** inside the glyphs. Plus roughened/torn edges, choke/spread and edge blur — which, because
-they land on the matte, immediately work on every existing mask, key and tracked shape too.
+**Win:** video inside text — a generator, a procedural texture, a video source, or an **entire
+Flarex comp** inside the glyphs. Roughened/torn edges, choke/spread and edge blur, which land on the
+matte and so immediately work on every existing mask, key and tracked shape too. **And** warp gets
+real shaping for free — Arabic, Devanagari and other complex scripts warp correctly for the first
+time, closing the gap S0 only masked.
 
-**GATE: the OQ1 spike runs first and is a separate, reportable piece of work.** It must (i)
-enumerate every `matteInput` consumer in `compile-flarex.ts` and classify each vector-only /
-raster-capable / needs-work, and (ii) measure raster feather+choke against the existing vector
-rasterizer at 1080p. **If the spike shows that a raster value forces early rasterization of chains
-that could stay vector, T-7 is violated and S7 needs a different design** — do not proceed on the
-assumption that it will be fine.
+This stage has two halves with **different gates**, and they should be tracked as such rather than
+as one undifferentiated blob of work.
 
-**Scope, assuming the spike clears**
+**Half A — the Flarex text matte. GATE: the OQ1 spike runs first**, as a separate, reportable piece
+of work. It must (i) enumerate every `matteInput` consumer in `compile-flarex.ts` and classify each
+vector-only / raster-capable / needs-work, and (ii) measure raster feather+choke against the
+existing vector rasterizer at 1080p. **If the spike shows that a raster value forces early
+rasterization of chains that could stay vector, T-7 is violated and this half needs a different
+design** — do not proceed on the assumption that it will be fine.
+
+**Half A scope, assuming the spike clears**
 - Widen `FlarexMatteValue` (compile-flarex.ts:189-195) to a vector|raster union (D9 option (a)).
   Vector chains stay vector and stay lossless (T-7).
 - The `text` node (`node-defs.ts:600`) gains a `matte` output socket. It is then an ordinary
@@ -214,7 +255,32 @@ assumption that it will be fine.
   satisfiable by the existing `document.fonts` listener alone — that is a liveness signal, and this
   repo has a named bug class for correctness resting on one (DEBT-009).
 
-**Explicitly not in this stage:** any edge treatment on the text node's params. T-6.
+**Half B — the warp rework. NOT gated by OQ1** — it doesn't touch `FlarexMatteValue`; warp lives
+outside the Flarex compiler entirely (`text-warp.ts`, `text-warp-mesh.ts`, `font-outlines.ts`). Can
+ship independently of, and in either order relative to, half A.
+
+**Half B scope (D9a)**
+- Rasterize the text layer with full browser shaping (reuse `drawTextLayer`'s canvas `fillText`
+  path, as `scene-text-raster.ts` already does), then run the existing envelope-mesh deformation math
+  over the raster instead of over `opentype.js` path commands.
+- Delete `opentype.js`'s `getPath()` call from the warp path. `opentype.js` itself stays — it is
+  still used for D2's name-table ingest parse — only the glyph-outline use inside warp goes.
+- Supersample the raster at a scale derived from the deformation field's **maximum local
+  magnification**, not a fixed multiplier. Extend the existing `rasterScale`-from-bucket mechanism
+  (`scene-text-raster.ts:47-48,280`, today keyed to display scale) to also account for warp stretch,
+  capped by the same `MAX_RASTER_DIM` bound.
+- Delete S0's script-detection gate once this ships (T-12) — there is no shaping gap left to guard.
+- `harfbuzzjs` is explicitly **not** part of this half's scope (see ADR §6/§8) — no vector warped
+  output is being built here, only raster warped output with correct shaping.
+
+**Explicitly not in this stage:** any edge treatment on the text node's params (T-6, half A). Vector
+warped output / SVG export of warped text (half B — deferred, `harfbuzzjs` is the named path if it's
+ever scoped).
+
+**Verification (half B):** the same Arabic fixture from S0 — before this half, unwarped-with-marker;
+after, warped correctly. Plus the existing warp pixel fixtures re-run to confirm the rasterize-then-
+deform swap doesn't regress simple-script warp, and a heavy-warp fixture checking supersampling holds
+detail at high local magnification.
 
 ---
 

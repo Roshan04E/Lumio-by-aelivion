@@ -1,7 +1,10 @@
 # ADR-023 — Text, typography, and the text matte
 
-- Status: **Accepted** for the decisions in §2–§6 (D1–D12). **Provisional** for D9 (the raster
-  matte value), which is accepted in intent and gated on the spike in §9/OQ1 before code moves.
+- Status: **Accepted** for the decisions in §2–§6 (D1–D12, D1a, D4a, D9a). **Provisional** for D9
+  (the raster matte value inside the Flarex compiler), which is accepted in intent and gated on the
+  spike in §9/OQ1 before code moves. **D9a is Accepted and NOT gated on OQ1** — warp's rasterize-
+  then-deform pipeline is outside the Flarex compiler and does not touch `FlarexMatteValue`; it does
+  not inherit D9's Provisional status just because both are called "matte operations."
 - Date drafted: 2026-08-13
 - Governed by: `FLAREX_IMPLEMENTATION_GOVERNANCE.md`
 
@@ -13,7 +16,10 @@ Depends on:  ADR-004 (PropertySchema), ADR-005 (inspector adapter pattern),
 Supersedes:  nothing
 Amends:      nothing. D9 WIDENS `FlarexMatteValue` (compile-flarex.ts:189-195); the vector
              matte's lossless-combination property is preserved for vector-only chains, and
-             that preservation is a normative obligation (T-7), not a hope.
+             that preservation is a normative obligation (T-7), not a hope. D9a retires
+             `font-outlines.ts`'s `opentype.js` glyph-lookup path from warp (`text-warp.ts`,
+             `text-warp-mesh.ts`), replacing vector-outline-then-deform with rasterize-then-
+             deform; `opentype.js` itself is retained for D2's name-table ingest parse.
 Evidence base: none yet. Every number in this ADR is an estimate and is labelled as one.
                Contrast ADR-021, which is measured. Do not read this document as measured.
 Related:     `plans/text-and-typography.md` (the staged programme)
@@ -228,13 +234,17 @@ violates the loose form of it:**
 
 `scene-text-raster.ts` already rasterizes text to a canvas for the Flarex/scene path, via
 `drawTextLayer`, which is canvas 2D `fillText` — that is *browser shaping into a raster*, and it is
-fine. `font-outlines.ts` is the genuine exception: `opentype.js` `getPath()` does **glyph lookup,
-not shaping**, so the text-warp path has no ligatures, no bidi, and no complex-script support. **This
-is not a hypothetical risk to avoid — it is a live limitation of shipped warp today**, recorded here
-so it is findable rather than rediscovered: any warped Arabic, Devanagari or complex-script text is
-already wrong, right now, before this ADR changes anything. It is a known, accepted limitation of
-warp specifically, and D9's matte must not be built the same way
-(see OQ1 option (b)).
+fine. `font-outlines.ts` is today's exception: `opentype.js` `getPath()` does **glyph lookup, not
+shaping**, so the text-warp path has no ligatures, no bidi, and no complex-script support. **This is
+not a hypothetical risk to avoid — it is a live limitation of shipped warp today**, recorded here so
+it is findable rather than rediscovered: any warped Arabic, Devanagari or complex-script text is
+already wrong, right now, before this ADR changes anything.
+
+**The exception is not accepted as permanent — see D9a, which retires it.** Warp is reclassified
+from a vector-outline operation to a matte operation, at which point it rasterizes with full browser
+shaping like every other text path, and `font-outlines.ts`'s glyph-lookup route is deleted rather
+than kept as a standing carve-out. Until D9a ships, D3's interim rule (T-12) applies: warp must
+detect a shaping-dependent script and refuse to apply itself, visibly, rather than render wrong.
 
 ### D7 — The reachable CSS surface is much larger than four properties, and `paint-order` is first. (Accepted)
 
@@ -288,6 +298,50 @@ type FlarexMatteValue = { masks: Mask[] };
 **Recommendation: (a), with (b) available as an opt-in for the specific case of a text matte the
 user wants to edit as bezier paths.** The status is Provisional because the blast radius across
 matte consumers is the largest single cost in this programme and has not been spiked. See OQ1.
+
+### D9a — Text warp is a matte operation: rasterize with shaping, THEN deform. Not outline, then deform. (Accepted, normative — same class as D10)
+
+Warp exists today (`text-warp.ts`, `text-warp-mesh.ts`, `font-outlines.ts`) as a **vector** pipeline:
+`opentype.js` extracts glyph outlines, an envelope mesh deforms the path commands, and
+`buildWarpedTextPathSvg` emits the result as an SVG `<path>` overlay — `composition-style.ts`'s own
+comment is explicit that this is deliberately *not* a CSS filter. That design bought crisp warp at
+any deformation strength, and paid for it with D6's exception: `getPath()` is glyph lookup, not
+shaping, so warp has no ligatures, no bidi, no complex-script support, and it is wrong **today**
+for any shaping-dependent script.
+
+**Reclassify it: warp is coverage-in, coverage-out, driven by a deformation field — exactly D10's
+definition of a matte operation, in the same family as roughen, choke and feather.** The pipeline
+becomes: rasterize the text with full browser shaping (`drawTextLayer`'s canvas `fillText`, the same
+call `scene-text-raster.ts` already uses), then deform the *raster* through the existing envelope
+mesh math. `opentype.js`'s `getPath()` — the glyph-lookup call — is deleted from the warp path
+entirely. Shaping is not approximated afterward; it never has to be, because it already happened
+before rasterization, in the browser, for free. This is what fixes complex scripts, and it is not a
+targeted fix for complex scripts — it is the structural consequence of moving the deform to the
+right side of the shaping boundary.
+
+**The cost is real and specific: a raster loses detail under heavy local magnification that a vector
+deformation would not.** A warp field that stretches one region of the raster by, say, 4× exposes
+that region's original pixel grid. **Mitigate by supersampling the raster at a scale derived from
+the deformation field's maximum local magnification**, not a fixed multiplier — cheap warps stay
+cheap, extreme warps get the resolution they need. The mechanism already exists in this codebase and
+does not need inventing: `scene-text-raster.ts:47-48,280` computes `rasterScale` from a
+`displayScale`-derived bucket, capped by `MAX_RASTER_DIM` so magnified text stays crisp within a
+bounded cost. The same shape of computation applies here, keyed to the warp field's max stretch
+instead of display scale.
+
+**harfbuzzjs is the named escape hatch, not the plan.** If a future deliverable genuinely needs
+*vector* warped text — an SVG export target is the only case that would — `harfbuzzjs` (HarfBuzz
+compiled to WASM) does real shaping and can emit shaped glyph runs an outline pipeline could deform
+losslessly, which `opentype.js` cannot. **It is not needed now** and pulling it in now would be
+exactly the finished-but-unused infrastructure this repo's standing rule forbids. Recorded here so
+the next person who wants vector warped text finds the answer instead of reaching for `opentype.js`
+again.
+
+**T-12 — Interim, until this ships: warp detects a shaping-dependent script and disables itself
+visibly.** Not silently — the warp catalogue's empty-list incident (§1) is exactly the shape of bug
+a silent partial-render produces. A visible "warp unavailable for this text" beats a wrong render,
+and it beats nothing at all. This rule is retired the moment D9a ships, because at that point warp
+has no shaping-dependent limitation left to guard against.
 
 ### D10 — Edge treatments are MATTE operations, not text features. (Accepted, normative — and this generalises)
 
@@ -407,6 +461,10 @@ via D12)
 change can drift apart. A mirror entry missing its license file is a defect to fix before ship, not
 a cleanup task to defer — it is the operational half of what makes D4a's redistribution lawful.
 
+**T-12 — Until warp rasterizes-then-deforms (D9a), it must detect a shaping-dependent script and
+refuse to apply itself visibly, never silently render wrong.** (D9a) Interim only; retired the
+moment D9a ships, at which point warp has no shaping gap left to guard against.
+
 ---
 
 ## 6. Out of scope
@@ -419,6 +477,9 @@ a cleanup task to defer — it is the operational half of what makes D4a's redis
 - **3D extruded text.** Out with the rest of 3D per ADR-021 §5. Faked extrusion via stacked
   `text-shadow` (D7 item 2) is in scope and is what users actually mean most of the time.
 - **OpenType feature UI** (`font-feature-settings` beyond defaults) — deferred.
+- **`harfbuzzjs` / vector-shaped warp output.** Named as the escape hatch for vector warped text
+  (D9a) if an SVG export target ever needs it. Not needed now, not a dependency of anything in this
+  programme, and not to be added ahead of that need.
 
 ---
 
@@ -437,7 +498,10 @@ The per-user font store deliberately stores duplicates. This is a cost, and it i
 **Improved.** The five-font ceiling goes. `getCompositionFontsUsed` becomes a resolver over pinned
 hashes instead of a string collector, and the export path stops guessing. Text styling becomes
 preset-able, AI-editable and migratable in one move rather than three. Edge treatments accrue to
-the matte vocabulary, so every future coverage source inherits them.
+the matte vocabulary, so every future coverage source inherits them. Warp's complex-script gap
+(D9a) closes as a side effect of a reclassification made for an unrelated reason (matte
+consistency), not as a targeted fix — `opentype.js`'s `getPath()` is deleted from the warp path
+entirely, and shaping happens once, in the browser, before any deformation.
 
 Legacy projects pay nothing here: D1a keeps every existing `fontFamily` string rendering exactly as
 it does today, permanently, with migration strictly opt-in. That is a deliberate mirror of the
@@ -466,6 +530,16 @@ provisional against *nothing yet*.
 - **Presets as `TemplateDefinition`.** Rejected — D12.
 - **A `textureFill` param on the text node.** Rejected: it is D10's mistake in a different costume.
   Fill is a wired input, not a text property.
+- **Keep warp as a vector-outline pipeline and patch shaping in some other way.** Rejected — D9a.
+  There is no "patch shaping onto glyph lookup" move; shaping is not a post-process on glyph
+  positions, it changes *which* glyphs are selected (ligatures, contextual forms). The only fixes
+  are "shape before rasterizing" (D9a) or "shape inside the vector pipeline via real HarfBuzz" —
+  which is the `harfbuzzjs` route, below.
+- **Pull in `harfbuzzjs` now to keep warp vector.** Rejected for now — D9a. Real shaping without
+  rasterizing is possible in principle, but nothing in this programme's scope (§6: no SVG warp
+  export target exists) needs vector warped output, and building it ahead of that need is exactly
+  the finished-but-unused infrastructure the standing rule forbids. Revisit if an SVG export
+  deliverable is scoped.
 
 ---
 
