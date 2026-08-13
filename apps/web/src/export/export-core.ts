@@ -13,7 +13,9 @@ import {
   expandFrameBorders,
   expandNestedCompositions,
   getCompositionFontsUsed,
+  collectPinnedFontRefs,
   fontRefCss,
+  FontResolutionError,
   graphicAnimationBakeTime,
   graphicToAnimatedDataUrl,
   graphicToDataUrl,
@@ -30,6 +32,7 @@ import {
   type TimelineLayer
 } from "@orreris/shared";
 import { EncoderStallRecoveredError, MediaEncoder, REC709_SDR_LIMITED, type ExportFormat } from "./video-encoder";
+import { installPinnedFont } from "../lib/font-install";
 import { getRegionPassesEnabled } from "../color/render-engine";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
 import { clipSourceKey, createAnimatedGraphicSource, createFrameProvider, graphicSourceKey, type FrameProvider } from "./source-decoder";
@@ -321,23 +324,39 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     return [...keys];
   };
 
-  // Preload text fonts so canvas fillText matches the preview. Only possible where the DOM
-  // FontFaceSet exists (main thread); the Worker uses the platform's installed fonts.
-  // ADR-023 S2 commit 1: the collector now returns `FontRef`s rather than CSS family strings. This
-  // call site takes the CSS family off each one, which for a legacy `{ source: "system" }` ref is
-  // the unchanged stack — so this preload behaves exactly as it did. The `.catch(() => undefined)`
-  // below is T-2's target and is removed in commit 4, together with the install path that makes
-  // failing loudly the correct response rather than a way to break working exports.
-  const fonts = getCompositionFontsUsed(composition.tracks.flatMap((track) => track.layers)).map(
-    (ref) => fontRefCss(ref).fontFamily
-  );
-  if (typeof document !== "undefined" && document.fonts) {
-    // Timeout-raced: a stuck webfont must never hang the export (the raster falls back to the
-    // platform font, same as the live preview's non-blocking font path).
+  /**
+   * ADR-023 D3/T-2 — **the shrug is gone.**
+   *
+   * This used to be `document.fonts.load(...).catch(() => undefined)` inside a 3-second timeout
+   * race: a font that failed, or merely arrived slowly, was silently swallowed and the export went
+   * ahead in whatever face the platform happened to offer. That is the defect this stage exists to
+   * remove — an export is a deliverable, produced unattended, and a substituted font there is wrong
+   * pixels that look like a working feature.
+   *
+   * The split is D3's, not an invention here. A PINNED font (catalogue/user) has a `fileHash`: it is
+   * a specific file, we either have it or we do not, and if we do not the export ABORTS by name. A
+   * legacy `{ source: "system" }` ref names a CSS stack and has always resolved to whatever the
+   * platform has — there is nothing to fail to fetch, so it keeps the timeout-raced preload it has
+   * always had. Making legacy stacks hard-fail would break every project authored before `FontRef`
+   * existed, which D1a forbids in the strongest terms.
+   */
+  const layers = composition.tracks.flatMap((track) => track.layers);
+  const pinnedFonts = collectPinnedFontRefs(layers);
+  if (pinnedFonts.length) {
+    const outcomes = await Promise.all(pinnedFonts.map(installPinnedFont));
+    const unresolved = pinnedFonts.filter((_, index) => outcomes[index] !== "installed");
+    if (unresolved.length) throw new FontResolutionError(unresolved);
+  }
+
+  // Legacy system stacks: unchanged behaviour, including the timeout race. See above for why.
+  const systemFamilies = getCompositionFontsUsed(layers)
+    .filter((ref) => ref.source === "system")
+    .map((ref) => fontRefCss(ref).fontFamily);
+  if (systemFamilies.length && typeof document !== "undefined" && document.fonts) {
     const fontTimeout = new Promise<void>((resolve) => setTimeout(resolve, 3000));
     await Promise.race([
       (async () => {
-        await Promise.all(fonts.map((family) => document.fonts.load(`900 64px ${family}`).catch(() => undefined)));
+        await Promise.all(systemFamilies.map((family) => document.fonts.load(`900 64px ${family}`).catch(() => undefined)));
         await document.fonts.ready;
       })(),
       fontTimeout,

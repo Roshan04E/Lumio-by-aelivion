@@ -11055,6 +11055,13 @@ input.scrub-number:focus {
   pointer-events: none;
 }
 
+/* Two markers can be true of one layer at once (a mixed-style Arabic line whose pinned font is also
+   missing). Offset the second so neither covers the other — a marker hidden behind another marker
+   is still a marker nobody reads, which is the whole class of defect T-16 exists for. */
+.preview-warp-suppressed + .preview-warp-suppressed {
+  transform: translate(-50%, calc(-50% - 150px));
+}
+
 .preview-shape-layer {
   position: absolute;
   width: 44%;

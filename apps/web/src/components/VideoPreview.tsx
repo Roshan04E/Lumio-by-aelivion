@@ -73,6 +73,8 @@ import {
   type TransitionWindowSides,
   getLayerAnimations,
   hasTextWarp,
+  getCompositionFontRef,
+  isPinnedFontRef,
   isTextVisualOrderUnavailable,
   isTextWarpSuppressed,
   normalizeTextWarp,
@@ -106,6 +108,7 @@ import { WebglColorView } from "./WebglColorView";
 import { WebglVideoOverlay } from "./WebglVideoOverlay";
 import { WebglMediaLayer, requestLiveReprime } from "./WebglMediaLayer";
 import { ProxyPlaybackLayer, type ProxyPlaybackHit } from "./ProxyPlaybackLayer";
+import { fontInstallState, fontInstallVersion, installCompositionFonts, subscribeFontInstalls } from "../lib/font-install";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { getGlGovernorEnabled, getRegionPassesEnabled, getSingleCtxPreviewEnabled, useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
 import type { SceneMediaSink, ScenePreviewMediaSource } from "./scene-media-source";
@@ -696,6 +699,16 @@ function VideoPreviewImpl({
   bumpRenderCount("VideoPreview");
   useRenderCost("VideoPreview");
   const currentTime = usePlaybackClock(currentTimeProp, clockDriven || isPlaying);
+  /**
+   * ADR-023 D3 — install every pinned font this composition needs, and re-render when the answer
+   * arrives. Subscribing rather than polling matters for the marker: a font resolves asynchronously,
+   * so a component that only read the state at mount would show "missing" forever for a font that
+   * loaded a moment later, or — worse — never show it for one that failed after mount.
+   */
+  useEffect(() => {
+    installCompositionFonts(composition.tracks.flatMap((track) => track.layers));
+  }, [composition]);
+  useSyncExternalStore(subscribeFontInstalls, fontInstallVersion, fontInstallVersion);
   const phoneFrameRef = useRef<HTMLDivElement | null>(null);
   // Merge internal ref with optional external frameRef prop (for color scopes).
   const mergedPhoneFrameRef = useCallback(
@@ -2625,6 +2638,13 @@ const PreviewLayer = memo(function PreviewLayer({
   // Unified WebGL render path (rendererMode=webgl). If the shared MediaWebGLRenderer
   // fails to init at runtime, flip this and fall back to the legacy SVG-filter DOM path.
   const [webglMediaFailed, setWebglMediaFailed] = useState(false);
+  /**
+   * ADR-023 D3. Subscribed HERE, not only in the parent, and that is not redundancy: `PreviewLayer`
+   * is memoized, so a font resolving (or failing) after mount changes no prop of this component and
+   * the substitution marker would never appear. Found by the T-16 gate's own control-void guard,
+   * which is the second time that class of assertion has earned its keep.
+   */
+  useSyncExternalStore(subscribeFontInstalls, fontInstallVersion, fontInstallVersion);
   const useWebglMedia = useWebglRenderer(webgl2Supported()) && !webglMediaFailed;
   // GRADE COMPARE. The divider arrives in COMP space; the media shader compares against the source's
   // own UV, so the layer's object-fit + content zoom/pan have to be folded in or the wipe would split
@@ -3614,6 +3634,12 @@ const PreviewLayer = memo(function PreviewLayer({
     // invisible; for a shaping-dependent script the render is wrong, so it is announced rather than
     // emitted silently — the same discipline, and the same marker vocabulary, as warp above.
     const visualOrderUnavailable = isTextVisualOrderUnavailable(layer);
+    // S2 / ADR-023 D3: this layer pins a font we could not fetch, so the preview is drawing a
+    // SUBSTITUTE. The editor keeps working — one missing font of forty must not stop a session —
+    // but it says so, because a substitution nobody is told about is the warp-catalogue incident
+    // again: wrong pixels that look like a working feature. Export is blocked separately.
+    const pinnedRef = getCompositionFontRef(layer);
+    const fontSubstituted = isPinnedFontRef(pinnedRef) && fontInstallState(pinnedRef) === "missing";
     // Clip mask (text): the comp-px mask must live on a comp-sized, transform-less wrapper (text is
     // content-sized) so it aligns + stays comp-fixed like the GPU scene path. `null` when unmasked → no
     // wrapper, byte-identical to before. The inner button re-enables pointer events (wrapper is none).
@@ -3680,6 +3706,18 @@ const PreviewLayer = memo(function PreviewLayer({
             style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
           >
             Mixed styles on one line — this script won't reorder
+          </span>
+        ) : null}
+        {/* S2 / ADR-023 D3. Third marker in the same vocabulary, same sibling placement, same reason
+            (see the warp note above): nested inside the text button it would inherit `opacity: 0`
+            whenever the layer is GPU-composited and announce nothing at all. */}
+        {fontSubstituted && interactive ? (
+          <span
+            className="preview-warp-suppressed"
+            data-testid="preview-font-substituted"
+            style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
+          >
+            Missing font — showing a substitute
           </span>
         ) : null}
         {selected ? (

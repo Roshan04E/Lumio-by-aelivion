@@ -6,6 +6,7 @@ import { ensureBrowser, renderMedia, renderStill, selectComposition, type Cancel
 import type { RenderManifest } from "@orreris/render-templates";
 import { compositionId } from "./remotion/Root";
 import { manifestNeedsAudioPostMix, postMixManifestAudio } from "./audio-post-mix";
+import { resolveManifestFonts } from "./fonts/font-resolver";
 
 let bundleLocationPromise: Promise<string> | undefined;
 
@@ -120,7 +121,11 @@ export async function renderManifestToMp4(input: {
 }) {
   await ensureBrowserReady();
   const serveUrl = await getBundleLocation();
-  const inputProps = { manifest: input.manifest };
+  // ADR-023 D3/T-2 — install before rendering, and abort by name if we cannot. This is deliberately
+  // the FIRST thing after the browser is ready: a render that is going to fail for want of a font
+  // should fail in a second, not after ten minutes of encoding into a file nobody can use.
+  const fonts = await resolveManifestFonts(input.manifest);
+  const inputProps = { manifest: input.manifest, fonts };
   const cancel = input.cancelSignal ? { cancelSignal: input.cancelSignal } : {};
   const composition = await selectComposition({
     serveUrl,
@@ -216,7 +221,10 @@ export async function renderManifestStill(input: {
 }) {
   await ensureBrowserReady();
   const serveUrl = await getBundleLocation();
-  const inputProps = { manifest: input.manifest };
+  // ADR-023 D3/T-2: BEFORE the browser is asked for anything. An unresolvable pinned font throws
+  // here, naming the family and hash, rather than producing a still in the wrong typeface.
+  const fonts = await resolveManifestFonts(input.manifest);
+  const inputProps = { manifest: input.manifest, fonts };
   const composition = await selectComposition({
     serveUrl,
     id: compositionId,
