@@ -26,6 +26,8 @@
     "font:mirror-test": "tsx src/font-mirror-test.ts",
     "font:install-gate": "tsx src/font-install-gate.ts",
     "marker:photo-gate": "tsx src/marker-photo-gate.ts",
+    "font:catalogue-test": "tsx src/font-catalogue-test.ts",
+    "font:preview-gate": "tsx src/font-preview-gate.ts",
     "render:linear-gate": "tsx src/render-linear-gate.ts",
     "render:link-gate": "tsx src/render-link-gate.ts",
     "kernel:conform": "tsx src/kernel-conformance.ts",

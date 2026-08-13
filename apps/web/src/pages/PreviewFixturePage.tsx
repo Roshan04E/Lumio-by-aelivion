@@ -1,10 +1,19 @@
+import { useEffect, useSyncExternalStore } from "react";
 import {
+  catalogueFaces,
   createRenderComparisonFixture,
   renderComparisonFixtureKeys,
   type TimelineComposition,
   type RenderComparisonFixtureKey
 } from "@orreris/shared";
 import { VideoPreview } from "../components/VideoPreview";
+import {
+  cataloguePreviewVersion,
+  isPreviewLoaded,
+  loadCataloguePreviews,
+  previewFamily,
+  subscribeCataloguePreviews
+} from "../lib/font-catalogue-preview";
 
 function fixtureKeyFromUrl(): RenderComparisonFixtureKey {
   if (typeof window === "undefined") return "default";
@@ -35,6 +44,55 @@ function fixtureKeyFromUrl(): RenderComparisonFixtureKey {
  * to pass on the other, which is precisely how S0's first two attempts got through.
  */
 type MarkerMode = "none" | "both" | "hidden-control";
+
+/**
+ * ADR-023 T-17 — the picker's previews, standalone, so a gate can photograph them.
+ *
+ * T-17 forbids asserting a fact about the host ("this machine does not have Anton"), because that
+ * silently makes the gate depend on the font folder it stands in. The shape that works is to make
+ * the machine demonstrate the difference: each catalogue face is rendered TWICE with identical text,
+ * size and layout — once through its loaded preview face, once through a family name that cannot
+ * resolve to anything. Whatever the host has installed, those two must differ, or the preview is
+ * showing the fallback while claiming to show the font.
+ *
+ * That is the empty-`warpFontCatalog` incident expressed as an assertion: a font surface that
+ * silently shows the fallback looks exactly like one that works.
+ */
+function CataloguePreviewProbe() {
+  useEffect(() => {
+    loadCataloguePreviews();
+  }, []);
+  useSyncExternalStore(subscribeCataloguePreviews, cataloguePreviewVersion, cataloguePreviewVersion);
+
+  const faces = catalogueFaces();
+  return (
+    <section data-render-fixture="ready" data-catalogue-probe="ready" style={{ background: "#fff", padding: 16 }}>
+      {faces.map(({ family, face }) => {
+        const ready = isPreviewLoaded(family, face);
+        const common = { fontSize: 64, lineHeight: 1.2, color: "#000", background: "#fff", width: 320, height: 90 } as const;
+        return (
+          <div key={`${family}-${face.weight}`} style={{ display: "flex", gap: 12 }}>
+            <div
+              data-testid={`catalogue-preview-${family}-${face.weight}`}
+              data-preview-ready={ready ? "true" : "false"}
+              style={{ ...common, fontFamily: `'${previewFamily(family)}'`, fontWeight: face.weight }}
+            >
+              Hamburg
+            </div>
+            {/* The control: same string, same box, a family that resolves to nothing. This is what
+                "the preview is broken" looks like, produced deliberately so it can be compared to. */}
+            <div
+              data-testid={`catalogue-fallback-${family}-${face.weight}`}
+              style={{ ...common, fontFamily: "'Orreris No Such Face'", fontWeight: face.weight }}
+            >
+              Hamburg
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
 
 function markerModeFromUrl(): MarkerMode {
   if (typeof window === "undefined") return "none";
@@ -78,6 +136,12 @@ export function PreviewFixturePage() {
   const fixture = createRenderComparisonFixture(fixtureKeyFromUrl());
   const markerMode = markerModeFromUrl();
   const composition = fixture.graph.composition;
+
+  // T-17's probe is a whole different page, not a variant of the preview — it has no composition and
+  // no VideoPreview, so it must short-circuit before either is touched.
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("catalogue") === "probe") {
+    return <CataloguePreviewProbe />;
+  }
 
   if (!composition) {
     return null;

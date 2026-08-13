@@ -71,6 +71,7 @@ export * from "./text-script";
 export * from "./text-warp";
 export * from "./text-warp-mesh";
 export * from "./font-outlines";
+export * from "./font-catalogue";
 export * from "./font-ingest";
 export * from "./font-install";
 export * from "./font-store";

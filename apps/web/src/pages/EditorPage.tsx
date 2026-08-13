@@ -233,6 +233,7 @@ import type { PlanStep } from "../ai/types";
 import { orisNoteGraphWrite } from "../editor/oris-write-probe";
 import { appendEditCommit, appendHistoryAction } from "../ai/experience/stream";
 import { shouldRecordHistoryEntry, type CommitIntent } from "../editor/gesture-scope";
+import { FontPicker } from "../editor/controls/FontPicker";
 import { NumberControl } from "../editor/inspector/controls/NumberControl";
 import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
@@ -14981,7 +14982,15 @@ function TextGraphicControls({
         </div>
         <div className="graphic-controls">
           <div className="icon-control-row">
-            <FontControl value={layer.fontFamily ?? renderSafeFonts[0].family} onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily }))} onChange={(value) => onChange((item) => ({ ...item, fontFamily: value }))} />
+            {/* ADR-023 S2.5. Picking a catalogue face writes a `fontRef` carrying a `fileHash` —
+                the one write the whole S2 contract is downstream of. Reset returns the layer to the
+                legacy default AND clears the ref, because a stale pin surviving a reset would be a
+                font the user believes they removed still deciding the export. */}
+            <FontPicker
+              value={{ fontFamily: layer.fontFamily ?? renderSafeFonts[0].family, fontRef: layer.fontRef }}
+              onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined }))}
+              onPick={(next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))}
+            />
             <NumberControl icon={<CaseSensitive size={14} />} label="Font size" keyframe={styleKf?.keyframe("style.fontSize", styleKf.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize))} value={styleKf?.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize) ?? layer.fontSize ?? defaultTextStyle.fontSize} min={1} max={1000} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => (styleKf ? styleKf.change("style.fontSize", value) : onChange((item) => ({ ...item, fontSize: value })))} />
           </div>
           <div className="icon-control-row">

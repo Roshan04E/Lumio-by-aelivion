@@ -1,3 +1,4 @@
+import { catalogueFace, catalogueFamily, LEGACY_WARP_FAMILY_ALIASES } from "./font-catalogue";
 import { detectTextScript } from "./text-script";
 import { hasTextWarp, normalizeTextWarp } from "./text-warp";
 import { warpPathCommands, type PathCommand, type WarpBounds } from "./text-warp-mesh";
@@ -28,54 +29,45 @@ interface OpentypeModule {
 }
 
 /**
- * Warp font catalog: primary family -> served binary path (relative to each app's
- * font root). This is the data seam for a future large (Canva-scale) font library -
- * adding fonts is just entries here + hosted files, no engine changes. Families not in
- * the catalog fall back to the default so warp still works while the library grows.
+ * Fallback binary when a family has no catalogue face — warp still works while the library grows.
  *
  * Use `.ttf/.otf/.woff` (opentype.js cannot Brotli-decode `.woff2`).
  */
 export const DEFAULT_WARP_FONT_FILE = "fonts/Roboto-Regular.ttf";
 
-/** One catalog family: the regular binary plus an optional bold cut (weight >= 600 picks bold). */
-export interface WarpFontEntry {
-  regular: string;
-  bold?: string;
-}
-
-// Metric-compatible open fonts for every renderSafeFonts family (2026-07-03 — the catalog was
-// EMPTY, so with warp active every family rendered as the Roboto fallback and "changing the font
-// did nothing", user report). Bold cuts matter: the editor's default text weight is 900, so a
-// regular-only outline makes warping look like a font SWAP (heavy Arial → thin Arimo). Anton is a
-// single-style display face (no bold cut exists). Files are hosted in BOTH apps/web/public/fonts
-// and apps/worker/public/fonts — keep them in sync when adding entries.
-const warpFontCatalog: Record<string, WarpFontEntry> = {
-  Arial: { regular: "fonts/Arimo-Regular.ttf", bold: "fonts/Arimo-Bold.ttf" }, // Arimo = metric-compatible Arial (OFL)
-  Helvetica: { regular: "fonts/Arimo-Regular.ttf", bold: "fonts/Arimo-Bold.ttf" },
-  "system-ui": { regular: "fonts/Arimo-Regular.ttf", bold: "fonts/Arimo-Bold.ttf" },
-  Impact: { regular: "fonts/Anton-Regular.ttf" }, // Anton = classic Impact-style display (OFL)
-  Haettenschweiler: { regular: "fonts/Anton-Regular.ttf" },
-  Georgia: { regular: "fonts/Tinos-Regular.ttf", bold: "fonts/Tinos-Bold.ttf" }, // Tinos = metric-compatible Times (closest hosted serif)
-  "Times New Roman": { regular: "fonts/Tinos-Regular.ttf", bold: "fonts/Tinos-Bold.ttf" },
-  "Courier New": { regular: "fonts/Cousine-Regular.ttf", bold: "fonts/Cousine-Bold.ttf" }, // Cousine = metric-compatible Courier (OFL)
-  Courier: { regular: "fonts/Cousine-Regular.ttf", bold: "fonts/Cousine-Bold.ttf" },
-};
-
-/** Registers/overrides catalog entries (for the future font-library integration). */
-export function registerWarpFonts(entries: Record<string, WarpFontEntry>): void {
-  Object.assign(warpFontCatalog, entries);
-}
-
-/** CSS-style cutoff: weights 600+ use the bold cut when the family has one. */
+/**
+ * ADR-023 S2.5 — resolve a font family (+ weight) to its served binary, THROUGH THE CATALOGUE.
+ *
+ * This used to be `warpFontCatalog`, a hand-maintained `Record<family, {regular, bold}>` sitting
+ * beside `registerWarpFonts`, whose own comment called itself "the data seam for a future large font
+ * library". That future is the catalogue, so the table is gone and this function is now a consumer
+ * of the same rows the picker browses — one place where a face's bytes are named, not two that drift.
+ *
+ * The drift was not hypothetical. That table shipped EMPTY once (2026-07-03): every warped family
+ * fell through to the Roboto fallback, so "changing the font did nothing" reached a user, and the
+ * only symptom was text that looked slightly wrong. `font:catalogue-gate` now re-hashes every row
+ * against the file on disk, which is a check the old shape could not have had.
+ *
+ * Behaviour is deliberately UNCHANGED — same families, same binaries, same 600+ bold cutoff, same
+ * fallback — because the warp path is a render path and this is a refactor, not a feature. Bold cuts
+ * matter: the editor's default text weight is 900, so a regular-only outline makes warping look like
+ * a font SWAP (heavy Arial → thin Arimo).
+ */
+/** CSS-style cutoff: weights 600+ ask for the bold cut. Also keys `loadWarpFont`'s parse cache. */
 function wantsBold(weight: number | undefined): boolean {
   return typeof weight === "number" && Number.isFinite(weight) && weight >= 600;
 }
 
-/** Resolves a font family (+ weight) to its served binary path (relative to the app font root). */
 export function warpFontFile(family: string, weight?: number): string {
-  const entry = warpFontCatalog[primaryFontFamily(family)];
-  if (!entry) return DEFAULT_WARP_FONT_FILE;
-  return (wantsBold(weight) ? entry.bold : undefined) ?? entry.regular;
+  const primary = primaryFontFamily(family);
+  // A layer may name a catalogue family directly (a pinned pick) or a legacy CSS family that has a
+  // metric-compatible stand-in. Direct first: a user who picked Anton means Anton.
+  const catalogueName = catalogueFamily(primary) ? primary : LEGACY_WARP_FAMILY_ALIASES[primary];
+  if (!catalogueName) return DEFAULT_WARP_FONT_FILE;
+  // CSS-style cutoff: 600+ asks for the bold cut, and `catalogueFace` gives the nearest weight the
+  // family actually has — so a single-cut display face like Anton stays itself instead of vanishing.
+  const face = catalogueFace(catalogueName, wantsBold(weight) ? 700 : 400);
+  return face?.file ?? DEFAULT_WARP_FONT_FILE;
 }
 
 /** Resolves a primary font family (e.g. "Courier New") + weight to a font-binary URL. */
