@@ -29,6 +29,7 @@
     "font:catalogue-test": "tsx src/font-catalogue-test.ts",
     "font:index-build": "tsx src/font-index-build.ts",
     "font:index-test": "tsx src/font-index-test.ts",
+    "font:picker-perf": "tsx src/font-picker-perf-gate.ts",
     "font:preview-gate": "tsx src/font-preview-gate.ts",
     "render:linear-gate": "tsx src/render-linear-gate.ts",
     "render:link-gate": "tsx src/render-link-gate.ts",

@@ -14987,7 +14987,15 @@ function TextGraphicControls({
                 legacy default AND clears the ref, because a stale pin surviving a reset would be a
                 font the user believes they removed still deciding the export. */}
             <FontPicker
-              value={{ fontFamily: layer.fontFamily ?? renderSafeFonts[0].family, fontRef: layer.fontRef }}
+              value={{
+                fontFamily: layer.fontFamily ?? renderSafeFonts[0].family,
+                fontRef: layer.fontRef,
+                // S2.6: a pinned ref's weight/style come from the REF, because they describe the
+                // file (`fontRefCss`). So the picker has to be told what the layer is asking for, or
+                // picking a family while Bold is on would silently pin the regular cut.
+                weight: layer.fontWeight ?? defaultTextStyle.fontWeight,
+                italic: layer.italic ?? false
+              }}
               onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined }))}
               onPick={(next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))}
             />

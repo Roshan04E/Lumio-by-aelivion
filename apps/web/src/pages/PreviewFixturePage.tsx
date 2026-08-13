@@ -1,17 +1,24 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   catalogueFaces,
   createRenderComparisonFixture,
+  fontIndex,
   renderComparisonFixtureKeys,
+  renderSafeFonts,
+  type FontIndexFamily,
   type TimelineComposition,
   type RenderComparisonFixtureKey
 } from "@orreris/shared";
 import { VideoPreview } from "../components/VideoPreview";
+import { FontPicker, type FontPickerValue } from "../editor/controls/FontPicker";
 import {
   cataloguePreviewVersion,
   isPreviewLoaded,
   loadCataloguePreviews,
   previewFamily,
+  previewSample,
+  previewState,
+  requestPreview,
   subscribeCataloguePreviews
 } from "../lib/font-catalogue-preview";
 
@@ -94,6 +101,96 @@ function CataloguePreviewProbe() {
   );
 }
 
+/**
+ * ADR-023 S2.6 / T-17 — the same proof, at index scale.
+ *
+ * `CataloguePreviewProbe` covers the five BUNDLED faces, which load from disk and work offline. This
+ * one covers the other ~1900: families whose bytes we do not hold, previewed by fetching from
+ * Google's CSS API through the batched loader the real picker uses. Same shape as T-17 demands —
+ * each family drawn twice, once through its loaded preview face and once through a family name that
+ * resolves to nothing — because the number of rows changes nothing about the failure mode. A list
+ * showing the fallback looks exactly like a list that works whether it has five rows or two thousand.
+ *
+ * The sample is STRIDED across the popularity order rather than taken from the top, so it spans
+ * Latin workhorses, display faces and the non-Latin scripts. A sample of the first N would be ten
+ * Latin sans-serifs, which is the easiest case and the least informative.
+ */
+function CatalogueScaleProbe({ count }: { count: number }) {
+  useSyncExternalStore(subscribeCataloguePreviews, cataloguePreviewVersion, cataloguePreviewVersion);
+
+  const sample = useMemo(() => {
+    const all = fontIndex();
+    const stride = Math.max(1, Math.floor(all.length / count));
+    const picked: FontIndexFamily[] = [];
+    for (let index = 0; index < all.length && picked.length < count; index += stride) picked.push(all[index]!);
+    return picked;
+  }, [count]);
+
+  useEffect(() => {
+    for (const entry of sample) requestPreview(entry.family, previewSample(entry.subsets));
+  }, [sample]);
+
+  const ready = sample.filter((entry) => previewState(entry.family) === "loaded").length;
+  const settled = sample.every((entry) => {
+    const state = previewState(entry.family);
+    return state === "loaded" || state === "unavailable";
+  });
+
+  return (
+    <section
+      data-render-fixture="ready"
+      data-catalogue-probe="ready"
+      data-scale-settled={settled ? "true" : "false"}
+      data-scale-ready={String(ready)}
+      data-scale-total={String(sample.length)}
+      style={{ background: "#fff", padding: 16 }}
+    >
+      {sample.map((entry) => {
+        const state = previewState(entry.family);
+        const common = { fontSize: 56, lineHeight: 1.2, color: "#000", background: "#fff", width: 300, height: 80 } as const;
+        return (
+          <div key={entry.family} style={{ display: "flex", gap: 12 }}>
+            <div
+              data-testid={`scale-preview-${entry.family}`}
+              data-preview-ready={state === "loaded" ? "true" : "false"}
+              style={{ ...common, fontFamily: `'${previewFamily(entry.family)}'` }}
+            >
+              {previewSample(entry.subsets)}
+            </div>
+            {/* The control: same string, same box, a family that resolves to nothing. */}
+            <div data-testid={`scale-fallback-${entry.family}`} style={{ ...common, fontFamily: "'Orreris No Such Face'" }}>
+              {previewSample(entry.subsets)}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+/**
+ * ADR-023 S2.6 — the picker, standalone, so a harness can MEASURE it.
+ *
+ * The plan asks for the scroll to be measured rather than eyeballed, and for picker startup to be a
+ * separate number from steady-state scroll. Mounting the whole editor to get at one control would
+ * fold its startup into every reading; this page is the control and nothing else, so what the
+ * numbers describe is the list.
+ *
+ * It also carries the pick assertion: whatever the picker hands back is written into
+ * `data-picked-ref` verbatim. **The whole S2 contract is downstream of that one write** — a picker
+ * that produced `fontFamily: "Anton"` instead of a ref with a `fileHash` would look identical here
+ * and leave the mirror, the install path and the named abort all unreachable.
+ */
+function PickerProbe() {
+  const [value, setValue] = useState<FontPickerValue>({ fontFamily: renderSafeFonts[0]!.family, fontRef: undefined, weight: 400 });
+  return (
+    <section data-render-fixture="ready" data-picker-probe="ready" style={{ padding: 24, width: 420 }}>
+      <div data-picked-ref={value.fontRef ? JSON.stringify(value.fontRef) : ""} data-picked-family={value.fontFamily} />
+      <FontPicker value={value} onPick={(next) => setValue({ ...next, weight: value.weight })} />
+    </section>
+  );
+}
+
 function markerModeFromUrl(): MarkerMode {
   if (typeof window === "undefined") return "none";
   const raw = new URLSearchParams(window.location.search).get("marker");
@@ -139,8 +236,14 @@ export function PreviewFixturePage() {
 
   // T-17's probe is a whole different page, not a variant of the preview — it has no composition and
   // no VideoPreview, so it must short-circuit before either is touched.
-  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("catalogue") === "probe") {
-    return <CataloguePreviewProbe />;
+  if (typeof window !== "undefined") {
+    const catalogue = new URLSearchParams(window.location.search).get("catalogue");
+    if (catalogue === "probe") return <CataloguePreviewProbe />;
+    if (catalogue === "picker") return <PickerProbe />;
+    if (catalogue === "scale") {
+      const count = Number(new URLSearchParams(window.location.search).get("count")) || 12;
+      return <CatalogueScaleProbe count={count} />;
+    }
   }
 
   if (!composition) {

@@ -183,6 +183,73 @@ async function main(): Promise<void> {
       );
     }
 
+    /* ---- S2.6: the same proof, at index scale. ------------------------------------------------
+     *
+     * The arms above cover the five BUNDLED faces, which load from disk. They say nothing about the
+     * other ~1900, whose bytes arrive over the network through a batched loader — and that is where
+     * a font list quietly becomes a list of names in the UI font. The number of rows changes nothing
+     * about the failure mode, so the shape of the proof does not change either: each family drawn
+     * twice, once through its loaded face and once through a family that resolves to nothing.
+     *
+     * This arm REACHES THE NETWORK, which the rest of this repo's gates deliberately do not. It has
+     * to: the thing under test is a loader that fetches. `FONT_PREVIEW_OFFLINE=1` skips it, and the
+     * skip is loud — an operator choosing to run without a network should know which claim they gave
+     * up, rather than reading a green line that no longer means what it did.
+     */
+    if (process.env.FONT_PREVIEW_OFFLINE === "1") {
+      process.stdout.write("\nSKIPPED the scale arm (FONT_PREVIEW_OFFLINE=1) — the ~1900 remote families are UNPROVEN this run.\n");
+    } else {
+      const sampleSize = Number(process.env.FONT_PREVIEW_SAMPLE) || 12;
+      await page.goto(`${base}/editor/__preview-fixture?catalogue=scale&count=${sampleSize}`, { waitUntil: "networkidle" });
+      const probe = page.locator('[data-catalogue-probe="ready"]');
+      await probe.waitFor({ state: "visible", timeout: 30_000 });
+      // Every family must reach a terminal state — loaded or unavailable — before anything is read.
+      // Photographing a row mid-load would compare the fallback against the fallback and pass.
+      await page.waitForFunction(
+        () => document.querySelector('[data-scale-settled="true"]') !== null,
+        undefined,
+        { timeout: 60_000 }
+      );
+
+      const total = Number(await probe.getAttribute("data-scale-total"));
+      const loaded = Number(await probe.getAttribute("data-scale-ready"));
+      process.stdout.write(`\nscale sample: ${loaded}/${total} families loaded a face\n`);
+      assert.ok(
+        loaded >= Math.ceil(total * 0.75),
+        `only ${loaded} of ${total} sampled families loaded. Either the loader is broken or this machine has no ` +
+          `network — and the two are indistinguishable from here, which is exactly why they must not be papered ` +
+          `over. Re-run with FONT_PREVIEW_OFFLINE=1 to skip this arm deliberately.`
+      );
+
+      const scalePreviews = new Map<string, string>();
+      for (const family of await page.locator("[data-testid^='scale-preview-']").evaluateAll((nodes) =>
+        nodes.filter((node) => node.getAttribute("data-preview-ready") === "true").map((node) => node.getAttribute("data-testid")!.slice("scale-preview-".length))
+      )) {
+        const safe = family.replace(/[^A-Za-z0-9]/g, "_");
+        const preview = await shotHash(page, `scale-preview-${family}`, `scale-${safe}`);
+        const fallback = await shotHash(page, `scale-fallback-${family}`, `scale-${safe}-fallback`);
+        process.stdout.write(`${family.padEnd(24)} preview=${preview.slice(0, 12)}  fallback=${fallback.slice(0, 12)}\n`);
+        assert.notEqual(
+          preview,
+          fallback,
+          `${family}: THE PREVIEW IS THE FALLBACK. The row reports its face as loaded and the face made no ` +
+            `difference — which is the empty-warpFontCatalog incident, in the surface built to replace it, at scale.`
+        );
+        scalePreviews.set(family, preview);
+      }
+
+      // One loaded font standing in for every row would pass the arm above for all but one of them —
+      // the empty-catalogue failure with more rows, which is precisely what the plan warns about.
+      const distinctScale = new Set(scalePreviews.values());
+      assert.equal(
+        distinctScale.size,
+        scalePreviews.size,
+        `${scalePreviews.size} sampled families rendered as only ${distinctScale.size} distinct pictures. ` +
+          `One face is standing in for several rows.`
+      );
+      process.stdout.write(`scale arm PASS — ${scalePreviews.size} remote families, each in its own face, each distinct.\n`);
+    }
+
     process.stdout.write(`\nPASS — ${faces.length} catalogue previews, each in its own face, each distinct, all vs one fallback baseline.\n`);
     process.stdout.write(`screenshots: ${artifactDir}\n`);
   } finally {
