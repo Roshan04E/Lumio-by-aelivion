@@ -13,6 +13,7 @@
 
 ```
 S0  interim: disable warp on shaping-dependent scripts   independent, immediate   ~half a day
+S0b base text direction (RTL)             rides S0's detector; live correctness   ~1 day
 S1  paint-order + stroke                  no manifest change, no schema change   ~1 day
 S2  font reference + catalogue            manifest change (FontRef)              the big one
 S3  user font upload                      storage + asset doctrine
@@ -30,6 +31,11 @@ Ordering rationale, stated because two of these look reorderable and are not:
 - **S0 first, ahead of everything, including S1.** It fixes a live, already-shipped defect
   (D9a/T-12: warp silently renders wrong for shaping-dependent scripts) and depends on nothing else
   in this programme. There is no reason to sequence it behind S1 just because S1 is also small.
+- **S0b immediately after S0, and not later, for one reason: the detector.** S0b is also a live
+  defect (D6a — no base direction anywhere in `packages/shared`), but that is not why it sits here.
+  It sits here because it consumes the *same* script detection S0 builds. Sequenced anywhere else it
+  builds a second detector answering the same question, and two of those drift. If S0 has already
+  shipped a boolean detector, S0b's first task is widening it, not writing another one.
 - **S2 before S6.** A preset that names a font the system cannot provide is a broken preset. The
   library must be able to guarantee its own fonts before it ships presets that use them.
 - **S4 before S5.** S5 adds ~6 style properties. Adding them as loose CSS fields and *then*
@@ -53,6 +59,14 @@ missing feature looked like a working one. This stage makes the gap visible inst
 - Script detection on the layer's text content (a small, targeted check — Unicode block ranges for
   the scripts `opentype.js` glyph lookup cannot shape correctly: Arabic, Hebrew, Devanagari and other
   Indic scripts, Thai, and complex emoji ZWJ sequences).
+- **AMENDED 2026-08-13 (D6a/T-12): the detector returns the detected script and its direction, not
+  a boolean.** Shape it as `{ script, shapingDependent, direction }` — not `boolean`, and not a
+  warp-private helper. S0b consumes the identical detection for `direction: "auto"`, and the whole
+  point of amending mid-flight rather than filing a follow-up is that the second consumer never
+  writes a second detector. Live it in shared text code, not inside the warp module. Warp uses only
+  the `shapingDependent` field; the others exist because the next stage needs them, and that is the
+  one case where anticipating a consumer is correct — the alternative is not "less code," it is
+  "two detectors."
 - When detected on a layer with warp enabled: warp does not apply, and the layer shows a visible
   marked state (reuses the same "degraded, needs attention" vocabulary as D3's font substitution
   banner) rather than rendering the wrong glyphs with no signal.
@@ -68,6 +82,54 @@ with no signal, after this stage it renders unwarped with a visible marker. No p
 fixture needed (there's no "correct warped Arabic" render to compare against yet — that's S7).
 
 **Risk:** very low. Additive, narrow, and does not touch any renderer's shared code path.
+
+---
+
+## S0b — Base text direction: RTL text that is actually right
+
+**Win:** Arabic and Hebrew text lays out correctly — punctuation on the correct side, mixed
+Arabic-and-Latin in the correct order, right-edge alignment by default. Today every text layer in
+every project renders at the CSS initial `direction: ltr`, because `direction`, `dir` and
+`unicode-bidi` appear nowhere in `packages/shared` (verified 2026-08-13). This is a live defect for
+a whole class of users, and it is one that passes our gates: a pure-Arabic run still resolves to
+correct visual order under `ltr`, so a pixel fixture is clean while the render is wrong to anyone
+who reads the script.
+
+**Scope**
+- `direction?: "auto" | "ltr" | "rtl"` on the text layer (ADR-023 D6a). Manifest change, both
+  renderers, one commit (T-9).
+- Emission: `"auto"` → `unicode-bidi: plaintext` (the browser's own first-strong P2/P3 rule);
+  `"ltr"`/`"rtl"` → explicit `direction` with `unicode-bidi: isolate`. **We do not implement
+  first-strong resolution ourselves** (T-5, T-13) — the delegation is the decision.
+- `textAlign` gains `"start"`/`"end"`. Existing `"left"`/`"right"` keep meaning physical left and
+  right, forever, and are never remapped. New text defaults to `"start"`.
+- Defaults: absent `direction` renders exactly as today (`ltr`, physical alignment), permanently, no
+  migration script — the D1a shape, mirroring `LEGACY_PROJECT_COLOR_SETTINGS`. New text is authored
+  `"auto"` with `"start"` alignment. **Two constants, not one default behind a flag**, so *absent*
+  keeps meaning "authored before this existed."
+- Inspector: a direction control on the text layer, defaulting to Auto.
+- Consumes S0's detector for the authoring-time default. Does not re-detect at paint time (T-13).
+
+**Not in scope:** vertical writing modes (CJK `writing-mode: vertical-rl`) — a real feature, a
+different axis, and no one has asked. Warp's own physical anchor logic
+(`font-outlines.ts:278-286`), which maps `left`/`right` to physical CSS positioning: warp is
+disabled for RTL scripts by S0 until S7's rework, so this is inert. **Note it in S7's scope** — when
+warp comes back for shaping-dependent scripts, that anchor must resolve logical alignment against
+`direction`, or warp returns correct glyphs pinned to the wrong edge.
+
+**Verification**
+- A pixel fixture: Arabic text ending in `?`, plus an embedded Latin word, at `direction: "auto"`,
+  both renderers, 0.000%. The two renderers agreeing is the cheap half.
+- **The half that actually matters is not a pixel gate.** Both renderers are Chromium and will agree
+  on a wrong answer as readily as a right one — this is the DEBT-017 class, and the gate's universe
+  is its fixture list. Assert the *emitted CSS* directly: `"auto"` over Arabic content emits
+  `unicode-bidi: plaintext`; an absent `direction` emits neither property, unchanged from today.
+- `render:baseline` at zero tolerance across the commit. The legacy-absent path must be byte-
+  identical — this is the whole claim D6a makes about existing projects, and it is checkable.
+
+**Risk:** low-moderate. The manifest addition is small and the CSS is engine-native. The real risk
+is the alignment change leaking into existing projects, which `render:baseline` is the instrument
+for. If baseline moves by a single byte on a legacy fixture, the legacy split is wrong — stop.
 
 ---
 

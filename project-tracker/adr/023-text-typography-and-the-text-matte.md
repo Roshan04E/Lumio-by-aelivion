@@ -1,6 +1,6 @@
 # ADR-023 — Text, typography, and the text matte
 
-- Status: **Accepted** for the decisions in §2–§6 (D1–D12, D1a, D4a, D9a). **Provisional** for D9
+- Status: **Accepted** for the decisions in §2–§6 (D1–D12, D1a, D4a, D6a, D9a). **Provisional** for D9
   (the raster matte value inside the Flarex compiler), which is accepted in intent and gated on the
   spike in §9/OQ1 before code moves. **D9a is Accepted and NOT gated on OQ1** — warp's rasterize-
   then-deform pipeline is outside the Flarex compiler and does not touch `FlarexMatteValue`; it does
@@ -20,6 +20,10 @@ Amends:      nothing. D9 WIDENS `FlarexMatteValue` (compile-flarex.ts:189-195); 
              `font-outlines.ts`'s `opentype.js` glyph-lookup path from warp (`text-warp.ts`,
              `text-warp-mesh.ts`), replacing vector-outline-then-deform with rasterize-then-
              deform; `opentype.js` itself is retained for D2's name-table ingest parse.
+             D6a (added 2026-08-13) amends D6 WITHIN this document: the first pass asserted
+             that handing text to the browser is sufficient for correct international
+             rendering, and it is not — the UBA also needs a base direction, which no code
+             in `packages/shared` supplies. D6 is not wrong; it was incomplete.
 Evidence base: none yet. Every number in this ADR is an estimate and is labelled as one.
                Contrast ADR-021, which is measured. Do not read this document as measured.
 Related:     `plans/text-and-typography.md` (the staged programme)
@@ -246,6 +250,64 @@ shaping like every other text path, and `font-outlines.ts`'s glyph-lookup route 
 than kept as a standing carve-out. Until D9a ships, D3's interim rule (T-12) applies: warp must
 detect a shaping-dependent script and refuse to apply itself, visibly, rather than render wrong.
 
+### D6a — Base direction is DATA the browser needs, not something the browser infers for us. (Accepted, normative — amends D6, added 2026-08-13 after the first pass missed it)
+
+D6 says shaping belongs to the browser. That is true and it is not sufficient, and the first pass of
+this ADR stopped one step short. **Shaping is not the only input the Unicode Bidi Algorithm needs —
+it also needs the paragraph's base direction, and that is not derivable from the glyph stream.** The
+UBA resolves the *relative* order of runs within a paragraph correctly no matter what, but the
+paragraph embedding level decides where neutrals land, which edge a line starts from, and what
+"align left" even means. We never supply it.
+
+**Verified 2026-08-13: `direction`, `dir` and `unicode-bidi` appear nowhere in `packages/shared`.**
+Every text layer in every project is therefore rendered at the CSS initial value, `direction: ltr`,
+including layers whose content is entirely Arabic or Hebrew.
+
+What this costs is narrower than "Arabic is broken" and worse than it sounds, because it is
+invisible to our own instruments. A pure-Arabic run still resolves to correct visual order under
+`direction: ltr` — the letters look right, and a pixel fixture passes. What breaks is everything
+governed by the base level:
+
+- **Neutrals at the boundaries.** A `?` or `!` closing an Arabic sentence attaches to the wrong end.
+- **Mixed content.** Arabic with an embedded Latin brand name or a number orders wrongly.
+- **Alignment.** RTL text should default to the right edge. `textAlign: "left"` is a *physical*
+  value and stays physical, so RTL text left-aligns.
+- **Wrap and overflow.** Lines start from the wrong edge.
+
+This is the failure mode that survives a gate: it screenshots clean and it is obviously wrong to
+anyone who reads the script. That is precisely why it is being written down as a decision rather
+than left to be noticed later.
+
+**The decision, in three parts:**
+
+**1. Direction is a carried property, not a paint-time inference.** A text layer gets
+`direction?: "auto" | "ltr" | "rtl"`. It travels in the manifest and both renderers read the same
+field (T-9). No renderer sniffs the content at paint time — that is a second text engine by
+accretion, which is the thing D6 exists to prevent.
+
+**2. `"auto"` delegates to the browser; we never implement first-strong ourselves.** `"auto"` emits
+`unicode-bidi: plaintext`, which is the UBA's own P2/P3 first-strong-character rule implemented in
+the engine that already has it. `"rtl"`/`"ltr"` emit `direction` explicitly with
+`unicode-bidi: isolate`. This is T-5 applied to bidi and not just to shaping: we hand over the
+input, we do not reimplement the algorithm.
+
+**3. Absent means legacy, permanently — the D1a shape, again.** An absent `direction` renders
+exactly as today (`ltr`, physical alignment), forever, with no migration script. New text is
+authored `"auto"`. Two constants, never one default behind a flag, so *absent* keeps meaning
+"authored before this existed" — the same discipline as `LEGACY_PROJECT_COLOR_SETTINGS` vs
+`NEW_PROJECT_COLOR_SETTINGS` (`color-management.ts:94-119`). An existing project with Arabic text
+stays as wrong as it is today until its author opts in, and that is the correct trade: a silent
+re-layout of shipped projects is a worse defect than the one it fixes.
+
+**Logical alignment rides along.** `textAlign` gains `"start"`/`"end"`; existing `"left"`/`"right"`
+keep meaning physical left and right and are never remapped. New text defaults to `"start"`. Without
+this, part 1 delivers correctly-ordered text pinned to the wrong edge, which is not a fix.
+
+**One detector, not two.** The script detection T-12 requires for warp and the script detection
+`"auto"` defaulting requires at authoring time are the same question asked twice. It returns the
+script and the direction, not a boolean. This is the whole reason D6a is being written *now*, while
+S0 is in flight, rather than filed as a follow-up: sequenced later, it builds a second detector.
+
 ### D7 — The reachable CSS surface is much larger than four properties, and `paint-order` is first. (Accepted)
 
 In priority order:
@@ -463,7 +525,21 @@ a cleanup task to defer — it is the operational half of what makes D4a's redis
 
 **T-12 — Until warp rasterizes-then-deforms (D9a), it must detect a shaping-dependent script and
 refuse to apply itself visibly, never silently render wrong.** (D9a) Interim only; retired the
-moment D9a ships, at which point warp has no shaping gap left to guard against.
+moment D9a ships, at which point warp has no shaping gap left to guard against. **The detector this
+rule requires returns the detected script AND its direction, not a boolean** — D6a consumes the same
+detection, and two detectors answering one question is how they drift apart.
+
+**T-13 — Base direction is carried in the manifest and read identically by both renderers. No
+renderer infers direction from content at paint time.** (D6a) `"auto"` is delegated to the browser
+via `unicode-bidi: plaintext`; we do not implement first-strong resolution. An absent `direction`
+renders as `ltr` with physical alignment, permanently and without migration.
+
+**T-14 — No feature may re-open the shaping boundary that D9a closes.** (D6a, OQ6) Any operation
+that transforms text below the level of a shaping run — per-character animation is the known case,
+because each animated grapheme cluster becomes its own shaping context and cursive joining breaks —
+must either resolve OQ6 or apply T-12's discipline: detect the shaping-dependent script and disable
+itself visibly. Shipping S9 over Arabic without one of the two reintroduces, in a new feature,
+exactly the defect S7's warp rework was written to remove.
 
 ---
 
@@ -573,6 +649,13 @@ code unit — splitting inside a cluster breaks combining marks, emoji ZWJ seque
 conjuncts. Whether `Intl.Segmenter` is available across both renderers, and what a per-cluster
 transform does to the shaping run (it breaks it — each animated cluster becomes its own shaping
 context, which changes kerning), is unresolved.
+
+**Sharpened 2026-08-13 (D6a):** for Latin this is a kerning question and the answer is "slightly
+wrong spacing, acceptable." For a cursive script it is not — breaking the shaping run breaks
+*joining*, which is the same class of defect as pre-D9a warp, arriving in a new feature after the
+old one was fixed. T-14 makes that non-optional: S9 either resolves this or disables per-character
+animation visibly on shaping-dependent scripts, the way T-12 does for warp. The open part is only
+which of the two; that S9 may not simply ship over it is now decided.
 
 **OQ7 — Does a missing *user* font on a second machine hard-fail export, or relink first?** D3 says
 relink, then hard-fail on decline. But a collaborator who does not *own* the licensed font can never
