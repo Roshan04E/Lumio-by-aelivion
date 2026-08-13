@@ -4,6 +4,7 @@ import { frameProfiler } from "./color/frame-profiler";
 import { COLOR_EFFECT_TYPES, compileColorPipeline, LEGACY_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
+import { detectTextScript } from "./text-script";
 import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, SourceTextKeyframe, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
 
 export interface CompositionTransform {
@@ -39,6 +40,14 @@ export interface CompositionLayerStyleInput {
   textWidthPercent?: number | undefined;
   textAlign?: "left" | "center" | "right" | "start" | "end" | string | undefined;
   direction?: "auto" | "ltr" | "rtl" | undefined;
+  /**
+   * The layer's own text, needed here only so `"auto"` can be RESOLVED at style-resolution time
+   * (ADR-023 T-13 as corrected). It is not a style field and is not in the manifest style bag — the
+   * manifest carries `text`/`textRuns` at the layer's top level, which is what both renderers hand
+   * to `getCompositionTextStyle`.
+   */
+  text?: string | undefined;
+  textRuns?: TextRun[] | undefined;
   textWarp?: TextWarp | undefined;
   fit?: "cover" | "contain" | "fill" | string | undefined;
   blendMode?: BlendMode | undefined;
@@ -708,11 +717,11 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
   // changes anything, so every project authored before this field existed emits exactly the CSS it
   // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
   const strokeUnderFill = (layer.strokePaintOrder ?? style.strokePaintOrder) === "under";
-  // ADR-023 D6a (S0b). ABSENT emits NOTHING — no `direction`, no `unicode-bidi` — so an existing
-  // project keeps rendering at the CSS initial `ltr` exactly as it does today, permanently. Only an
-  // explicit value produces declarations. See TimelineLayer.direction for why absence is not a
-  // default waiting to be changed.
-  const direction = getTextDirection(layer.direction ?? style.direction);
+  // ADR-023 D6a (S0b) / T-13 corrected (S0c). ABSENT emits NOTHING — no `direction`, no
+  // `unicode-bidi` — so an existing project keeps rendering at the CSS initial `ltr` exactly as it
+  // does today, permanently. Only a declared value produces declarations, and `"auto"` is resolved
+  // to a concrete direction HERE so the DOM and the raster cannot answer it differently.
+  const direction = resolveTextDirection(layer.direction ?? style.direction, layer);
   const effectCss = getEffectCss(layer.effects, layer.animations as TimelineKeyframeV2[] | undefined, layer.startSeconds, options.currentTimeSeconds);
   const paddingEmY = animStyleNumber(
     layer,
@@ -754,12 +763,11 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     // letterform. `undefined` (the legacy case) emits no declaration at all, which is what keeps an
     // existing project's CSS byte-identical rather than merely equivalent.
     paintOrder: strokeUnderFill && strokeWidth > 0 ? ("stroke fill" as const) : undefined,
-    // ADR-023 D6a/T-13. `"auto"` hands the paragraph level to the browser's own first-strong rule
-    // (`unicode-bidi: plaintext`) instead of us reimplementing UBA P2/P3 — T-5 is about bidi as much
-    // as about shaping. An explicit direction is ISOLATED so the layer cannot leak its level into,
-    // or inherit one from, whatever DOM happens to surround it in the editor.
-    direction: direction === "ltr" || direction === "rtl" ? direction : undefined,
-    unicodeBidi: direction === "auto" ? ("plaintext" as const) : direction ? ("isolate" as const) : undefined,
+    // ADR-023 D6a / T-13 corrected. Always a CONCRETE direction by the time it reaches here —
+    // `"auto"` was resolved above, once, for both paths. Isolated so the layer can neither leak its
+    // level into, nor inherit one from, whatever DOM happens to surround it in the editor.
+    direction,
+    unicodeBidi: direction ? ("isolate" as const) : undefined,
     whiteSpace: "pre-wrap" as const
   };
 }
@@ -987,8 +995,14 @@ function styleOf(layer: CompositionLayerStyleInput | TimelineLayer) {
  * Fields of {@link CompositionLayerStyleInput} that the manifest carries somewhere OTHER than the
  * style bag: `RenderManifestLayer` has its own top-level slots for them. Excluded here so the
  * exhaustiveness check below is about the style bag and nothing else.
+ *
+ * `text`/`textRuns` (S0c) joined this list because the style resolver reads the layer's content to
+ * resolve `direction: "auto"`. Copying them into the style bag as well would give the same string
+ * two homes that can disagree.
  */
-type NonStyleBagKey = "id" | "startSeconds" | "transform" | "keyframes" | "animations" | "style" | "effects" | "masks" | "blendMode";
+type NonStyleBagKey =
+  | "id" | "startSeconds" | "transform" | "keyframes" | "animations" | "style" | "effects" | "masks" | "blendMode"
+  | "text" | "textRuns";
 
 /** Every style field the manifest's `style` bag is obliged to carry. */
 export type ManifestLayerStyleKey = Exclude<keyof CompositionLayerStyleInput, NonStyleBagKey>;
@@ -1090,6 +1104,66 @@ function getTextAlign(value: unknown): "left" | "center" | "right" | "start" | "
  */
 function getTextDirection(value: unknown): "auto" | "ltr" | "rtl" | undefined {
   return value === "auto" || value === "ltr" || value === "rtl" ? value : undefined;
+}
+
+/**
+ * ADR-023 T-13, **as corrected 2026-08-13** — resolve `"auto"` ONCE, here, and hand both renderers
+ * the same concrete answer.
+ *
+ * S0b delegated `"auto"` to the browser via `unicode-bidi: plaintext`, which is right for a CSS box
+ * and impossible for a canvas: `ctx.direction` takes `"ltr"` or `"rtl"`, there is no `plaintext`, and
+ * BOTH renderers take their pixels from `scene/text-shape.ts`. So `"auto"` silently drew `ltr`
+ * everywhere — measured, byte-identical hashes — and since new text is authored `"auto"`, the
+ * shipped default was "Arabic works if you pick RTL".
+ *
+ * The hazard T-13 exists to prevent is two renderers each deciding for themselves and drifting. This
+ * is the opposite: one function, in shared, at style-resolution time, that both paths consume. The
+ * DOM path is deliberately given the SAME concrete direction rather than being left on `plaintext`,
+ * because a preview resolving per-line while the export resolves per-layer is exactly the divergence
+ * the manifest contract exists to forbid. The accepted cost is one direction per LAYER, not per
+ * line — which is what After Effects and Premiere both do.
+ *
+ * Resolution reads the layer's FULL text, never the typewriter-visible slice
+ * (`getVisibleTextRuns`): direction must not flip midway through a reveal because the first strong
+ * character has not been typed yet.
+ */
+export function resolveTextDirection(
+  declared: unknown,
+  textSource: { text?: string | undefined; textRuns?: TextRun[] | undefined }
+): "ltr" | "rtl" | undefined {
+  const value = getTextDirection(declared);
+  if (value === "ltr" || value === "rtl") return value;
+  // Absent stays absent — no declaration, no resolution, nothing to migrate.
+  if (value !== "auto") return undefined;
+  return detectTextScript(getCompositionTextRuns(textSource).map((run) => run.text).join("")).direction;
+}
+
+/**
+ * ADR-023 T-13a / T-12 — can this layer's text be drawn in VISUAL order at all?
+ *
+ * A line whose runs all share one style is drawn with a single `fillText`, so the engine performs
+ * bidi reordering across the whole line. A line carrying two styles cannot be: canvas 2D exposes no
+ * per-character visual positions, so the raster must place each run itself, in logical order. For
+ * Latin that is invisible; for a shaping-dependent script it is wrong, and T-12's rule is that we
+ * say so rather than emit it silently.
+ *
+ * Deliberately conservative and layer-level, not line-level: the editor cannot run layout, and a
+ * marker that appears only once wrapping happens to put two styles on one line would be worse than
+ * one that appears whenever the combination is possible.
+ */
+export function isTextVisualOrderUnavailable(layer: {
+  text?: string | undefined;
+  textRuns?: TextRun[] | undefined;
+}): boolean {
+  const runs = getCompositionTextRuns(layer);
+  if (runs.length < 2) return false;
+  if (!detectTextScript(runs.map((run) => run.text).join("")).shapingDependent) return false;
+  const signatures = new Set(
+    runs.map((run) =>
+      JSON.stringify([run.bold ?? false, run.italic ?? false, run.color ?? "", run.backgroundColor ?? "", run.fontFamily ?? "", run.fontSizeMultiplier ?? 1])
+    )
+  );
+  return signatures.size > 1;
 }
 
 function getTextShadowCss(

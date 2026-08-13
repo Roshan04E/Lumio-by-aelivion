@@ -73,6 +73,7 @@ import {
   type TransitionWindowSides,
   getLayerAnimations,
   hasTextWarp,
+  isTextVisualOrderUnavailable,
   isTextWarpSuppressed,
   normalizeTextWarp,
   setGlContextBudget,
@@ -3608,6 +3609,11 @@ const PreviewLayer = memo(function PreviewLayer({
     // inspector: the failure this exists to prevent is a wrong render nobody notices, and a user
     // with the warp panel closed would otherwise see silence.
     const warpSuppressed = isTextWarpSuppressed(layer.textWarp, visibleRuns.map((run) => run.text).join(""));
+    // S0c / ADR-023 T-13a + T-12: a line carrying two styles must be placed run by run, in LOGICAL
+    // order, because canvas 2D exposes no per-character visual positions. For Latin that is
+    // invisible; for a shaping-dependent script the render is wrong, so it is announced rather than
+    // emitted silently — the same discipline, and the same marker vocabulary, as warp above.
+    const visualOrderUnavailable = isTextVisualOrderUnavailable(layer);
     // Clip mask (text): the comp-px mask must live on a comp-sized, transform-less wrapper (text is
     // content-sized) so it aligns + stays comp-fixed like the GPU scene path. `null` when unmasked → no
     // wrapper, byte-identical to before. The inner button re-enables pointer events (wrapper is none).
@@ -3664,6 +3670,16 @@ const PreviewLayer = memo(function PreviewLayer({
             style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
           >
             Warp unavailable — this script needs shaping
+          </span>
+        ) : null}
+        {/* S0c / ADR-023 T-13a. Same sibling placement, and for the identical reason (see above). */}
+        {visualOrderUnavailable && !warpSuppressed && interactive ? (
+          <span
+            className="preview-warp-suppressed"
+            data-testid="preview-visual-order-unavailable"
+            style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
+          >
+            Mixed styles on one line — this script won't reorder
           </span>
         ) : null}
         {selected ? (

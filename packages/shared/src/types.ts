@@ -772,9 +772,14 @@ export interface TimelineLayer {
    * level decides where neutrals land, which edge a line starts from, and what "align start" means.
    * That level is not derivable from the glyph stream — it is data, and this is where it lives.
    *
-   * - `"auto"` — the browser's own first-strong rule (`unicode-bidi: plaintext`). We delegate rather
-   *   than reimplement: T-5 is about bidi as much as about shaping.
-   * - `"ltr"` / `"rtl"` — stated explicitly (`unicode-bidi: isolate`).
+   * - `"auto"` — first-strong, RESOLVED once by `resolveTextDirection` at style-resolution time and
+   *   handed to both renderers as a concrete value (T-13 as corrected, stage S0c). S0b delegated it
+   *   to `unicode-bidi: plaintext`, which a CSS box honours and a canvas cannot express at all — so
+   *   the raster both renderers draw from silently rendered every `"auto"` layer `ltr`.
+   * - `"ltr"` / `"rtl"` — stated explicitly.
+   *
+   * Both forms emit `unicode-bidi: isolate` on the DOM path. One direction per LAYER, not per line:
+   * the After Effects / Premiere model, and the accepted cost of resolving `"auto"` ourselves.
    *
    * **ABSENT MEANS `ltr` WITH PHYSICAL ALIGNMENT, permanently, and is never migrated** — the same
    * two-constants shape as {@link TimelineLayer.strokePaintOrder} and `LEGACY_PROJECT_COLOR_SETTINGS`.

@@ -18,11 +18,11 @@
  * alternative to a wider return type is not less code — it is two detectors answering one question
  * about the same string, which is how they drift apart. ADR-023 T-12 states this as an obligation.
  *
- * **Not a rendering decision.** `direction` here is an AUTHORING-TIME reading — what a text layer's
- * base direction should DEFAULT to when it is created. No renderer may call this at paint time to
- * infer direction from content (T-13): direction is carried in the manifest and `"auto"` is
- * delegated to the browser's own first-strong rule via `unicode-bidi: plaintext`. We hand the engine
- * its input; we do not reimplement the UBA.
+ * **Not a paint-time decision.** `direction` here has two legitimate consumers, both outside the
+ * renderers: the AUTHORING-time default a new text layer is created with, and `resolveTextDirection`
+ * (T-13 as corrected, stage S0c), which collapses a declared `"auto"` to a concrete direction ONCE,
+ * in shared, at style-resolution time — so both renderers are handed the same answer. What T-13
+ * forbids is a renderer calling this from inside its own paint path and deciding for itself.
  *
  * Detection is by Unicode script property (`\p{Script=…}`) rather than a hand-maintained block
  * table: both renderers are Chromium and the property data is already in the engine, correct and

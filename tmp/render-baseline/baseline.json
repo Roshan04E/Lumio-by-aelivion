@@ -1,6 +1,6 @@
 {
-  "commit": "c0ce462d2cd8f1abc74bb6b68711349dfd8fc3d1",
-  "capturedAt": "2026-08-13T14:01:31.346Z",
+  "commit": "a1af4ef00901f41bb2c005877249fd35c27f8741",
+  "capturedAt": "2026-08-13T14:55:34.636Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -14,7 +14,7 @@
       "height": 1920
     },
     "bidi-direction": {
-      "sha256": "cf7cd55479021f9733bf4f29172db77c8164a9dea9864af5cd83dee4582477ea",
+      "sha256": "9808c8031e0ebae8414a775f919ae24e17fdff0ab4407d9b9a6d10ed52f697c1",
       "width": 1080,
       "height": 1920
     },

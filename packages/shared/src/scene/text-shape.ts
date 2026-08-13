@@ -179,7 +179,7 @@ function needsItalicSynthesis(ctx: Ctx, italicFont: string): boolean {
   return needed;
 }
 
-interface Word {
+export interface Word {
   text: string;
   font: string;
   color: string;
@@ -255,7 +255,30 @@ function layoutWords(
   return lines.length ? lines : [[]];
 }
 
-function lineWidth(ctx: Ctx, line: Word[]): number {
+/**
+ * ADR-023 T-13a (S0c) — a line whose tokens all share one style is ONE drawable string.
+ *
+ * The word loop places each token at an x computed by the caller, so cross-word bidi reordering can
+ * never happen regardless of `ctx.direction`. Handing the whole line to a single `fillText` is the
+ * only way the engine gets to reorder it. A line with two styles cannot be collapsed — canvas 2D
+ * exposes no per-character visual positions — and stays a token list, which is the case
+ * `isTextVisualOrderUnavailable` warns about.
+ *
+ * Measurement and drawing MUST agree on this, or a collapsed line is centred against a width that
+ * was summed differently; both go through here.
+ */
+export function collapseLine(line: Word[]): Word[] {
+  const first = line[0];
+  if (!first || line.length < 2) return line;
+  const uniform = line.every(
+    (word) => word.font === first.font && word.color === first.color && word.background === first.background
+  );
+  if (!uniform) return line;
+  return [{ ...first, text: line.map((word) => word.text).join(" "), space: false }];
+}
+
+function lineWidth(ctx: Ctx, rawLine: Word[]): number {
+  const line = collapseLine(rawLine);
   let width = 0;
   line.forEach((word, index) => {
     ctx.font = word.font;
@@ -506,19 +529,15 @@ export async function drawTextLayer(
   // which look a layer has. Absent → false → the existing fill-then-stroke order, untouched.
   const strokeUnderFill = style.paintOrder === "stroke fill";
   /**
-   * S0b (ADR-023 D6a). The base paragraph direction the layer DECLARES, never one inferred from its
-   * content (T-13). Canvas 2D takes it as `ctx.direction`, which is what makes `fillText` place
-   * neutrals — a `?` or `!` closing an Arabic sentence, a bracket, a digit run — at the correct end
-   * of each drawn string. Measured, not assumed: flipping this changes an Arabic render and leaves a
-   * pure-Latin one byte-identical.
+   * S0b (ADR-023 D6a), S0c. The base paragraph direction, read from the SAME emitted style object the
+   * DOM path consumes and never inferred here (T-13). Canvas 2D takes it as `ctx.direction`, which is
+   * what makes `fillText` reorder a line and place neutrals — a `؟` closing an Arabic sentence, a
+   * bracket, a digit run — at the correct end.
    *
-   * `"auto"` is the one value canvas cannot express, and this is a KNOWN GAP, not an oversight. CSS
-   * delegates `"auto"` to the browser's first-strong rule via `unicode-bidi: plaintext`; the canvas
-   * API has no equivalent, and resolving it here by reading the content is exactly the paint-time
-   * inference T-13 forbids. So `"auto"` draws at the canvas default (ltr), which is what an
-   * `"auto"` layer renders in BOTH renderers today — measured: the `bidi-direction` fixture's
-   * `"auto"` still is byte-identical to its `"ltr"` still. Closing it needs a product decision
-   * (resolve `"auto"` to a concrete value at AUTHORING time, which T-13 permits), not a change here.
+   * `"auto"` no longer reaches this point: `resolveTextDirection` collapses it to a concrete `"ltr"`
+   * or `"rtl"` at style-resolution time, once, for both renderers (T-13 as corrected). Canvas has no
+   * `unicode-bidi: plaintext` and resolving it HERE — inside the paint path, per frame, in one
+   * renderer — is what the rule forbids.
    */
   const baseDirection = style.direction === "rtl" ? "rtl" : style.direction === "ltr" ? "ltr" : undefined;
   // Only touch the context when the layer actually declares a direction, so a legacy layer's draw
@@ -554,6 +573,22 @@ export async function drawTextLayer(
     }
     const y = lineBoxTop + (lineHeightPx - (lineAscent + lineDescent)) / 2 + lineAscent;
 
+    /**
+     * ADR-023 T-13a (S0c) — draw LINES, not words, wherever the line permits it.
+     *
+     * The loop below places each token at an x the CALLER computed, which means bidi reordering can
+     * never happen no matter what `ctx.direction` says: `"مرحبا Brand بالعالم"` came out in logical
+     * word order even at an explicit `"rtl"`. Setting the base direction fixes the start edge and
+     * reordering WITHIN a drawn string; it cannot fix placement already decided outside the engine.
+     * Collapsing a single-style line to one token hands the whole line to `fillText`, which is the
+     * only thing that can reorder it — and is also fewer measure passes than the loop it replaces.
+     *
+     * A line with two styles cannot be collapsed: canvas 2D exposes no per-character visual
+     * positions, so its runs must be placed individually and therefore logically. That case degrades
+     * VISIBLY (`isTextVisualOrderUnavailable` → the editor marker), per T-12, rather than quietly
+     * emitting the wrong order.
+     */
+    const pieces = collapseLine(line);
     const lw = lineWidth(ctx, line);
     // S0b: resolve the LOGICAL keywords against the layer's DECLARED direction. This is not the
     // paint-time inference T-13 forbids — that is deriving direction from content; this is what CSS
@@ -564,7 +599,7 @@ export async function drawTextLayer(
       : textAlign;
     let x = physicalAlign === "left" ? contentLeft : physicalAlign === "right" ? contentRight - lw : -lw / 2;
     ctx.textAlign = "left";
-    line.forEach((word, wordIndex) => {
+    pieces.forEach((word, wordIndex) => {
       ctx.font = word.font;
       if (wordIndex > 0) x += ctx.measureText(" ").width;
 
@@ -574,7 +609,7 @@ export async function drawTextLayer(
       // slants glyphs, never the span box.
       if (word.background) {
         const wordWidth = ctx.measureText(word.text).width;
-        const nextWord = line[wordIndex + 1];
+        const nextWord = pieces[wordIndex + 1];
         const bridge = word.space && nextWord && nextWord.background === word.background ? ctx.measureText(" ").width : 0;
         ctx.save();
         ctx.shadowColor = "transparent";

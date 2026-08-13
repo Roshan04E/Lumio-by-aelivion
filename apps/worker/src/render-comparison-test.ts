@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { buildRenderManifest } from "@orreris/render-templates";
 import {
+  collapseLine,
+  isTextVisualOrderUnavailable,
+  type Word as SceneWord,
   getCompositionMediaStyle,
   getCompositionShapeStyle,
   getCompositionTextStyle,
@@ -186,10 +189,28 @@ assert.equal(
 assert.equal(renderTextStyle.direction, undefined, "absent direction must emit no `direction`.");
 assert.equal(renderTextStyle.unicodeBidi, undefined, "absent direction must emit no `unicode-bidi`.");
 
-// "auto" delegates to the browser's own first-strong rule. We do not implement UBA P2/P3 (T-5).
-const autoStyle = getCompositionTextStyle({ ...manifestTextLayer, direction: "auto" });
-assert.equal(autoStyle.unicodeBidi, "plaintext", "'auto' must delegate via unicode-bidi: plaintext.");
-assert.equal(autoStyle.direction, undefined, "'auto' must NOT pin a direction — plaintext resolves it.");
+/**
+ * S0c (ADR-023 T-13 CORRECTED) — `"auto"` is RESOLVED, once, in shared, and both paths are handed
+ * the same concrete answer. S0b delegated it to `unicode-bidi: plaintext`, which a CSS box honours
+ * and a canvas cannot express at all, so the raster — the path BOTH renderers take for pixels — drew
+ * every `"auto"` layer `ltr`. These two assertions are the ones that failed before this stage.
+ */
+const autoLatin = getCompositionTextStyle({ ...manifestTextLayer, direction: "auto" });
+assert.equal(autoLatin.direction, "ltr", "'auto' over Latin must RESOLVE to ltr, not defer to plaintext.");
+assert.equal(autoLatin.unicodeBidi, "isolate");
+const autoArabic = getCompositionTextStyle({ ...manifestTextLayer, direction: "auto", text: "مرحبا بالعالم" });
+assert.equal(autoArabic.direction, "rtl", "'auto' over Arabic must resolve to rtl — this is the stage's whole point.");
+assert.equal(autoArabic.unicodeBidi, "isolate");
+// Neutrals are not strong: a layer that opens with a digit or a bracket takes its direction from the
+// first strong character, exactly as UBA P2/P3 does — we consume S0's detector, we do not re-derive.
+assert.equal(getCompositionTextStyle({ ...manifestTextLayer, direction: "auto", text: "\"123 — مرحبا" }).direction, "rtl");
+// Resolution reads the FULL text, never the typewriter-visible slice: direction must not flip
+// mid-reveal because the first strong character has not been typed yet.
+assert.equal(
+  getCompositionTextStyle({ ...manifestTextLayer, direction: "auto", text: "مرحبا بالعالم", textRevealProgress: 0.1 } as never).direction,
+  "rtl",
+  "'auto' must resolve against the whole text, not the revealed prefix."
+);
 
 // Explicit directions are stated and ISOLATED, so a layer neither leaks its level into the
 // surrounding editor DOM nor inherits one from it.
@@ -246,6 +267,52 @@ assert.equal(
 );
 assert.equal((directionManifestLayer.style as Record<string, unknown>).textAlign, "end");
 assert.equal(getCompositionTextStyle(directionManifestLayer).direction, "rtl", "and it must survive the round trip.");
+
+/**
+ * S0c (ADR-023 T-13a) — the case the raster CANNOT draw in visual order, and therefore must
+ * announce. Uniform lines collapse to one `fillText` and reorder; a two-style line has to be placed
+ * run by run, logically. The predicate is what drives the editor marker, so it is asserted here
+ * rather than left to the browser gate.
+ */
+// Latin: two styles, but nothing to reorder — no marker, or every bold word in the product earns one.
+assert.equal(
+  isTextVisualOrderUnavailable({ textRuns: [{ text: "Hello " }, { text: "world", bold: true }] }),
+  false
+);
+// Arabic split into two runs that share a style is still one drawable line.
+assert.equal(isTextVisualOrderUnavailable({ textRuns: [{ text: "مرحبا " }, { text: "بالعالم" }] }), false);
+// Arabic with a genuinely different style on the second run: cannot be reordered, must be announced.
+assert.equal(
+  isTextVisualOrderUnavailable({ textRuns: [{ text: "مرحبا " }, { text: "بالعالم", color: "#ff0000" }] }),
+  true
+);
+assert.equal(isTextVisualOrderUnavailable({ text: "مرحبا بالعالم" }), false, "one run is never the multi-run case.");
+
+/**
+ * S0c (ADR-023 T-13a) — the raster's line collapse, asserted directly.
+ *
+ * This is the property the whole stage rests on: a line drawn as one `fillText` is the only line the
+ * engine can reorder. It gets a pure-function assertion rather than a pixel arm because there is no
+ * pixel-invisible way to force the run-by-run path (see the note in `text-direction-falsifier.ts`) —
+ * and because a millisecond assertion that names the defect beats a two-minute render that cannot.
+ */
+const w = (text: string, over: Partial<SceneWord> = {}): SceneWord =>
+  ({ text, font: "700 90px Inter", color: "#fff", background: undefined, fontSize: 90, space: false, ...over });
+
+// The common case — captions and titles. Three tokens in, one drawable string out.
+assert.deepEqual(
+  collapseLine([w("مرحبا"), w("Brand"), w("بالعالم؟")]).map((piece) => piece.text),
+  ["مرحبا Brand بالعالم؟"],
+  "a single-style line must collapse to ONE token, or the engine never gets to reorder it."
+);
+// A genuinely different-looking run cannot be collapsed — canvas 2D has no per-character visual
+// positions to place the second run at. It stays a token list, and the editor marks the layer.
+assert.equal(collapseLine([w("مرحبا"), w("Brand", { color: "#f00" })]).length, 2);
+assert.equal(collapseLine([w("a"), w("b", { font: "400 40px Inter" })]).length, 2);
+assert.equal(collapseLine([w("a"), w("b", { background: "#ff0" })]).length, 2);
+// Degenerate inputs are returned untouched rather than reshaped.
+assert.equal(collapseLine([]).length, 0);
+assert.equal(collapseLine([w("solo")])[0]!.text, "solo");
 
 const previewShapeStyle = getCompositionShapeStyle(shapeLayer);
 const renderShapeStyle = getCompositionShapeStyle(manifestShapeLayer);
