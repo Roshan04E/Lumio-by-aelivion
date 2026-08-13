@@ -152,3 +152,51 @@ cleared the implementation; the fixture flakes identically without it.
 
 **Not the cause, ruled out with evidence:** orphaned Chromium processes (71 of them, real but
 unrelated), the `fract(sin())` hash of v4, and ADR-012 S4.5/S4.6.
+
+## v6 — defect (1) fixed with a readiness gate; defect (2) does not reproduce (2026-08-13)
+
+**Fix for (1).** `render-pixel-comparison.ts` gained `awaitCaptureReadiness`, called where the blind
+`page.waitForTimeout(250)` used to be the ONLY wait: it polls the same present ledger `v5`'s own
+`PIXEL_READY_OBSERVE` instrument reads, for the same "settled" condition (a composite on record with
+`notReady === 0`), bounded at 10s (`CAPTURE_READY_POLL_BUDGET_MS`, same figure `v5`'s post-capture
+poll already used). The 250ms sleep is UNCHANGED and still runs — but now strictly after readiness is
+confirmed, as the GPU-present buffer it was always documented as (a different, narrower race: content
+logically settled a frame or two before the GPU has actually painted it — see the comment at the call
+site). This costs ordinary fixtures nothing: they are already settled by the time the fonts/images wait
+above finishes, so the first poll returns immediately. `flarex-generators` is the one fixture that
+actually waits, for as long as it genuinely needs (measured 5.9-13s below).
+
+If the poll times out unsettled, the gate now logs which fixture, how long it waited, and that the diff
+comparison below is expected to fail loudly as a result — so a real failure is attributable at read
+time instead of costing another investigation like this one.
+
+**Defect (2) — "the frame genuinely never settles" — does NOT reproduce, on the same instrument and
+the same bound that caught it.** This is reported as non-reproduction, not as a fix: nothing was
+changed that specifically targets it, and no cause is claimed. Evidence:
+
+- 6 isolated single-fixture runs (`PIXEL_FIXTURES=flarex-generators`, `PIXEL_READY_OBSERVE=1`):
+  settled at 5.9s-13.0s every time (the 13s outlier was a cold vite/shader-compile run), zero
+  `neverSettled`.
+- 3 full 76-fixture sweeps, post-fix, default settings: `flarex-generators` read **0.000%
+  (0/2073600)** every time — the same reading the ORIGINAL v5/v3 investigations already got on their
+  clean runs, now reproduced with the gate actually asserting readiness rather than racing it.
+- The discriminating fact: v5's `neverSettled` reading was not a slow settle — it was measured against
+  a FULL 10-second poll (the same bound this fix now uses to GATE capture) and still never arrived.
+  If defect (2) still existed today, this fix's own bound would have hit it and logged a TIMED OUT
+  line at least once across 9 runs. It did not, on any run.
+- No specific commit is named as the cause. Plausible candidates in the 10 days since v5 include the
+  DEBT-009/DEBT-013 admission and liveness fixes and the ADR-012 slices that landed in between, but
+  none of them was written against this symptom and attributing it to one would be a guess.
+
+**Re-registration trigger, not a close-and-forget:** the readiness gate's own TIMED-OUT log line is
+now the instrument. If `flarex-generators` (or any fixture) ever prints it again, defect (2) is back,
+attributed to whichever run produced the line, and this entry re-opens with that evidence rather than
+starting from "a readiness race at capture time" a third time.
+
+**Bar tightened.** `flarex-generators` moved off the loose global 3.5% bar onto 0.005 (same tier as
+its `flarex-*` siblings), on the 3 clean 0.000% sweeps above. `advanced-transition` — unrelated,
+untouched — stays on the loose bar.
+
+**Verify:** `pnpm --filter @orreris/worker typecheck` clean. 3 consecutive full `render:compare:pixels`
+sweeps (`PIXEL_BROWSER_CHANNEL=chrome`), 76/76 passing each time, `flarex-generators` at 0.000% in all
+three.

@@ -36,13 +36,17 @@ const maxDiffRatio = Number(process.env.PIXEL_MAX_DIFF_RATIO ?? 0.035);
 // web-preview capture is not byte-deterministic run to run (see v32m: max channel delta 8/255), but
 // that jitter sits under pixelmatch's perceptual `threshold` and contributes ~0 differing pixels.
 //
-// Deliberately NOT listed: `flarex-generators` (procedural generator noise is genuinely
-// non-deterministic across renderers) and `advanced-transition` (close to the global budget). Both
-// keep the loose global bar until someone investigates why they need it.
+// Deliberately NOT listed: `advanced-transition` (close to the global budget, unrelated to the
+// capture-timing defect below — keeps the loose global bar until someone investigates why it needs it).
 // Updated 2026-08-09: re-measured across five separate sweeps this week (different sessions, different
-// machine states) — `flarex-generators` now reads 0.000% and `advanced-transition` reads 2.809% (80%
-// of the 3.5% global budget), not the 0.691%/3.131% originally recorded above. Figures only; neither
-// bar nor the global threshold changed.
+// machine states) — `advanced-transition` reads 2.809% (80% of the 3.5% global budget), not the 3.131%
+// originally recorded above. Figures only; neither bar nor the global threshold changed.
+//
+// `flarex-generators` MOVED OFF the loose bar 2026-08-13 (project-tracker/infrastructure.md v6): its
+// 0.000%-vs-86.895% flake was a capture-timing race (`awaitCaptureReadiness` in this file), not
+// picture non-determinism, and it is now gated on the same instrument that measures it rather than on
+// a blind sleep. Measured 0.000% on 3 consecutive full sweeps post-fix, against a documented ~40%
+// failure rate pre-fix — see 0.005 below, same tier as its siblings.
 //
 // An explicit PIXEL_MAX_DIFF_RATIO overrides every per-fixture bar — the escape hatch for a machine
 // whose GPU rasterizes differently enough to make the tight bars flaky.
@@ -70,6 +74,7 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
   // agree on it exactly.
   "flarex-tracked-mask-early": 0.005,
   "flarex-tracked-mask-late": 0.005,
+  "flarex-generators": 0.005,
   /**
    * Stabilize is the one new fixture that cannot hold a 0.5% bar, and the reason is worth stating
    * rather than hiding behind the 3.5% global.
@@ -244,7 +249,7 @@ async function main() {
       const extra = process.env.PIXEL_URL_EXTRA ? `&${process.env.PIXEL_URL_EXTRA}` : "";
       const url = `${baseUrl}?fixture=${encodeURIComponent(key)}&rendererMode=${rendererMode}${extra}`;
       const previewFramePath = path.join(artifactDir, `web-preview-${key}.png`);
-      const readiness = await capturePreviewFrame(url, previewFramePath);
+      const readiness = await capturePreviewFrame(url, previewFramePath, key);
       if (readiness) readinessObservations.push({ fixture: key, ...readiness });
       previews.set(key, previewFramePath);
     }
@@ -427,7 +432,58 @@ async function readLedgerWithClock(page: import("playwright").Page) {
   });
 }
 
-async function capturePreviewFrame(url: string, outputPath: string): Promise<Omit<ReadinessObservation, "fixture"> | null> {
+/**
+ * READINESS GATE (2026-08-13) — replaces a blind sleep with an assertion, for the one fixture the
+ * fixed 250ms floor below was never sized for.
+ *
+ * `flarex-generators` settles 5.9-13s into a fresh page load — its procedural noise genuinely takes
+ * that long to produce a first coherent frame — while every other fixture in the sweep settles
+ * within the fonts/images wait above, well under a second. A fixed sleep sized for the fast
+ * fixtures RACES the slow one: `PIXEL_READY_OBSERVE=1` (see the instrument below) measured a 40%
+ * failure rate for this fixture in a 25-run interleaved sweep at HEAD (2026-08-03) — every failing
+ * run reading `notReady:2`/`neverSettled` at the 250ms mark, every passing run reading a real settle
+ * between 5.9s and 13s later. The fixture was not flaky; the wait was blind to what it was waiting
+ * for, and whether a run passed depended on ambient page-load cost (vite warmth, browser startup
+ * jitter) that happened to already exceed 250ms, not on anything about the fixture itself.
+ *
+ * So: poll the SAME ledger the diagnostic instrument reads, for the SAME "settled" condition (a
+ * composite on record with `notReady === 0` — every participating source has delivered a frame),
+ * bounded at `CAPTURE_READY_POLL_BUDGET_MS` — comfortably above every settle time measured on this
+ * fixture, including the cold-start outlier. This is the actual defect's readiness signal, not a
+ * proxy for it, and it costs ordinary fixtures nothing: they are already settled by the time this
+ * runs (the fonts/images wait above already exceeds their settle time), so the first poll returns
+ * immediately.
+ *
+ * `ledgerPresent === false` means the page never published a ledger at all — `RENDERER_MODE=legacy`
+ * (the pre-WebGL DOM path never calls `notePresent`/`noteHeld`, see `ScenePreviewCanvas.tsx`) or
+ * diagnostics explicitly disabled via `?kernelDiagnostics=0`. There is nothing observable to assert
+ * readiness FROM in that case — logged once and returned immediately, rather than silently burning
+ * the whole poll budget on an instrument that will never report on this run.
+ */
+const CAPTURE_READY_POLL_BUDGET_MS = 10_000;
+
+async function awaitCaptureReadiness(page: import("playwright").Page, fixture: RenderComparisonFixtureKey): Promise<void> {
+  const pollStart = Date.now();
+  while (Date.now() - pollStart < CAPTURE_READY_POLL_BUDGET_MS) {
+    const reading = await readLedgerWithClock(page);
+    if (!reading) {
+      console.log(
+        `[${fixture}] readiness gate: no __rfPresentLedger on this page (legacy renderer or ` +
+          `diagnostics off) — nothing observable to wait on, falling back to the fixed pre-capture wait.`
+      );
+      return;
+    }
+    if (reading.firstSettledAtMs !== null) return; // A settled composite is on record. Ready.
+    await page.waitForTimeout(50);
+  }
+  console.log(
+    `[${fixture}] readiness gate: TIMED OUT after ${CAPTURE_READY_POLL_BUDGET_MS}ms with no settled ` +
+      `composite on record — capturing anyway. The diff comparison below is expected to fail loudly; ` +
+      `this line is what makes that failure attributable instead of mysterious.`
+  );
+}
+
+async function capturePreviewFrame(url: string, outputPath: string, fixture: RenderComparisonFixtureKey): Promise<Omit<ReadinessObservation, "fixture"> | null> {
   // PIXEL_BROWSER_CHANNEL lets a dev without the Playwright-managed Chromium fall back to an
   // installed channel ("msedge"/"chrome"); default uses the bundled Chromium.
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
@@ -460,11 +516,18 @@ async function capturePreviewFrame(url: string, outputPath: string): Promise<Omi
       );
     });
 
-    // Give the scene compositor's rAF a couple frames to paint its first result (same settle its
-    // sibling gate scene-compositor-compare.ts always had). Without it the screenshot races the first
-    // GPU present and randomly captures a BLACK canvas (~88% diff on arbitrary fixtures per run —
-    // verified 2026-07-07: failing web captures meanLuma≈0 vs remotion≈110, differing fixture sets
-    // across identical-code runs). Capture-sync only; thresholds and rendering are untouched.
+    // Wait for CONTENT readiness first — see awaitCaptureReadiness's own header. This is what
+    // replaces the old blind sleep for flarex-generators; it is a no-op in elapsed time for every
+    // fixture that was already settled by the fonts/images wait above.
+    await awaitCaptureReadiness(page, fixture);
+
+    // THEN give the scene compositor's rAF a couple frames to paint its first result (same settle its
+    // sibling gate scene-compositor-compare.ts always had). This is a DIFFERENT race from the one
+    // above — content can be logically "settled" a frame or two before the GPU has actually presented
+    // it — and without this the screenshot can still race that GPU present and randomly capture a
+    // BLACK canvas (~88% diff on arbitrary fixtures per run — verified 2026-07-07: failing web
+    // captures meanLuma≈0 vs remotion≈110, differing fixture sets across identical-code runs).
+    // Capture-sync only; thresholds and rendering are untouched.
     await page.waitForTimeout(250);
 
     // NOTHING may touch the page between the sleep and the screenshot. The first version of this

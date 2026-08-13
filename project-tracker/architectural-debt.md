@@ -12,7 +12,13 @@ new expiry condition and explicit sign-off. It may not silently persist.
 **Debt may not be extended by a PR that is not paying it down.** The Detection field exists so a
 reviewer can notice when a change is deepening a compromise rather than resolving it.
 
-Entries are never rewritten. To change one, append a new dated note under it.
+The problem/solution body is never rewritten; to change it, append a new dated note under it.
+
+**`Status` and `Expiry condition` are current state, not history (see `README.md`, "State fields
+vs. history").** Edit them in place when the truth changes, and add one line to the body noting
+what the field said before and when it changed — append-only covers that correction the same way
+it covers everything else. A `Status:` line that contradicts the entry's own latest update is not
+open, retired, or parked — it is simply wrong, and costs a full read to discover.
 
 ---
 
@@ -290,7 +296,7 @@ Entries are never rewritten. To change one, append a new dated note under it.
   enumerable), THEN re-run the pair — clause two is the acceptance for clause one, not a substitute.
 
 ### DEBT-010 — the node-thumbnail cache key omits ADR-009's ContextVersion
-- Status: open (LATENT — the symptom is gone, the defect is not)
+- Status: **RETIRED 2026-08-09** (see the closing update at the end of this entry)
 - Registered: 2026-08-05 (surfaced by the DEBT-009 latch investigation)
 - Reason: `flarex-node-thumbnails.ts` keys its cache on `NodeContentHash` alone
   (`:139-143`, `:169`), omitting the **ContextVersion** ADR-009 requires. A thumbnail captured before
@@ -325,6 +331,10 @@ Entries are never rewritten. To change one, append a new dated note under it.
   touched**. It resurfaces whenever a first render lands before decode — a large asset, a cold OPFS —
   which is rarer now but not gone. An entry exists precisely because "the symptom stopped" is the
   weakest possible evidence that a cache-identity defect is fixed.
+- **Header updated 2026-08-13:** Status was "open (LATENT — the symptom is gone, the defect is
+  not)" from registration. It should have flipped the day this update below landed; the register's
+  old append-only-header convention left it stale for four days. See `README.md`, "State fields
+  vs. history."
 - **RETIRED (2026-08-09).** Fixed by sidestepping the ContextVersion question rather than answering it:
   readiness is an EVENT, not a state, so it does not need a version number — it needs the existing
   "not ready, try later" contract `SceneViewerCaptureHandle.renderFlarexNodeThumbnail` already had for
@@ -542,12 +552,19 @@ loses the ability to interpret its own numbers.
 
 ### DEBT-012 — CLASS: proof by a signal the subject never emits
 
-- Status: **open** (registered as a META-CLASS with two instances, not as one bug)
+- Status: **open** (registered as a META-CLASS; now documents at least four shapes — see body:
+  instance 1 liveness/DEBT-009, instance 2 declaration/F2, a mirror-image "precondition that
+  cannot pass," a "counter maintained on some paths and not others," and "verifying the wrong
+  SUBJECT" — plus a related but distinct shared-tree-collision pattern recorded here for proximity)
 - Registered: 2026-08-05 (ADR-013 Phase 0)
 - Reason: a health signal is verified against something **asserted upstream** rather than **observed from the subject**. The signal cannot fail, so it reads clean *because* the defect is present. This is the shape shared by DEBT-009 and by F2 below, and naming it is what makes it reviewable instead of rediscoverable.
 - Invariant affected: none directly — this is a class of *evidence* defect, which is why it evades invariant checks
 - Owner: unassigned
-- Expiry condition: none — a class entry retires when both instances retire and no third is found
+- Expiry condition: none — a class entry retires when every documented shape/instance retires and
+  no new one is found for a sustained period. (Originally written "when both instances retire and
+  no third is found"; retired 2026-08-13 as a condition — a third, fourth, and fifth shape were
+  found while it was still worded as a count of two, which is the same header-drift class this
+  register now has a convention for. See `README.md`, "State fields vs. history.")
 - Detection: **ask what the subject itself did.** If the answer is "something else supplied the value on its behalf", the signal is a fabrication. A health metric that has never been observed *failing* on a real defect is the leading indicator.
 
 **Instance 1 — liveness (DEBT-009).** Liveness was proved by *"the grade pass touched it this frame"* —
@@ -696,9 +713,16 @@ time it costs someone an hour.
 - Invariant affected: **ADR-012 §6.11 (violated)**; I-40's aging requirement unmet in practice
 - Owner: unassigned
 - Expiry condition: a source denied at mount is subsequently admitted, or is declared permanently denied, on a fixture with more sources than slots
-- Planned slice: ADR-020 §5 slice **A** (§6.11 recovery)
+- Planned slice: **none currently accepted** (was "ADR-020 §5 slice A (§6.11 recovery)" through
+  2026-08-10; the 2026-08-09/10 duty-cycle measurement in this entry refutes the mechanism that
+  slice was built against — see the 2026-08-12 phase 1 read, "The remedy the entry's own header
+  names is no longer the operative one." No successor slice has been proposed; the reachable-MediaIn
+  fixture named in that read is the next instrument, not a fix.)
 - Tracking issue: —
 - Detection: any change that adds a retention path, or removes an admission decision point, without adding a compensating re-ranking opportunity. Also: `deniedForMs` failing to accumulate for a candidate that is losing.
+- **Header updated 2026-08-13:** see the Planned-slice correction above. Status ("open —
+  USER-VISIBLE DEFECT, raised to the founder 2026-08-06") is unchanged because it remains accurate;
+  only the named remedy had drifted. See `README.md`, "State fields vs. history."
 
 **The mechanism, measured.**
 
@@ -1444,10 +1468,13 @@ at all.
 
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
-- Status: **open — PARKED, deliberately not chased (2026-08-08)**
+- Status: **RETIRED 2026-08-12** (see the closing update at the end of this entry)
 - Registered: 2026-08-08, from the ADR-013 real-project measurement and its counterfactual
 - Invariant affected: none directly; this is the defect the `preferSoftwareDecode` rule has been arguing
   *around* rather than addressing.
+- **Header updated 2026-08-13:** Status was "open — PARKED, deliberately not chased (2026-08-08)"
+  from registration through the 2026-08-12 phase 1 read. See `README.md`, "State fields vs.
+  history."
 
 **The finding, in one line: Host C's host clip is routed to `element` in every arm of BOTH conditions —
 6 of 6 runs, at `> 1` and at `> 0` alike.** The threshold changes which engine the *loader* gets
@@ -1583,15 +1610,15 @@ a conclusion, but worth knowing before writing the next evaluate.
 
 ### DEBT-015 — CLASS: an error path that reports COMPLETION, so a failure ships as product output
 
-- Status: **open** (registered as a CLASS. Update 2026-08-09: instances 1, 2, and 4 fixed; instance 3
-  measured **dormant** and deliberately unchanged; the one remaining audit row (`:784-793`, the
-  stale-handle release) is now also **measured dormant** rather than reasoned-only — see the audit
-  update below. The 2026-08-09 exhaustive audit confirmed every `delayRender`/`continueRender`/
-  `cancelRender` call site and every catch/finally/cleanup path in `apps/worker/` lives in exactly one
-  file (`SceneStage.tsx`), and all of them are now accounted for. This entry is left **open** rather than
-  flipped to retired in this pass: the expiry condition names "the export pipeline," a broader claim than
-  one grep-verified file, and retiring a CLASS entry is a call left to the founder rather than inferred
-  from an instance count reaching zero.)
+- Status: **open** (registered as a CLASS. As of 2026-08-10: **both known scopes are fully audited
+  and every identified live instance is fixed** — worker/Remotion export (`SceneStage.tsx`,
+  instances 1/2/4 fixed, instance 3 and the stale-handle row measured dormant) and browser/local
+  export (`apps/web/src/export/`, one live instance plus three ambiguous rows, all fixed, including
+  the 20s audio-mixdown budget replaced by measurement). Left **open** rather than flipped to
+  retired: the expiry condition names "the export pipeline," broader than the two directories
+  audited — the API-layer mock processing service is explicitly out of scope per CLAUDE.md, not
+  evidence the class is closed — and retiring a CLASS entry on a shrinking instance count is a call
+  left to the founder rather than inferred here.)
 - Registered: 2026-08-09 (from an intermittent `render:compare:pixels` failure)
 - Reason: an export's error handler had exactly one job it could not do — there is no safe degraded
   output for a render. Faced with a composite that threw, `SceneStage.tsx` set `complete = true` and
@@ -1609,6 +1636,11 @@ a conclusion, but worth knowing before writing the next evaluate.
 - Detection: **a `catch` that sets a success/completion flag.** Concretely, in any Remotion component:
   a `continueRender()` reachable from a `catch`, or any assignment of a completion variable inside one.
   The grep is `catch` within a few lines of `continueRender` or `complete =`.
+- **Header updated 2026-08-13:** Status previously froze at the 2026-08-09 exhaustive-audit state
+  and did not reflect the 2026-08-10 update that fixed every remaining ambiguous row in the
+  browser-export scope (the "Status line NOT changed" note inside that update was a deliberate
+  choice under the old convention, not an oversight — reworded now that the convention itself
+  changed). See `README.md`, "State fields vs. history."
 
 **How it surfaced, and why it is a production bug rather than a lab curiosity.** `render:compare:pixels`
 failed once at `e448b0d` with `flarex-unified-color` at **78.506% (1627901/2073600)** against a 0.500%
@@ -2283,7 +2315,7 @@ workspace to mount, not the assertion itself.
 
 ### DEBT-018 — a recovery the code declares available was never performed (paused WC fallback)
 
-- Status: **fixed — one acceptance link (A3, exhaustion) remains observed-never, not disproven**
+- Status: **RETIRED 2026-08-12** (see the closing update at the end of this entry)
 - Registered: 2026-08-09 (a four-round measurement chain: D1-D4 seek-delay probe → path/cap-contention
   audits → E1-E4 seek-triggered demotion → F1-F4 telemetry-confirmed the `pausedStall` site, WRONG on
   the first-proposed `busyWedge` site → G1-G4 confirmed the seek is required and a full remount DOES
@@ -2310,6 +2342,11 @@ workspace to mount, not the assertion itself.
   copied from ScenePreviewCanvas's context-loss ladder / SceneStage's DEBT-015 composite ladder
   specifically so it stays legible; diverging from that shape without re-justifying it here is the thing
   Detection exists to catch.
+- **Header updated 2026-08-13:** Status was "fixed — one acceptance link (A3, exhaustion) remains
+  observed-never, not disproven" from 2026-08-09 A1/A2 acceptance through the 2026-08-12 phase 1
+  read — even though the SAME 2026-08-09 update, later in this entry, records A3 confirmed by
+  injection. This is the exact drift the 2026-08-12 phase 1 read below names and the register now
+  has a convention for. See `README.md`, "State fields vs. history."
 
 **The fix, one paragraph.** `WebglMediaLayer.tsx`'s paused-stall branch now calls
 `scheduleWcPausedRecovery()` instead of only falling back: up to `MAX_PAUSED_WC_RECOVERY_ATTEMPTS` (3)
@@ -2432,7 +2469,8 @@ vehicle works, and 013's gap is upstream of it.
 
 ### DEBT-019 — a source provider holds the WHOLE file in memory, so residency scales with clip length
 
-- Status: open
+- Status: **open — PARKED WITH A TRIGGER (2026-08-12)**, blocked on ADR-021 step 2's I-P6 budget
+  and nothing before it; see the closing update at the end of this entry
 - Registered: 2026-08-10 (surfaced by the ADR-021 pull-model feasibility measurement, not by a slice)
 - Reason: `fetchSourceBlob` (`apps/web/src/export/webcodecs-decoder.ts`) materialises the entire
   source file as a `Blob` and the provider retains it for its whole lifetime, because the chunk
@@ -2448,9 +2486,17 @@ vehicle works, and 013's gap is upstream of it.
   Resource Manager's accounting and to every budget built on it. Same shape as DEBT-003 (accounted
   but not owned), one level worse: not accounted either.
 - Owner: unassigned
-- Expiry condition: a provider's resident bytes are bounded by a budget that does not grow with
-  source duration — i.e. the encoded-sample window is demand-paged and evictable, and total
-  provider residency is reported to whatever authority enforces ADR-021's I-P6 memory budget.
+- Expiry condition (restated 2026-08-12, see the phase-1/2a/2b updates below for why): the
+  original wording — "the encoded-sample window is demand-paged and evictable" — is **already
+  satisfied** and was never the unbounded term; the window (`WINDOW_MAX_SPAN_BYTES`, 24 MB) was
+  bounded from the start. Current condition: **for a LOCAL source, the decode path retains zero
+  whole-file copies** (`sourceResidentBytes().copiedBytes` reads 0 on a local-only project, at
+  every rung) **plus 25 bytes × sample count for the sample index** (≤0.09 MB for a 2-minute 30fps
+  source, ≤0.5 MB for 10 minutes, ≤2.7 MB per hour), **plus the 24 MB transient chunk window** —
+  with total provider residency reported in BYTES (never provider count) to whatever authority
+  enforces ADR-021's I-P6 budget. This does NOT claim total residency is duration-flat: a ~15
+  MB/source residual at N=100 is real, measured, and UNATTRIBUTED — see the park below, which is
+  what keeps this entry open rather than retiring on the restated condition alone.
 - Planned slice: none yet. ADR-021 step 2 cannot ship its I-P6 budget honestly while the dominant
   per-source term is unbounded and untracked, so this is a likely prerequisite rather than a
   follow-up.
@@ -2460,6 +2506,10 @@ vehicle works, and 013's gap is upstream of it.
   site whose count is bounded by the project's asset count or a comp's node count instead of by a
   small constant. Also — a memory budget expressed in **provider count** rather than in **bytes** is
   this debt being extended, because count is only a proxy for bytes while clip lengths are similar.
+- **Header updated 2026-08-13:** Status was plain "open" from registration; Expiry condition named
+  the encoded-sample window as the unbounded term. Both were superseded by the entry's own
+  2026-08-12 phase-1 measurement (the window was never unbounded; the Blob was) and 2b's restated
+  ceiling. See `README.md`, "State fields vs. history."
 
 **Measurement (2026-08-10, `plans/adr-021-pull-model-feasibility.md`).** N live providers over
 distinct 1280×720 sources, sum of all `chrome.exe` working sets, fresh browser per rung with a

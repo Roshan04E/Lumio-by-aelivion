@@ -6,6 +6,28 @@ do NOT edit the old entry — add a NEW version entry stating what was wrong/inc
 previous version's fix and what the new version changes. The history of wrong turns is the value:
 it stops us re-walking them.
 
+## State fields vs. history (2026-08-13)
+
+Append-only governs the PROBLEM/SOLUTION body — the reasoning trail — and that part is never
+rewritten. It was never meant to cover an entry's **state fields** (in `architectural-debt.md`:
+`Status` and `Expiry condition`; the equivalent in other category files is whatever line answers
+"is this still a problem"). Those are current state, not history, the same way a `git status`
+line is current state even though the commits under it are immutable. State fields MUST stay
+accurate as of the latest update — edit them in place when the truth changes.
+
+This split exists because the append-only reading was tried and cost real time: entries whose
+last body update had already resolved the question (DEBT-013 phase 1 read, DEBT-018, DEBT-010)
+kept a stale `Status:` line that said otherwise, because "append, never rewrite" was applied to a
+field it was never meant to govern. Append-only protects the reasoning trail from being sanded
+down into a false narrative. Leaving a status line wrong protects nothing — it just misleads the
+next reader, who reasonably stops at the header before reading 40 updates deep.
+
+**The rule going forward:** when a state field changes, edit it in place, and add one line to the
+body immediately below the field block: `**Header updated <date>:** was "<old text>" — see the
+<date> update below.` That line is itself append-only history (it is never later removed), so the
+correction is preserved exactly the way the register already preserves everything else — the
+difference is that the header a reader sees first now agrees with the entry's own conclusion.
+
 ## Entry format
 
 ```
