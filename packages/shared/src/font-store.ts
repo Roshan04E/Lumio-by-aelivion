@@ -95,6 +95,35 @@ export function fontStoreKeyFor(ref: FontRef): FontStoreKey | undefined {
 }
 
 /**
+ * Read a storage-relative key back into a {@link FontStoreKey}, or `undefined` if it is not one.
+ *
+ * The inverse of {@link fontObjectKey}, and it exists for exactly one caller: the HTTP layer, which
+ * is handed a PATH and has to decide whether it may serve it. Parsing it back into the discriminated
+ * union is what lets that decision go through {@link canServeFont} rather than through a string test
+ * on the path — a `startsWith("fonts/user/")` check is a boolean by another name, and D4 is explicit
+ * that this must not be a boolean.
+ *
+ * Deliberately strict: a key with extra segments, a traversal, or a hash that is not a hash is NOT a
+ * font key. Anything unrecognised comes back `undefined`, and the caller's job is then to refuse it
+ * rather than to guess — a font path we cannot parse is one we cannot prove we may serve.
+ */
+export function fontStoreKeyFromObjectKey(key: string): FontStoreKey | undefined {
+  const segments = key.split("/");
+  const isHash = (value: string | undefined): value is string => Boolean(value && /^[a-f0-9]{64}$/.test(value));
+  if (segments[0] !== "fonts") return undefined;
+  if (segments[1] === "catalogue" && segments.length === 3 && isHash(segments[2])) {
+    return { store: "catalogue", fileHash: segments[2] };
+  }
+  if (segments[1] === "user" && segments.length === 4 && segments[2] && isHash(segments[3])) {
+    // The owner segment is opaque here beyond "non-empty and not a traversal": it is a user id, and
+    // this module does not get to have opinions about their shape.
+    if (segments[2] === "." || segments[2] === ".." || segments[2].includes("\\")) return undefined;
+    return { store: "user", ownerId: segments[2], fileHash: segments[3] };
+  }
+  return undefined;
+}
+
+/**
  * Whether `viewerId` may be served the bytes behind `key`.
  *
  * Catalogue faces are public by licence. A user face is served to its owner and to nobody else —

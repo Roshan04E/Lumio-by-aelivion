@@ -118,13 +118,19 @@ export async function renderManifestToMp4(input: {
   outputLocation: string;
   onProgress?: (progress: number) => Promise<void> | void;
   cancelSignal?: CancelSignal;
+  /**
+   * ADR-023 D4 (S3) — who this render is FOR. Optional, `undefined` by default, and that default
+   * fails CLOSED: a render with no viewer cannot resolve any per-user font, so the worst a caller
+   * that forgets achieves is an abort by name, never another account's licensed bytes.
+   */
+  viewerId?: string | undefined;
 }) {
   await ensureBrowserReady();
   const serveUrl = await getBundleLocation();
   // ADR-023 D3/T-2 — install before rendering, and abort by name if we cannot. This is deliberately
   // the FIRST thing after the browser is ready: a render that is going to fail for want of a font
   // should fail in a second, not after ten minutes of encoding into a file nobody can use.
-  const fonts = await resolveManifestFonts(input.manifest);
+  const fonts = await resolveManifestFonts(input.manifest, input.viewerId);
   const inputProps = { manifest: input.manifest, fonts };
   const cancel = input.cancelSignal ? { cancelSignal: input.cancelSignal } : {};
   const composition = await selectComposition({
@@ -218,12 +224,18 @@ export async function renderManifestStill(input: {
   outputLocation: string;
   /** "webgl" routes media through the shared MediaWebGLRenderer (unified path). */
   rendererMode?: "legacy" | "webgl";
+  /**
+   * ADR-023 D4 (S3) — who this render is FOR. Optional here, `undefined` by default, and that
+   * default fails CLOSED: a render with no viewer cannot resolve any per-user font, so the worst a
+   * caller that forgets achieves is an abort by name, never another account's licensed bytes.
+   */
+  viewerId?: string | undefined;
 }) {
   await ensureBrowserReady();
   const serveUrl = await getBundleLocation();
   // ADR-023 D3/T-2: BEFORE the browser is asked for anything. An unresolvable pinned font throws
   // here, naming the family and hash, rather than producing a still in the wrong typeface.
-  const fonts = await resolveManifestFonts(input.manifest);
+  const fonts = await resolveManifestFonts(input.manifest, input.viewerId);
   const inputProps = { manifest: input.manifest, fonts };
   const composition = await selectComposition({
     serveUrl,

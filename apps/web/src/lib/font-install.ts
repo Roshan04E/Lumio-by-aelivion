@@ -58,8 +58,44 @@ export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState>
     // D4/T-3: discriminate on the store to get a location. There is no generic "URL of a font".
     const storeKey = fontStoreKeyFor(ref);
     if (!storeKey) return "missing";
+    let source: string;
+    let revoke: (() => void) | undefined;
     try {
-      const face = new FontFace(ref.family, `url(${storageUrl(fontObjectKey(storeKey))})`, {
+      /**
+       * ADR-023 D4 (S3) — **the two stores are fetched two ways, and it is not an optimisation.**
+       *
+       * A catalogue face is public by licence, so it is a plain URL and the browser can load it
+       * directly. A per-user face is not: its key is content-addressed, so two accounts holding the
+       * same commercial font produce the same hash, and the only thing keeping account B out is a
+       * bearer token the server checks. `new FontFace(url)` cannot send one — font loads carry no
+       * custom headers — so the bytes are fetched explicitly and handed over as a blob.
+       *
+       * That asymmetry is why this switch exists rather than a shared `urlOf(key)` helper: T-3 says
+       * no function may resolve a font to bytes without discriminating on the store, and a helper
+       * returning "the URL of a font" would be exactly the shared supertype D4 forbids.
+       */
+      switch (storeKey.store) {
+        case "catalogue":
+          source = `url(${storageUrl(fontObjectKey(storeKey))})`;
+          break;
+        case "user": {
+          const token = localStorage.getItem("orreris_token");
+          if (!token) return "missing";
+          const response = await fetch(storageUrl(fontObjectKey(storeKey)), { headers: { Authorization: `Bearer ${token}` } });
+          // A 404 here is the server refusing, and it is deliberately indistinguishable from the
+          // font not existing — see the /storage guard. Either way this account cannot have it.
+          if (!response.ok) return "missing";
+          const url = URL.createObjectURL(await response.blob());
+          revoke = () => URL.revokeObjectURL(url);
+          source = `url(${url})`;
+          break;
+        }
+        default: {
+          const unreachable: never = storeKey;
+          return unreachable;
+        }
+      }
+      const face = new FontFace(ref.family, source, {
         weight: String(ref.weight),
         style: ref.style
       });
@@ -73,6 +109,11 @@ export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState>
       // No rethrow, and no console noise pretending to be a report. The state IS the report — it
       // drives the layer marker and the banner, which is what D3 asks for.
       return "missing";
+    } finally {
+      // `FontFace.load()` has read the blob by now, so the object URL has done its job. Released
+      // here rather than left to the page's lifetime: a session that installs a few dozen user
+      // faces would otherwise pin every one of their buffers in memory for nothing.
+      revoke?.();
     }
   })();
 

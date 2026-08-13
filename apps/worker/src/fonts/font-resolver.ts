@@ -25,6 +25,7 @@ import { getObjectStream, isR2StorageEnabled, resolveStorageConfig } from "@orre
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+  canServeFont,
   collectPinnedFontRefs,
   fontObjectKey,
   FontResolutionError,
@@ -60,7 +61,19 @@ async function readStoredBytes(relativeKey: string): Promise<Buffer | undefined>
  * fails four times because four fonts are missing is four round trips through a slow pipeline; one
  * message listing all four is one.
  */
-export async function resolveFontsForLayers(layers: CompositionLayerStyleInput[]): Promise<InstalledFontFace[]> {
+export async function resolveFontsForLayers(
+  layers: CompositionLayerStyleInput[],
+  /**
+   * Who this render is FOR. Required, and required to be spelled even when it is `undefined` (D4).
+   *
+   * A default would be an owner nobody chose, and the failure it hides is silent: a render that
+   * quietly resolved another account's licensed font would produce a perfectly good deliverable and
+   * a licence violation at the same time. Passing `undefined` is a legitimate answer — a catalogue-
+   * only render has no viewer — and it fails CLOSED: every per-user face becomes unresolvable, and
+   * unresolvable aborts by name (T-2).
+   */
+  viewerId: string | undefined
+): Promise<InstalledFontFace[]> {
   const refs = collectPinnedFontRefs(layers);
   if (!refs.length) return [];
 
@@ -73,6 +86,20 @@ export async function resolveFontsForLayers(layers: CompositionLayerStyleInput[]
     // from ever being resolved through the shared path.
     const storeKey = fontStoreKeyFor(ref);
     if (!storeKey) continue;
+    /**
+     * D4, and this is the line the whole two-stores decision exists for. Content-addressed storage
+     * means two accounts with byte-identical copies of the same commercial font produce the same
+     * hash; the ONLY thing standing between account B and account A's licensed bytes is that the
+     * key carries an owner and this check reads it. `canServeFont` is total over the union, so a
+     * third store added later cannot slip past by defaulting to "sure".
+     */
+    if (!canServeFont(storeKey, viewerId)) {
+      // Treated as MISSING rather than as a distinct error: from this render's position the font is
+      // exactly as unavailable as one that was never uploaded, and saying "you are not allowed to
+      // see this font" would confirm the hash exists in someone else's store.
+      missing.push(ref);
+      continue;
+    }
     const bytes = await readStoredBytes(fontObjectKey(storeKey));
     if (!bytes) {
       missing.push(ref);
@@ -91,6 +118,9 @@ export async function resolveFontsForLayers(layers: CompositionLayerStyleInput[]
 }
 
 /** Convenience for the render entry points: every layer in a manifest. */
-export async function resolveManifestFonts(manifest: { layers: CompositionLayerStyleInput[] }): Promise<InstalledFontFace[]> {
-  return resolveFontsForLayers(manifest.layers);
+export async function resolveManifestFonts(
+  manifest: { layers: CompositionLayerStyleInput[] },
+  viewerId: string | undefined
+): Promise<InstalledFontFace[]> {
+  return resolveFontsForLayers(manifest.layers, viewerId);
 }

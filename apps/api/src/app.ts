@@ -2,6 +2,9 @@ import express from "express";
 import type { Response } from "express";
 import type { Readable } from "node:stream";
 import cors from "cors";
+import jwt from "jsonwebtoken";
+// ADR-023 D4/T-3 (S3) — the per-user font store is not public. See the /storage guard below.
+import { canServeFont, fontStoreKeyFromObjectKey } from "@orreris/shared";
 import { env } from "./config/env";
 import { getObjectStream, isR2Storage, storagePaths } from "./services/storage.service";
 import { authRouter } from "./routes/auth.routes";
@@ -162,7 +165,11 @@ export function createApp() {
     // cross-origin response-header safelist, so without Expose-Headers a 206 response's total size is
     // invisible to fetch() even though the request itself succeeds.
     res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Range");
+    // `Authorization` is here for the per-user font store (ADR-023 D4, S3): those bytes are fetched
+    // with a bearer token rather than served as a capability URL, and a cross-origin request
+    // carrying that header preflights. Note this is still ACAO `*` and never credentialed — the
+    // token is sent explicitly by the caller, not attached by the browser.
+    res.setHeader("Access-Control-Allow-Headers", "Range, Authorization");
     res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
     // Cache the preflight per URL so a session's many windowed range reads pay it once, not once per
     // window -- this is the difference between one extra round trip per source and one per GOP.
@@ -173,6 +180,55 @@ export function createApp() {
     }
     next();
   });
+  /**
+   * ADR-023 D4 / T-3 (S3) — **the per-user font store is not public, and this is where that stops
+   * being a sentence in an ADR.**
+   *
+   * Everything under `/storage` is served with `Access-Control-Allow-Origin: *` and no credentials,
+   * because media URLs are unguessable capability URLs. A per-user font key is NOT that: it is
+   * `fonts/user/<ownerId>/<fileHash>`, and the hash is content-addressed, so two accounts holding
+   * byte-identical copies of the same commercial font produce the SAME hash. D4 stores them twice on
+   * purpose — "the storage waste is the point" — and every bit of that isolation is undone if the
+   * path is readable by anyone who can compute a SHA-256.
+   *
+   * So the check is on the KEY, parsed back into the discriminated union, and answered by
+   * `canServeFont` — not by a `startsWith("fonts/user/")` string test, which is the boolean D4
+   * forbids wearing a different hat. A catalogue face falls through untouched: it is public by
+   * licence, and that is the whole reason the two stores are two types.
+   *
+   * The viewer is taken from the JWT's `sub` and nothing else. Deliberately NOT `requireAuth`, which
+   * additionally loads the user row: this is a capability check on bytes, and the only claim it
+   * needs is who is asking. That also keeps it ahead of the credentialed `/api` CORS gate, where
+   * `requireAuth` could not run anyway.
+   */
+  app.use("/storage", (req, res, next) => {
+    const key = decodeURIComponent(req.path.replace(/^\/+/, ""));
+    if (!key.startsWith("fonts/")) return next();
+    const fontKey = fontStoreKeyFromObjectKey(key);
+    if (!fontKey) {
+      // An unparseable font path is refused rather than passed to the static handler. A path we
+      // cannot turn into a key is one we cannot prove we are allowed to serve.
+      res.status(404).end();
+      return;
+    }
+    let viewerId: string | undefined;
+    const header = req.headers.authorization;
+    if (header?.startsWith("Bearer ")) {
+      try {
+        viewerId = (jwt.verify(header.slice("Bearer ".length), env.JWT_SECRET) as { sub?: string }).sub;
+      } catch {
+        viewerId = undefined;
+      }
+    }
+    if (!canServeFont(fontKey, viewerId)) {
+      // 404, not 403: confirming that a hash EXISTS in someone else's store is itself a disclosure,
+      // and the whole hazard here is that the hash is guessable from the file.
+      res.status(404).end();
+      return;
+    }
+    next();
+  });
+
   if (isR2Storage) {
     // r2 driver without a public base URL: proxy reads from the bucket (keeps a private bucket working
     // and preserves the /storage/<key> URL shape). Set R2_PUBLIC_BASE_URL to serve directly instead.
