@@ -35,7 +35,26 @@ pnpm --filter @orreris/worker render:manifest <file>    # render a manifest JSON
 
 On a fresh clone or a new worktree, the FIRST `render:compare:pixels` run can fail at fixture 1 with `page.goto: Timeout 30000ms exceeded ... networkidle` - vite's dep pre-bundle happens inside that first navigation and blows the harness's 30s budget. Re-run before investigating; the second run is warm and passes.
 
-There is no per-test filtering - these scripts run a fixed scenario end to end. When verifying a renderer change, prefer `render:manifest` against a real manifest and inspect output frames over trusting typecheck alone.
+When verifying a renderer change, prefer `render:manifest` against a real manifest and inspect output frames over trusting typecheck alone.
+
+### Gate cost discipline (founder directive 2026-08-13) - do NOT run the heavy gates every time
+
+The browser gates (`render:compare:pixels`, `render:baseline`, `render:link-gate`, `wc:gate`, the probes) cost minutes each and are dominated by startup - vite pre-bundle and Chrome launch - not by fixture count. Running them per commit out of habit is the single biggest drag on shipping speed here, and it buys nothing on a commit that has no claim for them to check. **Default to cheap. Reach for a heavy gate when a specific claim needs it, not as a ritual.**
+
+**The gates DO support narrowing.** The "no per-test filtering" line that used to sit here was wrong:
+```bash
+PIXEL_FIXTURES=stylize-ink,plain-image pnpm --filter @orreris/worker render:compare:pixels
+BASELINE_FIXTURES=<keys>               pnpm --filter @orreris/worker render:baseline
+```
+Iterate narrowed (`render-pixel-comparison.ts:220`, `render-baseline-gate.ts:74`). The narrowed run merges into the summary rather than rewriting it, so it does not destroy the full record.
+
+**Per commit:** `typecheck`, plus any pure-function assertion that can answer the question without a browser. Push the load-bearing check down to the cheapest instrument that can actually tell the answers apart - a targeted tsx gate asserting emitted CSS or a computed value runs in milliseconds and often catches the real defect better than a pixel diff (both renderers are Chromium; they will agree on a wrong answer as readily as a right one - the DEBT-017 class).
+
+**Per batch of commits:** one full sweep before the batch is called done. Batching is a bet that nothing failed; on additive low-risk work it is a good bet.
+
+**The one thing never to batch:** a commit whose claim *is* "nothing else changed" (a legacy/compat path, a refactor asserted byte-neutral). `render:baseline` at zero tolerance is the only instrument that can say so, and folding it in with another change makes a moved byte ambiguous between them - then you pay the full gate again per bisect step, which costs more than the per-commit run you skipped.
+
+**Most lost hours are void runs, not slow runs.** A stray Chrome tree or a leftover vite child from an interrupted run burns a full sweep for nothing. Run `apps/worker/src/browser-preflight.ts` before any gate, and treat the first run in a fresh worktree as a throwaway (see the vite pre-bundle note above).
 
 ## Architecture
 
