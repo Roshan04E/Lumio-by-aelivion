@@ -583,6 +583,17 @@ a declared key set with a compile-time exhaustiveness constraint (the `TEXT_STYL
 `satisfies` pattern at `text-styles.ts:10-29` is the shape), every future field is one omission away
 from the same silent divergence, in two places at once.
 
+**T-13a addendum — the multi-run path is unreachable without a visible change, and that is a
+property of the design, not a hole in the gate.** (S0c, b3adaa0.) An attempt to build a pixel arm for
+T-13a failed for an instructive reason: `collapseLine` keys on the *effective draw style*, so every
+way of forcing the run-by-run path also changes how the text looks — even restating `fontFamily` on
+alternate runs resolves to the same font string and still collapses (verified byte-identical). There
+is no pixel-invisible way to select the logical path, because the raster only takes it when the runs
+genuinely differ. **Do not treat the missing pixel arm as a gap to close later.** It is covered by
+asserting `collapseLine` as a pure function (falsified by disabling the collapse and watching the
+assertion fail) plus the baseline delta, where S0b's committed render serves as the word-by-word
+reference. Recorded because the obvious next move — "add the missing fixture" — is wasted work.
+
 **T-16 — A "visible degraded state" is proven by pixels, never by computed style.** (D3, T-12; S0,
 2026-08-13.) D3's font-substitution surface and T-12's warp marker both exist to announce a silent
 degradation, which makes a marker that silently fails to paint the purest form of the bug it guards

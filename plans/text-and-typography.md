@@ -224,6 +224,12 @@ in six months.
   `export-core.ts:332`.
 - Editor: substitute + surface, reusing the `needs-relink` vocabulary (`sync.ts:92`); block export
   until resolved.
+- **Carries S0c's open T-16 debt.** S0c's multi-run marker was argued structurally sound (same class
+  and sibling placement as S0's pixel-proven marker) but never photographed, and named as such rather
+  than passed off as done. D3's substitution surface built here is a third marker with the identical
+  failure mode, so this stage photographs **both** with one harness. That is the efficient moment,
+  not a deferral of convenience: authoring the two-colour Arabic layer costs the same whether one
+  marker or two is being proven.
 - `getCompositionFontsUsed` (composition-style.ts:907) becomes a `FontRef` collector rather than a
   family-string collector.
 - Font picker UI over the catalogue, with real previews.
