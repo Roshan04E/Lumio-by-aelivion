@@ -1,4 +1,3 @@
-/// <reference path="./wawoff2.d.ts" />
 export * from "./blueprint";
 export * from "./motion/motion-intent";
 export * from "./text-look";

@@ -12,7 +12,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { computeFontFileHash, decompressFontIfNeeded, FontIngestError, readFontIdentity } from "@orreris/shared";
+import { computeFontFileHash, FontIngestError, readFontIdentity } from "@orreris/shared";
+// S3: the decompressor is server-only — see `packages/storage/src/font-decompress.ts` for why.
+import { decompressFontIfNeeded } from "@orreris/storage";
 
 const fontsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public/fonts");
 

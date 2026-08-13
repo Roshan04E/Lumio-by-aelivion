@@ -1,3 +1,4 @@
+/// <reference path="./wawoff2.d.ts" />
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
@@ -283,3 +284,7 @@ export async function getObjectStream(
 // mirror-on-pick is triggered from the editor through the API, and two copies of a both-or-neither
 // write is exactly the drift T-11 forbids.
 export * from "./font-mirror";
+
+// ADR-023 S3 — WOFF2 decompression. Server-only by construction; see the module note for why it
+// cannot live in @orreris/shared.
+export * from "./font-decompress";

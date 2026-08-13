@@ -30,7 +30,6 @@
  */
 import {
   computeFontFileHash,
-  decompressFontIfNeeded,
   FontIngestError,
   readFontIdentity,
   type FontIdentity,
@@ -174,10 +173,12 @@ export async function addUserFont(file: File): Promise<{ record: UserFontRecord;
    */
   if (isWoff2(uploaded)) return addUserFontViaServer(file, ownerId);
 
-  let bytes: ArrayBuffer;
+  // Everything from here is `.ttf`/`.otf`/`.woff`, which need no decompression at all — opentype.js
+  // inflates WOFF natively. Nothing on this path can reach the emscripten decoder, which is exactly
+  // the point: it does not run in a browser and is not in the bundle.
+  const bytes = uploaded;
   let identity: FontIdentity;
   try {
-    bytes = await decompressFontIfNeeded(uploaded);
     identity = await readFontIdentity(bytes);
   } catch (error) {
     // The ingest error's own message is already written for a person to read (D2) — it says what is

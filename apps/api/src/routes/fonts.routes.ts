@@ -21,7 +21,6 @@ import multer from "multer";
 import { z } from "zod";
 import {
   computeFontFileHash,
-  decompressFontIfNeeded,
   fontIndexFace,
   fontIndexFamily,
   FontIngestError,
@@ -30,7 +29,7 @@ import {
   type FontRef,
   type UserFontKey
 } from "@orreris/shared";
-import { FontMirrorError, mirrorGoogleFont, objectExists, persistBytes } from "@orreris/storage";
+import { decompressFontIfNeeded, FontMirrorError, mirrorGoogleFont, objectExists, persistBytes } from "@orreris/storage";
 import { asyncHandler, HttpError, ok, validateBody } from "../lib/http";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 
