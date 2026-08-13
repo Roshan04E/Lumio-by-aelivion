@@ -18,6 +18,7 @@ S0c raster honours direction              closes S0b's two measured gaps        
 S1  paint-order + stroke                  no manifest change, no schema change   ~1 day
 S2  font reference + mirror + install     manifest change (FontRef)              the big one
 S2.5 catalogue + font picker UI          the ceiling a user can SEE going       split from S2
+S2.6 the catalogue goes VAST             virtualized list + mirror-on-pick      the original ask
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         migration; unblocks S6
 S5  tier-1 texture + CSS depth            rides S4
@@ -292,6 +293,55 @@ ADR behind it was the one that would have been compressed.
 
 **Risk:** low-moderate. UI over a contract S2 already proved. The one real hazard is the preview
 lying, which is why it has its own check.
+
+---
+
+## S2.6 — The catalogue is actually vast, and the list still doesn't stutter
+
+**Win:** the founder's original ask, delivered. The picker lists the Google catalogue — ~1500
+families, filterable, with a real preview per row — and stays smooth. S2.5 shipped the picker and
+the write path correctly and was honest that what it lists is the **already-mirrored set: five
+families, eight faces.** The *kind* of ceiling changed (system stacks the export box was assumed to
+have → pinned faces that render identically everywhere), which is the load-bearing change. The
+*size* did not. A user opening the picker today still sees five families, and "vast library" was the
+brief.
+
+**Why this is a stage and not a data-entry task.** Mirror-on-first-use (D4) already means a family
+costs nothing until someone picks it. What is missing is the **index** — the picker can only list
+what has been mirrored, so nothing is ever picked, so nothing is ever mirrored. Breaking that
+circle needs catalogue metadata (family, weights, styles, category, **subsets**) independent of the
+bytes, and a list that can render a thousand rows without fetching a thousand fonts.
+
+**Scope**
+- Ingest the Google Fonts metadata index — names, weights, styles, category, subsets. Metadata
+  only; bytes still arrive on first use, unchanged.
+- **Virtualized picker with lazy per-row face loading.** Only rows near the viewport load a face;
+  the rest render in a neutral face until they are close. This is the whole "not laggy" half of the
+  brief and it is the only real engineering here. Canva and Figma both do exactly this.
+- Mirror-on-pick: selecting an unmirrored family triggers S2.3's mirror-with-license write, then
+  writes the `FontRef`. The user sees a brief resolving state, not a failure.
+- **Filter by subset/script**, which is where this stage meets S0b/S0c: a user writing Arabic needs
+  to find Noto Naskh Arabic, Cairo or Amiri, and a Latin-only list makes the RTL work unreachable
+  in practice. Script filtering is not a nicety here; it is what connects two stages.
+
+**Verification**
+- T-17 still governs: previews prove they render in the face they name. At this scale, prove it on
+  a sample plus the invariant that no two loaded faces render identically — one font standing in
+  for all of them is the empty-catalogue failure at scale.
+- A scroll of the full list holds frame — measure it, do not eyeball it. Startup cost of the picker
+  is a separate number from steady-state scroll; report both.
+- Picking an unmirrored family end-to-end: metadata row → mirror write with license → `FontRef`
+  with `fileHash` → renders in the export. The full S2 contract, exercised from the UI.
+
+**Risk:** moderate, and concentrated in the list. The contract underneath is proven; what is
+unproven is a thousand-row surface that loads fonts as it moves.
+
+**Known, not a bug (from S2.5, worth stating before someone files it):** in a dev environment with
+no seeded mirror and no API, a picked catalogue font previews correctly in the list while the layer
+reports "Missing font — showing a substitute". Previews load a bundled copy under a distinct
+`"<family> Preview"` CSS family so they can never be picked up by a layer's CSS by accident; the
+layer's own font resolves through the store, which is empty. That is D3 behaving exactly as
+designed, and it will look like a defect to anyone who has not seeded the mirror.
 
 ---
 
