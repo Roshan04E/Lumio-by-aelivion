@@ -14,6 +14,7 @@
 ```
 S0  interim: disable warp on shaping-dependent scripts   independent, immediate   ~half a day
 S0b base text direction (RTL)             rides S0's detector; live correctness   ~1 day
+S0c raster honours direction              closes S0b's two measured gaps        ~1-2 days
 S1  paint-order + stroke                  no manifest change, no schema change   ~1 day
 S2  font reference + catalogue            manifest change (FontRef)              the big one
 S3  user font upload                      storage + asset doctrine
@@ -102,11 +103,14 @@ who reads the script.
   `"ltr"`/`"rtl"` → explicit `direction` with `unicode-bidi: isolate`. **We do not implement
   first-strong resolution ourselves** (T-5, T-13) — the delegation is the decision.
 - `textAlign` gains `"start"`/`"end"`. Existing `"left"`/`"right"` keep meaning physical left and
-  right, forever, and are never remapped. New text defaults to `"start"`.
+  right, forever, and are never remapped. ~~New text defaults to `"start"`.~~ **Corrected 2026-08-13
+  during S0b: new text keeps `"center"`.** Today's default is centre, so defaulting to `"start"`
+  would have silently left-aligned every new text layer — an unrelated product regression smuggled
+  in by a bidi stage. The logical-alignment argument is about `left`/`right`, never about centre.
 - Defaults: absent `direction` renders exactly as today (`ltr`, physical alignment), permanently, no
   migration script — the D1a shape, mirroring `LEGACY_PROJECT_COLOR_SETTINGS`. New text is authored
-  `"auto"` with `"start"` alignment. **Two constants, not one default behind a flag**, so *absent*
-  keeps meaning "authored before this existed."
+  `"auto"`, alignment unchanged at `"center"` (see the correction above). **Two constants, not one
+  default behind a flag**, so *absent* keeps meaning "authored before this existed."
 - Inspector: a direction control on the text layer, defaulting to Auto.
 - Consumes S0's detector for the authoring-time default. Does not re-detect at paint time (T-13).
 
@@ -139,6 +143,44 @@ warp comes back for shaping-dependent scripts, that anchor must resolve logical 
 **Risk:** low-moderate. The manifest addition is small and the CSS is engine-native. The real risk
 is the alignment change leaking into existing projects, which `render:baseline` is the instrument
 for. If baseline moves by a single byte on a legacy fixture, the legacy split is wrong — stop.
+
+---
+
+## S0c — The raster tells the truth about direction
+
+**Win:** Arabic works *by default*, and mixed Arabic-and-Latin comes out in reading order. S0b
+shipped the manifest field and the CSS, and measured two gaps that leave its own headline claim
+half-delivered. Neither is S0b's mistake — one is a correction to T-13, which was mine.
+
+**Scope**
+- **Resolve `"auto"` once, in shared, at style-resolution time** (T-13 as corrected). Canvas 2D has
+  no `unicode-bidi: plaintext`, and both renderers take pixels from the raster, so `"auto"` currently
+  draws `ltr` everywhere — its baseline hash is byte-identical to `"ltr"`. One shared resolver, both
+  paths consume the concrete answer, no renderer decides for itself, nothing resolves in a paint
+  loop. One direction per layer, not per line: the AE/Premiere model.
+- **Draw single-style lines with one `fillText`** (T-13a). The word loop at
+  `text-shape.ts:567-569` places each word at a computed logical x, so bidi reordering cannot happen
+  regardless of `ctx.direction`. Single-run lines are the common case for captions and titles, and
+  one call is also fewer measure passes than the loop it replaces.
+- **Multi-run lines: degrade visibly, do not silently emit logical order.** Canvas 2D exposes no
+  per-character visual positions, so a line carrying two colours cannot be drawn in one call. Apply
+  T-12's discipline with S0's existing detector and marker vocabulary — the machinery is built.
+- Per-run highlight boxes (`text-shape.ts:571`) and `textRevealProgress` both depend on word
+  positions. Check them against the single-call path before assuming it is a drop-in; if reveal
+  needs word extents, clip rather than reposition.
+
+**Verification**
+- The falsifier S0b built, extended: `"auto"` over Arabic must now differ from `"ltr"`. That exact
+  assertion fails today and is the stage's definition of done.
+- Mixed `"مرحبا Brand بالعالم"` at `"rtl"`: assert the render differs from the word-by-word draw.
+  S0b measured that these currently match, which is the defect.
+- The Latin control on every arm — a subject-only difference proves nothing about bidi.
+- `render:baseline` full and unbatched. This changes the draw path for **all** text, not just RTL:
+  every existing fixture is the claim. Expect single-run lines to shift by antialiasing if the old
+  loop's accumulated word advances differed from one shaped call — **if that happens, stop and
+  report the delta rather than re-baselining.** A changed Latin render means the layout changed.
+
+**Risk:** moderate, and higher than S0b. The draw path is shared by every text layer in the product.
 
 ---
 

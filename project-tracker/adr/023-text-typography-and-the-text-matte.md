@@ -534,6 +534,38 @@ renderer infers direction from content at paint time.** (D6a) `"auto"` is delega
 via `unicode-bidi: plaintext`; we do not implement first-strong resolution. An absent `direction`
 renders as `ltr` with physical alignment, permanently and without migration.
 
+**T-13 CORRECTED 2026-08-13, after S0b (e4d1a48) shipped against it and the correction is mine, not
+the stage's.** As written above the rule was too broad, and it cost this feature its headline win.
+`"auto"` delegating to `unicode-bidi: plaintext` only works where there IS a CSS box. **Canvas 2D
+has no equivalent** — `ctx.direction` takes a concrete value — and both renderers take their pixels
+from the raster path (`scene/text-shape.ts`), so `"auto"` silently draws `ltr` in the preview AND
+the export. Measured, not inferred: S0b's `"auto"` baseline hash is byte-identical to its `"ltr"`
+render. New text is authored `"auto"`, so the shipped default is "Arabic works if you pick RTL",
+not "Arabic works."
+
+The hazard T-13 was actually written to prevent is **two renderers each deciding direction for
+themselves and drifting.** Resolving `"auto"` to a concrete direction **once, in shared code, at
+style-resolution time** is not that — it is one function both paths consume, exactly as
+`getCompositionTextStyle` already is. The corrected rule:
+
+> **Resolve `"auto"` once, in shared, and hand both paths the same concrete answer. No renderer may
+> resolve it for itself, and no resolution may happen inside a paint loop.**
+
+The cost is per-paragraph auto: one resolved direction per layer rather than per line. That is what
+After Effects and Premiere both do — direction is a paragraph/layer setting, not a per-line
+inference — and no one has asked for a single text layer holding paragraphs of opposing direction.
+Accepted.
+
+**T-13a — Logical order requires drawing lines, not words.** (S0b, measured.) The raster tokenizes
+to words and places each at a computed logical x (`text-shape.ts:198,229,567-569`), so cross-word
+bidi reordering cannot occur no matter what `ctx.direction` says: `"مرحبا Brand بالعالم"` exports in
+logical word order even at explicit `"rtl"`. Setting `ctx.direction` fixes the start edge and
+intra-call bidi; it cannot fix placement the caller already decided. A line whose runs share one
+style must be drawn with a **single `fillText`**, which is also faster. A line with multiple style
+runs cannot be — canvas 2D exposes no per-character visual positions — and must therefore apply
+T-12's discipline: detect a shaping-dependent script and degrade visibly rather than silently
+emitting logical order.
+
 **T-15 — Every new text field ships with a falsifier: flip it and prove the render CHANGES.**
 (S1, 2026-08-13 — learned the hard way.) A renderer-parity gate compares two consumers that read the
 same manifest bag; it therefore cannot detect a field that never reached the bag. Both renderers
