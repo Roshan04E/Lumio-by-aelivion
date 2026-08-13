@@ -72,6 +72,11 @@ export * from "./text-warp";
 export * from "./text-warp-mesh";
 export * from "./font-outlines";
 export * from "./font-catalogue";
+// The remote index (S2.6). `font-index-data` — the generated ~100KB literal — is NOT re-exported,
+// but be clear-eyed about what that does and does not buy: `font-index.ts` imports it statically, so
+// the text is in the bundle regardless. What stays lazy is the DECODE (~2k rows → objects), which
+// happens on the first query rather than at import. Picker startup is measured in `font:picker-perf`.
+export * from "./font-index";
 export * from "./font-ingest";
 export * from "./font-install";
 export * from "./font-store";
