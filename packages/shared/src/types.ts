@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { PluginEffectManifest, PluginLookManifest, PluginTransitionManifest } from "./plugin-manifest";
 import type { ProjectColorSettings, SourceColorMetadata } from "./color/color-management";
+import type { FontRef } from "./fonts";
 
 export const moduleTypes = [
   "PERSON_EXTRACTION",
@@ -750,7 +751,26 @@ export interface TimelineLayer {
   /** Source-text keyframes (hold): when present they OVERRIDE `text`/`textRuns` at render time —
    *  resolved by `getVisibleTextRuns` in every renderer. See {@link SourceTextKeyframe}. */
   sourceTextKeyframes?: SourceTextKeyframe[] | undefined;
+  /**
+   * The layer's CSS font stack. **Legacy data (ADR-023 T-1), and permanently supported as such.**
+   *
+   * A stack names a font; it does not provide one, which is why {@link TimelineLayer.fontRef} exists.
+   * This field is not deprecated in the "will be removed" sense — a `{ source: "system" }` ref
+   * carries exactly this string forever, so a project authored before `FontRef` existed keeps
+   * rendering the way it always has, with no migration, ever, automatically (D1a).
+   */
   fontFamily?: string | undefined;
+  /**
+   * ADR-023 D1 — the font REFERENCE. The render identity for pinned fonts is the `fileHash`, not the
+   * family name.
+   *
+   * **ABSENT MEANS `{ source: "system" }` CARRYING {@link TimelineLayer.fontFamily} UNCHANGED,
+   * permanently and without migration** — the same two-constants shape as
+   * {@link TimelineLayer.strokePaintOrder}, {@link TimelineLayer.direction} and
+   * `LEGACY_PROJECT_COLOR_SETTINGS`. See `normalizeFontRef` for why a silent remap would be a
+   * reflow, and a reflow in an unattended export.
+   */
+  fontRef?: FontRef | undefined;
   fontSize?: number | undefined;
   fontWeight?: number | undefined;
   italic?: boolean | undefined;

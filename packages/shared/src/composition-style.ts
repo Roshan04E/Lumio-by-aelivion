@@ -4,6 +4,7 @@ import { frameProfiler } from "./color/frame-profiler";
 import { COLOR_EFFECT_TYPES, compileColorPipeline, LEGACY_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
+import { fontRefCss, fontRefKey, normalizeFontRef, type FontRef } from "./fonts";
 import { detectTextScript } from "./text-script";
 import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, SourceTextKeyframe, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
 
@@ -37,6 +38,7 @@ export interface CompositionLayerStyleInput {
   italic?: boolean | undefined;
   letterSpacing?: number | undefined;
   lineHeight?: number | undefined;
+  fontRef?: FontRef | undefined;
   textWidthPercent?: number | undefined;
   textAlign?: "left" | "center" | "right" | "start" | "end" | string | undefined;
   direction?: "auto" | "ltr" | "rtl" | undefined;
@@ -722,6 +724,9 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
   // does today, permanently. Only a declared value produces declarations, and `"auto"` is resolved
   // to a concrete direction HERE so the DOM and the raster cannot answer it differently.
   const direction = resolveTextDirection(layer.direction ?? style.direction, layer);
+  // ADR-023 D1/D1a/T-1. One read of the layer's font identity, normalized on the way through, so
+  // both renderers see the same answer and neither has to know that legacy data exists.
+  const fontCss = fontRefCss(getCompositionFontRef(layer));
   const effectCss = getEffectCss(layer.effects, layer.animations as TimelineKeyframeV2[] | undefined, layer.startSeconds, options.currentTimeSeconds);
   const paddingEmY = animStyleNumber(
     layer,
@@ -744,10 +749,14 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     borderRadius: `${animStyleNumber(layer, options, "style.backgroundRadiusEm", numberOr(layer.backgroundRadiusEm ?? style.backgroundRadiusEm, compositionTextDefaults.borderRadiusEm))}em`,
     background: stringOr(layer.backgroundColor ?? style.backgroundColor, compositionTextDefaults.backgroundColor),
     color: stringOr(layer.color ?? style.color, compositionTextDefaults.color),
-    fontFamily: stringOr(layer.fontFamily ?? style.fontFamily, compositionTextDefaults.fontFamily),
+    // ADR-023 D1/D1a. A layer with no `fontRef` normalizes to `{ source: "system" }` carrying this
+    // exact stack, and `fontRefCss` returns it unchanged with NO weight or style opinion — so the
+    // three declarations below are byte-identical to what they were before `FontRef` existed. Only a
+    // pinned ref overrides weight/style, and it does so because those describe the FILE.
+    fontFamily: fontCss.fontFamily,
     fontSize: animStyleNumber(layer, options, "style.fontSize", numberOr(layer.fontSize ?? style.fontSize, compositionTextDefaults.fontSize)),
-    fontWeight: numberOr(layer.fontWeight ?? style.fontWeight, compositionTextDefaults.fontWeight),
-    fontStyle: (layer.italic ?? style.italic) ? "italic" : "normal",
+    fontWeight: fontCss.fontWeight ?? numberOr(layer.fontWeight ?? style.fontWeight, compositionTextDefaults.fontWeight),
+    fontStyle: fontCss.fontStyle ?? ((layer.italic ?? style.italic) ? "italic" : "normal"),
     letterSpacing: letterSpacing !== 0 ? `${letterSpacing}px` : undefined,
     lineHeight: animStyleNumber(layer, options, "style.lineHeight", numberOr(layer.lineHeight ?? style.lineHeight, compositionTextDefaults.lineHeight)),
     opacity: transform.opacity / 100,
@@ -933,13 +942,41 @@ export function getCompositionMediaStyle(layer: CompositionLayerStyleInput | Tim
   };
 }
 
-export function getCompositionFontsUsed(layers: CompositionLayerStyleInput[]) {
-  const fonts = new Set<string>();
+/**
+ * ADR-023 D1/D1a — a layer's font identity, with legacy data normalized on read.
+ *
+ * The ONE place `fontRef` is read from a layer. Everything downstream (CSS emission, the install
+ * plan, the picker) goes through here, so "absent means the legacy stack, permanently" is stated
+ * once rather than re-derived at each call site — which is how a rule like this rots.
+ */
+export function getCompositionFontRef(layer: CompositionLayerStyleInput | TimelineLayer): FontRef {
+  const style = styleOf(layer);
+  return normalizeFontRef(
+    layer.fontRef ?? style.fontRef,
+    stringOr(layer.fontFamily ?? style.fontFamily, compositionTextDefaults.fontFamily)
+  );
+}
+
+/**
+ * Every distinct font a composition needs, as `FontRef`s (ADR-023 S2).
+ *
+ * This used to collect CSS family STRINGS, which is exactly the shape that cannot express "install
+ * these bytes before rendering": a string is a request, and the export path's only possible response
+ * to a request it cannot satisfy was to shrug (`export-core.ts`'s `.catch(() => undefined)`).
+ * Returning refs is what lets the worker resolve, install, and — for a pinned font it cannot get —
+ * abort by name (T-2).
+ *
+ * Deduplicated by `fontRefKey`, which includes `source` and `ownerId`: two refs with the same
+ * `fileHash` from different stores are not the same resolvable font (D4).
+ */
+export function getCompositionFontsUsed(layers: CompositionLayerStyleInput[]): FontRef[] {
+  const byKey = new Map<string, FontRef>();
   for (const layer of layers) {
-    const fontFamily = stringOr(layer.fontFamily ?? layer.style?.fontFamily, compositionTextDefaults.fontFamily);
-    fonts.add(fontFamily);
+    const ref = getCompositionFontRef(layer);
+    const key = fontRefKey(ref);
+    if (!byKey.has(key)) byKey.set(key, ref);
   }
-  return [...fonts];
+  return [...byKey.values()];
 }
 
 export function hasCompositionEffect(effects: unknown[] | undefined, type: TimelineEffect["type"]) {
@@ -1028,6 +1065,11 @@ export type ManifestLayerStyleKey = Exclude<keyof CompositionLayerStyleInput, No
 export const MANIFEST_LAYER_STYLE_KEYS = [
   "color",
   "fontFamily",
+  // ADR-023 D1/T-1. The legacy stack above and the ref below travel TOGETHER, permanently: a
+  // `{ source: "system" }` ref means "read the stack", so dropping either one from the bag breaks a
+  // legacy project. This entry was added because the exhaustiveness constraint below refused to
+  // compile without it — which is the constraint doing exactly the job T-15 gave it.
+  "fontRef",
   "fontSize",
   "fontWeight",
   "italic",

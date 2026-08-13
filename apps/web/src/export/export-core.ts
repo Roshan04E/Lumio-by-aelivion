@@ -13,6 +13,7 @@ import {
   expandFrameBorders,
   expandNestedCompositions,
   getCompositionFontsUsed,
+  fontRefCss,
   graphicAnimationBakeTime,
   graphicToAnimatedDataUrl,
   graphicToDataUrl,
@@ -322,7 +323,14 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
 
   // Preload text fonts so canvas fillText matches the preview. Only possible where the DOM
   // FontFaceSet exists (main thread); the Worker uses the platform's installed fonts.
-  const fonts = getCompositionFontsUsed(composition.tracks.flatMap((track) => track.layers));
+  // ADR-023 S2 commit 1: the collector now returns `FontRef`s rather than CSS family strings. This
+  // call site takes the CSS family off each one, which for a legacy `{ source: "system" }` ref is
+  // the unchanged stack — so this preload behaves exactly as it did. The `.catch(() => undefined)`
+  // below is T-2's target and is removed in commit 4, together with the install path that makes
+  // failing loudly the correct response rather than a way to break working exports.
+  const fonts = getCompositionFontsUsed(composition.tracks.flatMap((track) => track.layers)).map(
+    (ref) => fontRefCss(ref).fontFamily
+  );
   if (typeof document !== "undefined" && document.fonts) {
     // Timeout-raced: a stuck webfont must never hang the export (the raster falls back to the
     // platform font, same as the live preview's non-blocking font path).

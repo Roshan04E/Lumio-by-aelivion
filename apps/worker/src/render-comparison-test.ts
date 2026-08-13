@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { buildRenderManifest } from "@orreris/render-templates";
 import {
   collapseLine,
+  cssFamilyToken,
+  fontRefKey,
+  getCompositionFontsUsed,
   isTextVisualOrderUnavailable,
   type Word as SceneWord,
   getCompositionMediaStyle,
@@ -313,6 +316,108 @@ assert.equal(collapseLine([w("a"), w("b", { background: "#ff0" })]).length, 2);
 // Degenerate inputs are returned untouched rather than reshaped.
 assert.equal(collapseLine([]).length, 0);
 assert.equal(collapseLine([w("solo")])[0]!.text, "solo");
+
+/**
+ * S2 commit 1 (ADR-023 D1/D1a/T-1) — `FontRef`, and the legacy rule that makes it safe to add.
+ *
+ * The whole claim of this commit is "no existing project moved", so the legacy assertions come
+ * first and are the strict ones: an absent `fontRef` must emit the SAME THREE DECLARATIONS it
+ * emitted before the field existed — the stack unchanged, and no weight or style opinion imposed by
+ * the font layer on top of the layer's own.
+ */
+assert.equal(renderTextStyle.fontFamily, "Arial, Helvetica, sans-serif", "absent fontRef must emit the stack unchanged.");
+assert.equal(renderTextStyle.fontWeight, previewTextStyle.fontWeight);
+assert.equal(renderTextStyle.fontStyle, previewTextStyle.fontStyle);
+// The layer's own weight/italic still drive a legacy layer, exactly as before.
+assert.equal(getCompositionTextStyle({ ...manifestTextLayer, fontWeight: 300, italic: true }).fontWeight, 300);
+assert.equal(getCompositionTextStyle({ ...manifestTextLayer, fontWeight: 300, italic: true }).fontStyle, "italic");
+
+// An explicit system ref is the same thing said out loud, and must be indistinguishable in CSS.
+assert.equal(
+  getCompositionTextStyle({ ...manifestTextLayer, fontRef: { source: "system", fontFamily: "Arial, Helvetica, sans-serif" } }).fontFamily,
+  renderTextStyle.fontFamily
+);
+
+// Unreadable refs take the legacy answer rather than a guess — the colour pipeline's rule, and the
+// reason absence is survivable. A pinned ref with no `fileHash` has no render identity; a `user` ref
+// with no `ownerId` cannot be resolved for anybody (D4/T-3), so neither survives as pinned.
+for (const bogus of [
+  { source: "catalogue", family: "Inter" },
+  { source: "user", family: "Inter", fileHash: "abc" },
+  { source: "wat" },
+  null,
+  "Inter"
+]) {
+  assert.equal(
+    getCompositionTextStyle({ ...manifestTextLayer, fontRef: bogus as never }).fontFamily,
+    "Arial, Helvetica, sans-serif",
+    `unreadable fontRef ${JSON.stringify(bogus)} must fall back to the layer's own stack.`
+  );
+}
+
+// A PINNED ref supplies family, weight and style: they describe the FILE, and letting a layer-level
+// fontWeight ride on top would ask the browser to synthesize a face other than the one pinned.
+const pinned = getCompositionTextStyle({
+  ...manifestTextLayer,
+  fontWeight: 900,
+  italic: false,
+  fontRef: { source: "catalogue", family: "Playfair Display", weight: 700, style: "italic", fileHash: "deadbeef" }
+});
+assert.equal(pinned.fontFamily, "'Playfair Display', sans-serif", "a pinned family is a NAME and must be quoted into a stack.");
+assert.equal(pinned.fontWeight, 700, "the ref's weight must win over the layer's — it describes the file.");
+assert.equal(pinned.fontStyle, "italic");
+assert.equal(cssFamilyToken("Inter"), "Inter", "a bare identifier family needs no quoting.");
+
+/**
+ * T-15's structural half for this field: the manifest's style bag must CARRY `fontRef`. The
+ * exhaustiveness constraint already refuses to compile without it — this assertion is the second
+ * lock, and it is the one that would survive someone deleting the constraint.
+ */
+const refLayer = { ...textLayer, fontRef: { source: "catalogue", family: "Inter", weight: 600, style: "normal" } as const };
+const refManifest = buildRenderManifest({
+  projectId: graph.projectId,
+  graph: {
+    ...graph,
+    composition: {
+      ...graph.composition!,
+      tracks: graph.composition!.tracks.map((track) => ({
+        ...track,
+        layers: track.layers.map((l) => (l.id === textLayer.id ? { ...refLayer, fontRef: { ...refLayer.fontRef, fileHash: "cafe1234" } } : l))
+      }))
+    }
+  },
+  assets: [asset],
+  quality: "final",
+  createdAt: new Date(0).toISOString()
+});
+const refManifestLayer = refManifest.layers.find((l) => l.id === textLayer.id);
+assert.ok(refManifestLayer);
+assert.deepEqual(
+  (refManifestLayer.style as Record<string, unknown>).fontRef,
+  { source: "catalogue", family: "Inter", weight: 600, style: "normal", fileHash: "cafe1234" },
+  "the manifest's style bag must carry `fontRef` — a field the renderers never receive is a field they cannot honour."
+);
+assert.equal(getCompositionTextStyle(refManifestLayer).fontFamily, "Inter, sans-serif", "and it must survive the round trip.");
+
+/**
+ * The collector is now a `FontRef` collector, not a family-string collector (plan S2). A string is a
+ * REQUEST — it cannot express "install these bytes before rendering", which is why the export path's
+ * only possible response to one it could not satisfy was to shrug.
+ */
+const collected = getCompositionFontsUsed([
+  textLayer,
+  { ...textLayer, id: "b" },
+  { ...textLayer, id: "c", fontRef: { source: "catalogue", family: "Inter", weight: 400, style: "normal", fileHash: "h1" } },
+  { ...textLayer, id: "d", fontRef: { source: "user", family: "Inter", weight: 400, style: "normal", fileHash: "h1", ownerId: "u1" } }
+]);
+assert.equal(collected.length, 3, "identical legacy layers dedupe; same hash from two STORES does not (D4).");
+assert.equal(collected.filter((ref) => ref.source === "system").length, 1);
+// Indices 1 and 2 are the catalogue and user refs: same family, same weight, same `fileHash`, and
+// they MUST remain two entries. A key that collapsed them would be the exact optimisation D4 spends
+// a paragraph forbidding — collapsing equal hashes across stores redistributes a licensed font.
+assert.equal(collected[1]!.source, "catalogue");
+assert.equal(collected[2]!.source, "user");
+assert.notEqual(fontRefKey(collected[1]!), fontRefKey(collected[2]!), "catalogue and user hashes must never collide as one key.");
 
 const previewShapeStyle = getCompositionShapeStyle(shapeLayer);
 const renderShapeStyle = getCompositionShapeStyle(manifestShapeLayer);
