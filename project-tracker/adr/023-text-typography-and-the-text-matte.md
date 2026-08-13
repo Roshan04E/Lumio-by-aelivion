@@ -603,6 +603,16 @@ Every naive assertion passed on an invisible element. A marker check must walk e
 the ancestor chain and confirm viewport intersection. **Any gate asserting a user-visible warning
 must itself be falsified against a deliberately hidden marker before it is trusted.**
 
+**T-17 — A font gate must not assert a fact about the host it runs on. Make the host demonstrate the
+difference.** (S2.4, 72982a3.) The obvious way to prove an install path delivered bytes is to render
+a font "the machine does not have" — which silently makes the gate depend on the font folder it is
+standing in, the exact dependency it claims to remove, and turns green on a host that happens to
+have the face. The shape that works: render the same text twice, once naming the family as a system
+stack and once through a pinned ref, and assert the two **differ**. Self-establishing on any host,
+and on a machine that does have the font it fails honestly rather than passing vacuously. This
+generalises to every remaining font stage — S2.5's previews must be proven to render in the face
+they name, and "it looked right on my machine" is the same fallacy in a different costume.
+
 **T-14 — No feature may re-open the shaping boundary that D9a closes.** (D6a, OQ6) Any operation
 that transforms text below the level of a shaping run — per-character animation is the known case,
 because each animated grapheme cluster becomes its own shaping context and cursive joining breaks —
