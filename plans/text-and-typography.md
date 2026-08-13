@@ -16,7 +16,8 @@ S0  interim: disable warp on shaping-dependent scripts   independent, immediate 
 S0b base text direction (RTL)             rides S0's detector; live correctness   ~1 day
 S0c raster honours direction              closes S0b's two measured gaps        ~1-2 days
 S1  paint-order + stroke                  no manifest change, no schema change   ~1 day
-S2  font reference + catalogue            manifest change (FontRef)              the big one
+S2  font reference + mirror + install     manifest change (FontRef)              the big one
+S2.5 catalogue + font picker UI          the ceiling a user can SEE going       split from S2
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         migration; unblocks S6
 S5  tier-1 texture + CSS depth            rides S4
@@ -232,16 +233,20 @@ in six months.
   marker or two is being proven.
 - `getCompositionFontsUsed` (composition-style.ts:907) becomes a `FontRef` collector rather than a
   family-string collector.
-- Font picker UI over the catalogue, with real previews.
+- ~~Font picker UI over the catalogue, with real previews.~~ **Moved to S2.5 (2026-08-13, founder
+  call at the commit-3 boundary.)** Scoping error in the original S2: the picker and the browsable
+  catalogue are the only pieces here with no ADR obligation behind them, and they were sitting in
+  the same commit as T-2's named abort, the `export-core.ts:332` deletion and the T-16 harness — the
+  load-bearing half. See S2.5.
 - **Migration for existing projects is decided (D1a): none, ever, automatically.** An existing
   `fontFamily` stack normalizes to `{ source: "system" }` and keeps rendering exactly as today,
   permanently — the `LEGACY_PROJECT_COLOR_SETTINGS` shape applied to fonts. This stage needs a
   user-triggered, visible "pin this font" action per project, not a migration script.
 
-**Also fold in:** `registerWarpFonts` / `configureFontResolver` (`font-outlines.ts:64,86`) become
-consumers of the same catalogue rather than a parallel hand-maintained table. The hardcoded
-`warpFontCatalog` at :52-60 is exactly the "future large font library" seam its own comment
-describes; this stage is that future.
+**Also fold in — moved to S2.5 with the catalogue it depends on:** `registerWarpFonts` /
+`configureFontResolver` (`font-outlines.ts:64,86`) become consumers of the same catalogue rather
+than a parallel hand-maintained table. The hardcoded `warpFontCatalog` at :52-60 is exactly the
+"future large font library" seam its own comment describes.
 
 **Verification**
 - Pixel fixture using a catalogue font that is **not** installed on the host — proves the install
@@ -252,6 +257,41 @@ describes; this stage is that future.
 - Determinism check: same manifest, two renders, byte-identical text region.
 
 **Risk:** the largest surface-area stage. Manifest change + worker change + storage + UI.
+
+---
+
+## S2.5 — The catalogue and the picker: the ceiling actually goes
+
+**Win:** the user picks a font from the Google catalogue and sees it, with a real preview, in a
+list that is not five items long. This is the half of S2 a user can point at. S2 makes fonts
+*travel correctly*; S2.5 makes them *choosable*.
+
+**Split out of S2 on 2026-08-13**, at the commit-3 boundary, on the implementor's flag. S2's commit
+4 carries T-2's named abort, the `export-core.ts:332` deletion, the substitute surface and the T-16
+two-marker harness — every obligation in the stage. The picker carries none. Putting UI iteration
+in the same commit as the render-boundary contract meant the two competed, and the piece with no
+ADR behind it was the one that would have been compressed.
+
+**Scope**
+- The browsable catalogue over the mirrored store — families, weights, styles, with real previews
+  rendered in the actual face rather than a name in a system font.
+- The picker UI, replacing `renderSafeFonts` (`composition-style.ts:121-127`) as the editor's font
+  surface. Legacy stacks keep rendering; D1a is not touched.
+- `warpFontCatalog` (`font-outlines.ts:51-61`) and `registerWarpFonts` / `configureFontResolver`
+  (:64, :86) become consumers of this catalogue rather than a parallel hand-maintained table. That
+  table's own comment calls itself the seam for a future font library, and it has been wrong twice:
+  it shipped EMPTY once, so every warped family silently rendered as the Roboto fallback.
+- Pinning a font is a **user-triggered, visible, per-project action** (D1a). Still no migration
+  script, still never automatic.
+
+**Verification**
+- Previews render in the face they name — the empty-catalogue incident is the precedent: a font
+  surface that silently shows the fallback looks exactly like one that works.
+- Picking a catalogue font writes a `catalogue` `FontRef` with a `fileHash`, not a family string.
+- The warp path resolves through the catalogue and its fallback still works when a family is absent.
+
+**Risk:** low-moderate. UI over a contract S2 already proved. The one real hazard is the preview
+lying, which is why it has its own check.
 
 ---
 
