@@ -137,6 +137,11 @@
     // their tables; MB/source of it is what the columns commit is supposed to move.
     stats.indexBytes = res.indexBytes;
     stats.indexSamples = res.indexSamples;
+    // DEBT-019 remote half: rangedBytes/rangedSources cover Range-confirmed remote sources (the
+    // `provider` variant against a remote mediaOrigin now takes this path by default); copiedBytes
+    // should read 0 for a corpus whose server honors Range, same proof shape as the local pass-through.
+    stats.rangedBytes = res.rangedBytes;
+    stats.rangedSources = res.rangedSources;
   }
 
   window.__debt019Held = held;

@@ -151,8 +151,25 @@ export function createApp() {
   // cross-origin by the editor AND by the export worker's headless browser, whose Remotion bundle
   // is served from its own origin (e.g. http://localhost:3000). The strict gate THROWS for unknown
   // origins (→ 500 with no ACAO header), which silently broke every render-time media fetch.
-  app.use("/storage", (_req, res, next) => {
+  app.use("/storage", (req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
+    // Range-paged remote reads (webcodecs-decoder.ts) issue plain fetch() calls with an explicit
+    // Range header -- a non-simple header, so the browser preflights with OPTIONS before the first
+    // ranged GET to a given URL. Without these three headers the preflight fell through to the
+    // R2/static handlers below (405 for OPTIONS, or a static 200 with no CORS headers at all) and the
+    // browser blocked every real range fetch. Content-Range/Accept-Ranges are also not on the
+    // cross-origin response-header safelist, so without Expose-Headers a 206 response's total size is
+    // invisible to fetch() even though the request itself succeeds.
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Range");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
+    // Cache the preflight per URL so a session's many windowed range reads pay it once, not once per
+    // window -- this is the difference between one extra round trip per source and one per GOP.
+    res.setHeader("Access-Control-Max-Age", "600");
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
     next();
   });
   if (isR2Storage) {

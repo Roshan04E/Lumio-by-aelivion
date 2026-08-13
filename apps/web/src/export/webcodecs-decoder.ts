@@ -24,8 +24,14 @@
  *      the common one. OPFS/IndexedDB assets and the user's own picked Files are already
  *      disk-backed and already sliceable, so we hand the original Blob straight to the window and
  *      copy NOTHING. `blob.slice()` reads the window off disk on demand.
- *   2. `fetch(url).blob()` — remote http(s) sources only. This one IS a whole-file RAM copy and is
- *      still O(file); range-paging it is a separate slice (see DEBT-019's restated expiry).
+ *   2. a `RangedRemoteByteSource` — remote http(s) sources whose Range support is CONFIRMED by a real
+ *      206 response, not assumed from an `Accept-Ranges` header (`remoteByteSourceFor`). It pages the
+ *      SAME window shape over HTTP that local sources page over disk, so a remote source no longer
+ *      holds more than one window's bytes at once either. DEBT-019's remote half.
+ *   3. `fetchSourceBlob`'s `fetch(url).blob()` — the fallback for a URL that fails the Range probe (a
+ *      server that ignores Range and returns 200, a dead URL, an unusable `Content-Range`). Still a
+ *      whole-file RAM copy, charged as `copiedBytes` exactly as before so a degrade cannot be mistaken
+ *      for a win in the residency numbers.
  * `sourceResidentBytes()` reports the difference in BYTES, never in provider count — a count is
  * only a proxy for bytes while clip lengths are similar, which is the assumption that broke.
  *
@@ -75,6 +81,17 @@ const residency = {
    */
   indexBytes: 0,
   indexSamples: 0,
+  /**
+   * DEBT-019 remote half. A remote http(s) source whose Range support was CONFIRMED (not assumed —
+   * see `probeAndBuildRangedSource`) is charged here at its logical file size, same framing as
+   * `passthroughBytes`: this is what is being served WITHOUT a whole-file copy, not what is resident
+   * at any instant (the actual resident bytes are the same transient, ≤`WINDOW_MAX_SPAN_BYTES` window
+   * every source kind already pays, local or remote). A URL that failed the probe and degraded to a
+   * whole-file fetch is charged as `copiedBytes` instead, honestly — it did not become cheap by being
+   * attempted.
+   */
+  rangedBytes: 0,
+  rangedSources: 0,
 };
 
 /** On-heap cost of one sample: Float64 offset + Uint32 size + Float64 ts + Uint32 duration + Uint8 key. */
@@ -216,10 +233,10 @@ function webcodecsDebugEnabled(): boolean {
  * instead materialise the whole file in RAM (measured: +226 MB for 192 MB of files), which is
  * pure loss, since the only consumer is a chunk window that wants ≤24 MB of it at a time.
  *
- * Returns the original Blob for anything the registry knows, and falls back to the fetch for
- * remote http(s) sources, where the copy is currently unavoidable.
+ * Returns the original Blob for anything the registry knows, and range-pages remote http(s) sources
+ * (`remoteByteSourceFor`) instead of copying them whole.
  */
-function sourceBlobFor(url: string): Promise<Blob> {
+function sourceBlobFor(url: string): Promise<ByteSource> {
   const local = resolveObjectUrlBlob(url);
   if (local) {
     // No cache entry: there is nothing to cache. We hold no bytes, so a second call is free.
@@ -232,7 +249,7 @@ function sourceBlobFor(url: string): Promise<Blob> {
     }
     return Promise.resolve(local);
   }
-  return fetchSourceBlob(url);
+  return remoteByteSourceFor(url);
 }
 
 function fetchSourceBlob(url: string): Promise<Blob> {
@@ -277,6 +294,198 @@ function fetchSourceBlob(url: string): Promise<Blob> {
   return cached;
 }
 
+/**
+ * The source bytes for `demuxIndex`/`createBlobChunkWindow`, whichever kind actually backs them.
+ * Both call sites only ever do `.size` and `.slice(start, end).arrayBuffer()` — `Blob` already
+ * satisfies this structurally, so a `RangedRemoteByteSource` slots in with zero changes to demux or
+ * window code: the SAME 4 MB index-parse rounds and the SAME ≤24 MB feed window that already bound a
+ * local read now bound a Range GET instead of a `Blob.slice()`.
+ */
+interface ByteSource {
+  readonly size: number;
+  slice(start: number, end: number): { arrayBuffer(): Promise<ArrayBuffer> };
+}
+
+/** How many bytes the Range-support probe requests — deliberately `INDEX_SLICE_BYTES`, so a
+ * confirmed-supported source's own probe response IS `demuxIndex`'s first round, not a wasted one. */
+const RANGE_PROBE_BYTES = INDEX_SLICE_BYTES;
+const RANGE_FETCH_TIMEOUT_MS = 20_000;
+const RANGE_RETRY_MAX = 3;
+const RANGE_RETRY_BASE_MS = 300;
+
+/** Thrown by `probeAndBuildRangedSource` when the URL demonstrably does not honor Range — as opposed
+ * to a network-level failure, which says nothing about Range support and must not poison future
+ * attempts the way this does. */
+class NotRangeableError extends Error {}
+
+/**
+ * Bounded, retried HTTP Range read for one [start, end) span. A dropped ranged request mid-scrub is a
+ * decode stall, not a memory problem — it is the failure users would actually notice — so this
+ * retries with backoff before surfacing to the caller, which already treats a thrown `ensure()`/
+ * `slice()` as provider failure (`win.ensure()`'s catch → `failed = true` → `<video>` fallback).
+ */
+async function fetchRange(url: string, start: number, end: number): Promise<ArrayBuffer> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= RANGE_RETRY_MAX; attempt += 1) {
+    if (attempt > 0) await sleepMs(RANGE_RETRY_BASE_MS * attempt);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), RANGE_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        headers: { Range: `bytes=${start}-${end - 1}` },
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      clearTimeout(timer);
+      if (response.status === 206) return await response.arrayBuffer();
+      if (response.status === 200) {
+        // The server stopped honoring Range mid-session (a CDN/proxy hop can drop the header even
+        // when the origin advertised support at probe time). It DID answer, just not the way we
+        // asked — slice out what was actually wanted rather than fail a request that succeeded.
+        const whole = await response.arrayBuffer();
+        if (webcodecsDebugEnabled()) {
+          console.warn(`[export] range fetch got 200 (not 206) for ${url} bytes=${start}-${end - 1} — server stopped honoring Range mid-session`);
+        }
+        return whole.slice(start, Math.min(end, whole.byteLength));
+      }
+      throw new Error(`range fetch HTTP ${response.status} for ${url} bytes=${start}-${end - 1}`);
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/**
+ * A remote http(s) source, windowed over HTTP Range instead of held whole. `size` is the confirmed
+ * total from the probe's `Content-Range`; `primed` is that same probe response, reused for the exact
+ * first `slice(0, N)` call `demuxIndex` makes so detection costs nothing on the happy path.
+ */
+class RangedRemoteByteSource implements ByteSource {
+  readonly size: number;
+  private readonly url: string;
+  private primed: { end: number; buffer: ArrayBuffer } | null;
+
+  constructor(url: string, size: number, primed: { end: number; buffer: ArrayBuffer }) {
+    this.url = url;
+    this.size = size;
+    this.primed = primed;
+  }
+
+  slice(start: number, end: number): { arrayBuffer(): Promise<ArrayBuffer> } {
+    const clampedEnd = Math.min(end, this.size);
+    return {
+      arrayBuffer: async (): Promise<ArrayBuffer> => {
+        if (clampedEnd <= start) return new ArrayBuffer(0);
+        const primed = this.primed;
+        if (primed && start === 0 && clampedEnd <= primed.end) {
+          this.primed = null; // one-shot: the window never re-reads [0, N) once past it
+          return primed.buffer.slice(0, clampedEnd);
+        }
+        this.primed = null; // any other first read means the prime went unused — don't hold it forever
+        return fetchRange(this.url, start, clampedEnd);
+      },
+    };
+  }
+}
+
+/** URLs a probe already proved do NOT honor Range — skip straight to `fetchSourceBlob` rather than
+ * re-probing (and re-paying its bytes) on every provider a project builds against the same source. */
+const rangeUnsupported = new Set<string>();
+const rangedSourceCache = new Map<string, Promise<RangedRemoteByteSource>>();
+const RANGED_SOURCE_CACHE_MAX = 12;
+/** Per-URL charge into `residency.rangedBytes`, so eviction can credit back the right amount. */
+const rangedSizes = new Map<string, number>();
+
+function creditRanged(url: string): void {
+  const size = rangedSizes.get(url);
+  if (size === undefined) return;
+  rangedSizes.delete(url);
+  residency.rangedBytes -= size;
+  residency.rangedSources -= 1;
+}
+
+/**
+ * Detect Range support for real — a `206` on an actual byte-range GET, not an `Accept-Ranges` header
+ * taken on faith — and build the paged source from that same response. Any other outcome throws
+ * `NotRangeableError` so the caller can degrade honestly instead of silently falling back to
+ * behavior that looks the same as success.
+ */
+async function probeAndBuildRangedSource(url: string): Promise<RangedRemoteByteSource> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { Range: `bytes=0-${RANGE_PROBE_BYTES - 1}` },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status !== 206) {
+    if (webcodecsDebugEnabled()) {
+      console.warn(`[export] ${url} did not honor Range (status ${response.status}) — falling back to a whole-file fetch`);
+    }
+    throw new NotRangeableError(`not rangeable: status ${response.status}`);
+  }
+  // Content-Range/Accept-Ranges must be on the CORS Expose-Headers allowlist for a cross-origin read
+  // to see this at all (see the /storage CORS middleware) — a same-origin dev proxy hides that gap.
+  const contentRange = response.headers.get("Content-Range");
+  const total = contentRange ? Number(contentRange.split("/")[1]) : NaN;
+  if (!Number.isFinite(total) || total <= 0) {
+    if (webcodecsDebugEnabled()) {
+      console.warn(`[export] ${url} returned 206 without a usable Content-Range ("${contentRange}") — falling back to a whole-file fetch`);
+    }
+    throw new NotRangeableError("206 without a usable Content-Range");
+  }
+  const buffer = await response.arrayBuffer();
+  return new RangedRemoteByteSource(url, total, { end: buffer.byteLength, buffer });
+}
+
+/**
+ * The remote-source half of `sourceBlobFor`. Confirmed-rangeable URLs page over HTTP Range, bounded
+ * to the same window the local pass-through already uses; anything else — probe failure, a server
+ * that ignores Range, a malformed 206 — degrades to `fetchSourceBlob`'s existing whole-file copy, and
+ * that degrade is charged as `copiedBytes`, the same bucket a real whole-file fetch already uses, so
+ * it cannot be mistaken for a win in the residency numbers.
+ */
+function remoteByteSourceFor(url: string): Promise<ByteSource> {
+  if (rangeUnsupported.has(url)) return fetchSourceBlob(url);
+  let cached = rangedSourceCache.get(url);
+  if (!cached) {
+    cached = probeAndBuildRangedSource(url)
+      .then((source) => {
+        rangedSizes.set(url, source.size);
+        residency.rangedBytes += source.size;
+        residency.rangedSources += 1;
+        return source;
+      })
+      .catch((error) => {
+        rangedSourceCache.delete(url);
+        // Only a demonstrated non-206 (or an unusable 206) means "this URL does not do Range" — a
+        // network-level failure (dead URL, timeout) says nothing about Range support and must not
+        // poison later attempts against the same URL once the network recovers.
+        if (error instanceof NotRangeableError) rangeUnsupported.add(url);
+        throw error;
+      });
+    rangedSourceCache.set(url, cached);
+    while (rangedSourceCache.size > RANGED_SOURCE_CACHE_MAX) {
+      const oldest = rangedSourceCache.keys().next().value;
+      if (oldest === undefined) break;
+      rangedSourceCache.delete(oldest);
+      creditRanged(oldest);
+    }
+  } else {
+    // LRU refresh: re-insert on hit so the busiest sources survive eviction.
+    rangedSourceCache.delete(url);
+    rangedSourceCache.set(url, cached);
+  }
+  return cached.catch(() => fetchSourceBlob(url));
+}
+
 function getDescription(file: MP4File, trackId: number): Uint8Array | undefined {
   const entry = file.getTrackById(trackId)?.mdia?.minf?.stbl?.stsd?.entries?.[0];
   const box = entry?.avcC ?? entry?.hvcC ?? entry?.vpcC ?? entry?.av1C;
@@ -318,7 +527,7 @@ const yieldTask: () => Promise<void> = (() => {
     });
 })();
 
-async function appendBlobSlice(file: MP4File, blob: Blob, start: number, end: number): Promise<number> {
+async function appendBlobSlice(file: MP4File, blob: ByteSource, start: number, end: number): Promise<number> {
   const part = (await blob.slice(start, end).arrayBuffer()) as ArrayBuffer & { fileStart: number };
   part.fileStart = start;
   const next = file.appendBuffer(part);
@@ -344,7 +553,7 @@ interface DemuxedIndex {
  * next-parse-position (it jumps over an incomplete mdat once it knows the box size, so a
  * moov-at-end file costs a head slice + tail slices, not a full read).
  */
-async function demuxIndex(blob: Blob): Promise<DemuxedIndex | null> {
+async function demuxIndex(blob: ByteSource): Promise<DemuxedIndex | null> {
   const file = createFile();
   let readyInfo: { track: MP4VideoTrackInfo; description: Uint8Array | undefined; fragmented: boolean } | null = null;
   let parseError: string | null = null;
@@ -459,7 +668,7 @@ async function demuxIndex(blob: Blob): Promise<DemuxedIndex | null> {
 }
 
 async function demuxFragmented(
-  blob: Blob,
+  blob: ByteSource,
   infoTrack: MP4VideoTrackInfo,
   infoDescription: Uint8Array | undefined,
   toMicros: (t: number) => number,
@@ -545,7 +754,7 @@ interface ChunkWindow {
   dispose(): void;
 }
 
-function createBlobChunkWindow(blob: Blob, index: SampleIndex): ChunkWindow {
+function createBlobChunkWindow(blob: ByteSource, index: SampleIndex): ChunkWindow {
   let loaded = new Map<number, EncodedVideoChunk>();
   return {
     chunkAt(i) {
@@ -622,7 +831,7 @@ function createRamChunkWindow(chunks: EncodedVideoChunk[]): ChunkWindow {
  */
 export async function probeDecodableEndSeconds(blobOrUrl: Blob | string): Promise<number | null> {
   if (typeof VideoDecoder === "undefined") return null;
-  let blob: Blob;
+  let blob: ByteSource;
   try {
     blob = typeof blobOrUrl === "string" ? await sourceBlobFor(blobOrUrl) : blobOrUrl;
   } catch {
@@ -654,7 +863,7 @@ export async function createWebCodecsVideoSource(
 ): Promise<FrameProvider | null> {
   if (typeof VideoDecoder === "undefined" || typeof EncodedVideoChunk === "undefined") return null;
 
-  let blob: Blob;
+  let blob: ByteSource;
   try {
     blob = await sourceBlobFor(url);
   } catch {

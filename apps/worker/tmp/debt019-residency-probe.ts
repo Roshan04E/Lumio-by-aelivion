@@ -103,6 +103,21 @@ function profileDir(corpusLabel: string): string {
 function startMediaServer(port: number, root: string): Promise<Server> {
   const base = path.resolve(root);
   const server = createServer((req, res) => {
+    // The probe's own page and this server are on DIFFERENT ports -- genuinely cross-origin, same as
+    // a real remote source. The range-paged decoder issues fetch() with an explicit Range header (a
+    // non-simple header), so the browser preflights with OPTIONS first; without Allow-Headers this
+    // server would 200 a preflight with no CORS headers at all and the browser would block every real
+    // range read -- silently reinstating the whole-file fetch this probe exists to disprove.
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Range");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
+    res.setHeader("Access-Control-Max-Age", "600");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     const name = decodeURIComponent((req.url ?? "/").split("?")[0]!).replace(/^\//, "");
     const file = path.resolve(base, name);
     if (!file.startsWith(base)) return void res.writeHead(403).end();
@@ -113,14 +128,20 @@ function startMediaServer(port: number, root: string): Promise<Server> {
       return void res.writeHead(404).end();
     }
     const head: Record<string, string> = {
-      "Access-Control-Allow-Origin": "*",
       "Content-Type": "video/mp4",
       "Accept-Ranges": "bytes",
     };
     const m = req.headers.range ? /bytes=(\d*)-(\d*)/.exec(req.headers.range) : null;
     if (m) {
       const start = m[1] ? Number(m[1]) : 0;
-      const end = m[2] ? Number(m[2]) : size - 1;
+      // Clamp to size-1 -- a real Range-compliant server clamps rather than 416s when the requested
+      // end overshoots (RFC 7233 §2.1). Without this, a probe requesting a fixed-size first window
+      // (INDEX_SLICE_BYTES, 4 MB) against a file SMALLER than that got a Content-Length header lying
+      // about how many bytes were actually on the wire -- createReadStream silently truncates at EOF,
+      // the promised length never arrives, and the browser's own ERR_CONTENT_LENGTH_MISMATCH looked
+      // exactly like "this server does not support Range" to the caller. Found by the DEBT-019 remote
+      // range-paging probe on the very first 3s-corpus rung (1.9 MB files, 4 MB probe request).
+      const end = Math.min(m[2] ? Number(m[2]) : size - 1, size - 1);
       res.writeHead(206, { ...head, "Content-Range": `bytes ${start}-${end}/${size}`, "Content-Length": String(end - start + 1) });
       createReadStream(file, { start, end }).pipe(res);
       return;
@@ -222,6 +243,7 @@ async function main() {
                 ? ""
                 : ` copied ${(s.copiedBytes / 1048576).toFixed(0)}MB/${s.copiedSources}src` +
                   ` passthru ${(s.passthroughBytes! / 1048576).toFixed(0)}MB/${s.passthroughSources}src` +
+                  ` ranged ${((s.rangedBytes ?? 0) / 1048576).toFixed(0)}MB/${s.rangedSources ?? 0}src` +
                   ` index ${(s.indexBytes! / 1048576).toFixed(1)}MB/${s.indexSamples}smp`;
             const note = variant.startsWith("opfs")
               ? `fileBytes ${(s.blobBytes! / 1048576).toFixed(0)}MB procs ${baseProcs}`

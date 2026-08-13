@@ -2730,8 +2730,12 @@ vehicle works, and 013's gap is upstream of it.
 
 ### DEBT-019 — a source provider holds the WHOLE file in memory, so residency scales with clip length
 
-- Status: **open — PARKED WITH A TRIGGER (2026-08-12)**, blocked on ADR-021 step 2's I-P6 budget
-  and nothing before it; see the closing update at the end of this entry
+- Status: **open, narrower.** Remote range-paging SHIPPED (2026-08-13) — the product-breaking
+  ceiling (50–100 concurrent 2-minute remote sources) is closed; see the closing update at the end of
+  this entry. What remains open: the ~15 MB/source unattributed residual, still **PARKED WITH A
+  TRIGGER (2026-08-12)** on ADR-021 step 2's I-P6 budget and now confirmed present on BOTH source
+  kinds (not local-only, see below); and the untouched pass-through mint sites this entry flags but
+  does not fix (`useFlarexCompProxies.ts:331` etc.).
 - Registered: 2026-08-10 (surfaced by the ADR-021 pull-model feasibility measurement, not by a slice)
 - Reason: `fetchSourceBlob` (`apps/web/src/export/webcodecs-decoder.ts`) materialises the entire
   source file as a `Blob` and the provider retains it for its whole lifetime, because the chunk
@@ -2747,30 +2751,38 @@ vehicle works, and 013's gap is upstream of it.
   Resource Manager's accounting and to every budget built on it. Same shape as DEBT-003 (accounted
   but not owned), one level worse: not accounted either.
 - Owner: unassigned
-- Expiry condition (restated 2026-08-12, see the phase-1/2a/2b updates below for why): the
-  original wording — "the encoded-sample window is demand-paged and evictable" — is **already
-  satisfied** and was never the unbounded term; the window (`WINDOW_MAX_SPAN_BYTES`, 24 MB) was
-  bounded from the start. Current condition: **for a LOCAL source, the decode path retains zero
-  whole-file copies** (`sourceResidentBytes().copiedBytes` reads 0 on a local-only project, at
-  every rung) **plus 25 bytes × sample count for the sample index** (≤0.09 MB for a 2-minute 30fps
-  source, ≤0.5 MB for 10 minutes, ≤2.7 MB per hour), **plus the 24 MB transient chunk window** —
-  with total provider residency reported in BYTES (never provider count) to whatever authority
-  enforces ADR-021's I-P6 budget. This does NOT claim total residency is duration-flat: a ~15
-  MB/source residual at N=100 is real, measured, and UNATTRIBUTED — see the park below, which is
-  what keeps this entry open rather than retiring on the restated condition alone.
-- Planned slice: none yet. ADR-021 step 2 cannot ship its I-P6 budget honestly while the dominant
-  per-source term is unbounded and untracked, so this is a likely prerequisite rather than a
-  follow-up.
+- Expiry condition (restated 2026-08-13, see the phase-1/2a/2b updates and the remote-range-paging
+  close below for why): the original wording — "the encoded-sample window is demand-paged and
+  evictable" — is **already satisfied** and was never the unbounded term; the window
+  (`WINDOW_MAX_SPAN_BYTES`, 24 MB) was bounded from the start, for BOTH source kinds now. Current
+  condition: **no source kind retains a whole-file copy by default** —
+  `sourceResidentBytes().copiedBytes` reads 0 on a local-only project AND on an all-remote project
+  whose server honors Range, at every rung — **plus 25 bytes × sample count for the sample index**
+  (≤0.09 MB for a 2-minute 30fps source, ≤0.5 MB for 10 minutes, ≤2.7 MB per hour), **plus the 24 MB
+  transient chunk window**, with total provider residency reported in BYTES (never provider count) to
+  whatever authority enforces ADR-021's I-P6 budget. A remote source whose Range probe fails degrades
+  to `copiedBytes` honestly (see the close below) rather than silently reinstating this debt. This
+  does NOT claim total residency is duration-flat: a ~15 MB/source residual at N=100 is real,
+  measured, UNATTRIBUTED, and — as of 2026-08-13 — present at a closely matching ratio on BOTH source
+  kinds, not a local-only artifact. See the park below, which is what keeps this entry open rather
+  than retiring on the restated condition alone.
+- Planned slice: none yet for the residual. ADR-021 step 2 cannot ship its I-P6 budget honestly while
+  that term is unattributed, so sizing it is a likely prerequisite rather than a follow-up. Remote
+  range-paging itself is DONE, not planned — see the close below.
 - Tracking issue: —
 - Detection: any new consumer that constructs providers per *source* rather than per *playing clip*,
   without first asking what the resident-byte ceiling is. Concretely: a `createFrameProvider` call
   site whose count is bounded by the project's asset count or a comp's node count instead of by a
   small constant. Also — a memory budget expressed in **provider count** rather than in **bytes** is
   this debt being extended, because count is only a proxy for bytes while clip lengths are similar.
-- **Header updated 2026-08-13:** Status was plain "open" from registration; Expiry condition named
-  the encoded-sample window as the unbounded term. Both were superseded by the entry's own
-  2026-08-12 phase-1 measurement (the window was never unbounded; the Blob was) and 2b's restated
-  ceiling. See `README.md`, "State fields vs. history."
+- **Header updated 2026-08-13 (morning):** Status was plain "open" from registration; Expiry
+  condition named the encoded-sample window as the unbounded term. Both were superseded by the
+  entry's own 2026-08-12 phase-1 measurement (the window was never unbounded; the Blob was) and 2b's
+  restated ceiling. See `README.md`, "State fields vs. history."
+- **Header updated 2026-08-13 (afternoon):** Status and Expiry condition rewritten again — remote
+  range-paging shipped, closing this entry's namesake product-breaking ceiling and extending the
+  "already satisfied" half of the expiry condition to remote sources. See the closing update at the
+  end of this entry for the measurement.
 
 **Measurement (2026-08-10, `plans/adr-021-pull-model-feasibility.md`).** N live providers over
 distinct 1280×720 sources, sum of all `chrome.exe` working sets, fresh browser per rung with a
@@ -3093,6 +3105,191 @@ The root cause of the leftovers was in the gate, not the preflight, and is fixed
 killed the `cmd.exe` that `spawn(..., { shell: true })` returns, which dies obediently while the vite
 node process underneath survives holding the stdio pipes it inherited — so a gate that had already
 printed PASSED could not exit. It now `taskkill /T /F`s the tree and waits.
+
+**UPDATE (2026-08-13) — REMOTE RANGE-PAGING SHIPPED. The namesake ceiling (this entry's own
+"could not complete" finding, three reproductions) is closed: N=100 × 2-minute remote sources now
+completes cleanly, where it previously exhausted at 50 and fell back to `<video>`.**
+
+**What shipped.** `fetchSourceBlob`'s whole-body `fetch(url).blob()` is no longer the only path for a
+remote http(s) source. `sourceBlobFor` now calls `remoteByteSourceFor`
+(`apps/web/src/export/webcodecs-decoder.ts`), which pages the SAME window the local pass-through
+already uses — `WINDOW_MAX_SAMPLES` (96) / `WINDOW_MAX_SPAN_BYTES` (24 MB), whole-window replace —
+over HTTP `Range` instead of `Blob.slice()`. A new `ByteSource` interface (`{ size, slice(start, end):
+{ arrayBuffer() } }`) is the seam: `Blob` already satisfies it structurally, so `demuxIndex`,
+`demuxFragmented` and `createBlobChunkWindow` needed ZERO changes — the same 4 MB
+(`INDEX_SLICE_BYTES`) index-parse rounds and the same ≤24 MB feed window now bound a `Range` GET
+exactly as they bounded a `Blob.slice()`. `RangedRemoteByteSource` implements `ByteSource` over
+`fetch()` with an explicit `Range` header; `probeAndBuildRangedSource` confirms support with a REAL
+byte-range request (a `206`, not an `Accept-Ranges` header taken on faith) and that same response
+primes `demuxIndex`'s first round, so detection costs nothing on the happy path.
+
+**The four things the task named, each decided and tested, not assumed:**
+
+- **A server that ignores Range.** Detected by the actual response status, not a header:
+  `probeAndBuildRangedSource` throws `NotRangeableError` on anything but a real `206`, and
+  `remoteByteSourceFor` degrades to `fetchSourceBlob`'s existing whole-file copy — charged as
+  `copiedBytes`, the SAME bucket a real whole-file fetch already uses, specifically so the degrade
+  cannot read as a win in the residency numbers. Exercised for real (not asserted): a purpose-built
+  Range-blind test server (`apps/worker/tmp/debt019-latency-probe.ts`'s `rangeBlindServer`, answers
+  preflight normally, then always returns 200 with the whole body) drove three of the four measured
+  cases below. A URL that fails the probe once is remembered (`rangeUnsupported`) so later providers
+  for the same source don't re-pay a doomed probe — but only for a real non-206 response; a
+  network-level failure (dead URL, timeout) is NOT remembered as "unrangeable", since it says nothing
+  about Range support and must not poison a later attempt once the network recovers.
+- **CORS.** Checked against the storage this product actually uses, not assumed: `fetch()` with an
+  explicit `Range` header is a non-simple cross-origin request, so the browser preflights with
+  `OPTIONS` — unlike the existing native `<video>`/`OffthreadVideo` Range usage this repo already
+  ships, which the browser's own media pipeline issues and does NOT preflight. The `/storage` CORS
+  middleware (`apps/api/src/app.ts`) was permissive on `Access-Control-Allow-Origin` but had no
+  `Allow-Methods`/`Allow-Headers` and no `OPTIONS` handler, so a preflight fell through to the R2
+  proxy handler's `405` (or a static 200 with no CORS headers) and the browser blocked every real
+  range read — silently reinstating this debt. Fixed with `Access-Control-Allow-Methods`,
+  `Access-Control-Allow-Headers: Range`, an `OPTIONS → 204` short-circuit, and
+  `Access-Control-Expose-Headers: Content-Range, Accept-Ranges, Content-Length` (also required —
+  those response headers are NOT on the cross-origin safelist, so without it `fetch()` could see a
+  `206` but never read the total size). This gap is invisible in production: nginx serves the web app
+  and proxies `/storage/` under one origin, so no preflight ever fires there. It bites only the DEV
+  cross-origin split (web `:5173`, api `:4100`, per `CLAUDE.md`) and any future consumer that reads
+  `/storage` genuinely cross-origin. R2 itself was already fine — `packages/storage`'s
+  `getObjectStream`/`streamFromR2WithResume` already forwards `Range` natively and R2 honors it; this
+  was purely an API-layer CORS gap, never an R2 problem, and no R2 bucket policy changed.
+- **The moov/index.** Confirmed rather than assumed: `demuxIndex` already parses the sample table
+  incrementally, `blob.slice(pos, end).arrayBuffer()` in `INDEX_SLICE_BYTES` (4 MB) rounds, following
+  mp4box's own next-parse-position (which jumps past an unparsed `mdat` for a moov-at-end file — head
+  slice + tail slice, not a full read). Because `ByteSource` is a structural drop-in for `Blob`, this
+  needed no changes at all to page over Range; the `RANGE_PROBE_BYTES` support-check doubles as the
+  first such round.
+- **Retry and partial-response handling.** `fetchRange` retries up to 3× with backoff on a dropped or
+  timed-out request (bounded at 20s/attempt) before surfacing to the caller — which already treats a
+  thrown `ensure()`/`slice()` as provider failure (`<video>` fallback), so an exhausted retry degrades
+  the same way a demux failure already did, not a new failure mode. A response that answers `200`
+  instead of `206` mid-session (a CDN/proxy hop dropping the header after the origin advertised
+  support) is handled by slicing the returned whole body in JS rather than failing a request that DID
+  answer, just not the way it was asked.
+
+**MEASUREMENT 1 — RESIDENCY.** Same instrument and rules as this entry's own phase-2a/2b ladders:
+`apps/worker/tmp/debt019-residency-probe.ts`, sum of every `chrome.exe` working set, fresh browser per
+rung, zero-Chrome floor enforced, build identity proven, both corpora (3s/120s, 100 files each, same
+recipe) and all four rungs in one process. The `provider` variant against a REMOTE `mediaOrigin`
+(cross-origin from the probe's own page — a different port, the same shape as a real remote source)
+now takes the ranged path by default; no flag, no separate code path.
+
+| N | 3s ranged | 120s ranged | ratio | 3s local (phase 2b) | 120s local (phase 2b) | local ratio |
+|---|---|---|---|---|---|---|
+| 1 | 119.3 | 149.1 | 1.25× | 100.8 | 102.8 | 1.02× |
+| 25 | 23.3 | 31.5 | 1.35× | 14.5 | 23.9 | 1.65× |
+| 50 | 18.6 | 23.8 | 1.28× | 14.0 | 19.4 | 1.39× |
+| 100 | 13.4 | 30.5 | **2.28×** | 12.3 | 27.8 | **2.26×** |
+
+(MB per source; duration varies 40× between corpora.) `copiedBytes` reads **0 at every single rung** —
+the pass-through is proven engaged for every remote source, not inferred from the memory number.
+Providers proven live and proven to page: 100 streaming / 0 fragmented at N=100 (both corpora), 400
+`getFrame` calls, **0 nulls**, pulls at 2/35/70/98% of each clip. `chrome.exe` after run: 0.
+
+**THE HEADLINE.** N=100 × 120s **completes**, cleanly, with zero nulls — the exact rung this entry's
+own prior measurement (three reproductions) recorded as "could not complete... exhausts, falls back
+to `<video>`, and times out." That ceiling is gone.
+
+**HONEST FAILURE TO MEET DURATION-FLAT, same as the local half, and closely matching it.** The bar
+this entry has always used is per-source residency flat across duration; ranged is 1.25–2.28×, not
+1.0×. But look at the two ratio columns above: at every N the ranged ratio and the LOCAL ratio (this
+entry's own phase-2b table) are within a few hundredths of each other, and at N=100 they are
+**2.28× vs 2.26×** — indistinguishable given the ladder's own rung-to-rung noise. **This is the same
+already-parked, already-unattributed ~15 MB/source residual, not a new range-paging-specific defect.**
+It was never a property of the Blob; it is decode/seek state that appears under multi-point GOP-
+crossing access (this entry's own phase-2b finding: "a long clip's four pulls cross GOPs and force
+resets"), and that cost exists regardless of whether the encoded bytes arrived via `Blob.slice()` or
+`fetch()` Range. The park below is updated to say so — the residual is now confirmed source-kind-
+independent, not local-only.
+
+`rangedBytes` plateaus at 23 MB (3s) / 922 MB (120s) from N=25 onward — the `RANGED_SOURCE_CACHE_MAX`
+(12) LRU cap on tracked ranged sources, not a leak. Read this number as a BOOKKEEPING CHARGE (the
+logical size of what is being served without a whole-file copy, same framing as `passthroughBytes`),
+not literal resident RAM — actual transient resident bytes per source stay bounded by the same ≤24 MB
+window every source kind already pays, local or remote.
+
+**MEASUREMENT 2 — LATENCY, the risk the split was made for.** A residency ladder cannot see this.
+New instrument, `apps/worker/tmp/debt019-latency-probe.ts`: one 120s/77.2 MB clip, two purpose-built
+servers (Range-honoring vs Range-blind, so BOTH code paths are exercised for real — not toggled by a
+debug flag the shipped code doesn't have), two CDP-emulated network profiles (fast = unthrottled
+loopback; throttled = 5 Mbps down / 1 Mbps up / 120 ms RTT, a realistic weak connection), fresh browser
+per case, zero-floor + build-identity preconditions as above. Cold-start = time to first frame from a
+freshly created provider; seek = time to a frame at ~90% into the clip (a region nothing has fetched
+yet).
+
+| network | ranged cold | whole-file(degraded) cold | ranged seek | whole-file(degraded) seek |
+|---|---|---|---|---|
+| fast (LAN) | 162–171 ms | 1276–1434 ms | 75–76 ms | 44–51 ms |
+| throttled (weak link) | 11.7 s | **123.1 s** | 3.5 s | 14 ms |
+
+Reproduced twice at each network condition (both fast-arm pairs and both throttled-arm pairs agree to
+within measurement noise).
+
+**Cold start: ranged wins on BOTH networks, not just the slow one** — ~8–9× faster even over loopback
+(the whole-file arm still pays a full 77 MB copy before anything can decode), ~10.5× faster under
+throttle. **Seek: the real, honest trade.** Ranged pays 3.5s under throttle for a genuine new Range
+fetch of the target GOP window; whole-file pays ~14ms because by the time a seek happens the ENTIRE
+file is already resident. A source that gets seeked into several cold regions on a slow link pays that
+3.5s more than once under ranging — priced, not hidden.
+
+**But the whole-file baseline is not simply "slow", it is FRAGILE at exactly this size/link
+combination, and that changes the trade.** A `providerKind` diagnostic (added specifically because
+`streaming=0 frag=0` on the throttled whole-file run was otherwise inexplicable given `frame0=true`)
+proved the 123.1s run did NOT complete via WebCodecs: `fetchSourceBlob`'s own PRE-EXISTING 120s body
+timeout fired mid-transfer, the provider silently fell back to the `<video>` element, and THAT is what
+finished the load. This timeout is not new and is not part of this slice's change — it is a latent
+property of the code this slice replaces, and this measurement is the first to actually catch it
+firing on a realistic slow-link file size. A remote source large enough and a link slow enough to
+approach ~120s was already one dropped connection away from losing frame-accurate blocking-decode
+semantics before this slice; range-paging doesn't just beat that path on speed, it avoids the failure
+mode entirely, because no single ranged read is anywhere near large enough to approach that timeout.
+
+**Is it worth the ceiling being gone? Yes, priced rather than assumed:** the residency ceiling this
+entry is named for was product-breaking (a hard, measured limit of roughly 25–50 concurrent 2-minute
+remote sources, independent of link speed), while the seek-latency cost ranging introduces is bounded,
+retried, and only paid when a genuinely cold region is touched. The whole-file path being replaced was
+never a clean, reliable "slow but works" baseline to begin with — under a realistic weak connection at
+a realistic file size it was already failing its own budget and silently degrading to a worse decode
+path. Both problems this slice fixes (the ceiling, and this latent fragility) point the same direction.
+
+**Preconditions, reported for both instruments, not assumed:** `PIXEL_BROWSER_CHANNEL=chrome`;
+zero-browser floor enforced before every rung/case (`assertZeroBrowserFloor`); build identity proven
+serving this worktree (`assertServingThisWorktree`, both probes); subsystem proven live — providers
+demuxed via the streaming path (never fragmented, 0 nulls across 400+ `getFrame` calls in the
+residency ladder), frames pulled across the WHOLE clip (2/35/70/98%) so the chunk window actually
+pages rather than sitting on its first span, and (latency probe) `providerKind` proving which decode
+path actually served each case rather than inferring it from a timing number.
+
+**VERIFICATION, as run:**
+1. Six typechecks: **zero** (`shared`, `storage`, `web`, `render-templates`, `worker`, `api`). The
+   product code lives in `apps/web/src/export/webcodecs-decoder.ts` (covered by `apps/web`'s
+   tsconfig); the two new/changed `apps/worker/tmp/*.ts` probes are outside `apps/worker`'s
+   `tsconfig.json` `include` (matches this repo's existing tmp-script convention) and were typechecked
+   manually with matching compiler flags — clean but for the SAME pre-existing false positive
+   `pull-bootstrap.ts` already carries (a Vite-resolved absolute-path import tsc can't statically
+   resolve outside the real build).
+2. `wc:gate` — **PASSED**, all scenarios (streaming/fragmented classification, frame accuracy on both
+   MP4 layouts, pool admission/preemption/re-admission, reverse-shuttle bounded decode work, DEBT-013
+   re-admission). This exercises export/seek/scrub CORRECTNESS through the `ByteSource` refactor —
+   every scenario in `WcDecoderGatePage.tsx` uses either a raw (untracked) `blob:` URL or the
+   same-origin `/__wc-fixtures/real.mp4`, both of which now route through `remoteByteSourceFor` too
+   (neither is in the object-URL registry), so this is a real regression check on the refactor. Stated
+   plainly: none of `wc:gate`'s scenarios are genuinely cross-origin, so it does NOT exercise the CORS
+   fix — that is what the latency/residency probes' cross-port media servers cover instead.
+3. `render:link-gate` and `render:compare:pixels` — **not run.** This slice touches
+   `apps/web/src/export/webcodecs-decoder.ts`, `apps/api/src/app.ts`'s `/storage` CORS middleware, and
+   two `apps/worker/tmp/*` test harnesses; nothing in `packages/shared/src/color/`, the transition/
+   effect registries, or `render-comparison-fixture.ts`. Neither gate reads anything this slice
+   changed.
+4. Tree held still — `ba3472d` stayed HEAD throughout; no concurrent commits landed underneath this
+   work.
+
+**What is NOT part of this close.** The ~15 MB/source unattributed residual (now confirmed present on
+both source kinds) stays PARKED on the same trigger — ADR-021 step 2's I-P6 budget, still not sized,
+still not scheduled. The fragmented-MP4 fallback is unchanged and remains O(file) for both source
+kinds by construction (unrelated to this slice — it never held a Blob to page in the first place). The
+untouched pass-through mint sites (`useFlarexCompProxies.ts:331`, `sourceProxyStore.ts:239/266/289`,
+`sourceProxyEngine.ts:737`) are unaudited, exactly as this entry already flagged.
 
 ---
 
