@@ -23,6 +23,7 @@ import {
   isItalicActive,
   LEGACY_CSS_BOLD_WEIGHT,
   planFaceChange,
+  registerUserFontFaces,
   resolveFamilyFace,
   type FontRef
 } from "@orreris/shared";
@@ -73,15 +74,20 @@ function main(): void {
   /* ---- THE STAGE: Bold over a pinned family rewrites the ref to a real cut. ------------------ */
   const boldPlan = planFaceChange({ fontRef: arimo(400), fontWeight: 400, italic: false }, { bold: true });
   assert.equal(boldPlan.kind, "face", "Bold over a pinned family must pick a FILE, not emit CSS.");
-  assert.deepEqual(boldPlan, { kind: "face", family: "Arimo", weight: 700, style: "normal" });
+  assert.deepEqual(boldPlan, { kind: "face", source: "catalogue", family: "Arimo", weight: 700, style: "normal" });
 
   const unboldPlan = planFaceChange({ fontRef: arimo(700), fontWeight: 400, italic: false }, { bold: false });
-  assert.deepEqual(unboldPlan, { kind: "face", family: "Arimo", weight: 400, style: "normal" }, "…and turning it off comes back.");
+  assert.deepEqual(
+    unboldPlan,
+    { kind: "face", source: "catalogue", family: "Arimo", weight: 400, style: "normal" },
+    "…and turning it off comes back."
+  );
 
   // Italic is the same mechanism, and the two compose: bold + italic must land on the bold italic
   // file rather than on one of them plus a synthetic other.
   assert.deepEqual(planFaceChange({ fontRef: arimo(700), fontWeight: 400, italic: false }, { italic: true }), {
     kind: "face",
+    source: "catalogue",
     family: "Arimo",
     weight: 700,
     style: "italic"
@@ -109,18 +115,77 @@ function main(): void {
 
   /**
    * A ref already ON the cut must be able to leave it, even when the family's face list says that
-   * cut is unavailable — a `user` font (S3) knows nothing about its siblings, and a bold one that
-   * could never be un-bolded would be a trap. This is the asymmetry: refusing to CREATE a cut we
-   * cannot serve is honest; refusing to leave one the layer already holds is a dead end.
+   * cut is unavailable — an uploaded font whose siblings are unknown, with a bold one that could
+   * never be un-bolded, would be a trap. This is the asymmetry: refusing to CREATE a cut we cannot
+   * serve is honest; refusing to leave one the layer already holds is a dead end.
    */
   const userBold: FontRef = { source: "user", family: "Brand Sans", weight: 700, style: "normal", fileHash: "h", ownerId: "u1" };
-  assert.equal(familyFaces("Brand Sans").length, 0, "an uploaded font has no known siblings — that is the case under test.");
+  assert.equal(familyFaces("Brand Sans", "user").length, 0, "nothing registered yet — that is the case under test.");
   assert.equal(faceControlBlocked({ fontRef: userBold, fontWeight: 400, italic: false }, "bold"), undefined, "…so bold-off stays reachable.");
   const userRegular: FontRef = { ...userBold, weight: 400 };
   assert.ok(
     faceControlBlocked({ fontRef: userRegular, fontWeight: 400, italic: false }, "bold"),
     "but bold-ON for a font whose siblings we do not know must refuse rather than guess."
   );
+
+  /* ---- S3 / T-18: an uploaded family GROUPS, and grouping does not loosen the rule. ---------- */
+  registerUserFontFaces([
+    { family: "Brand Sans", weight: 400, style: "normal" },
+    { family: "Brand Sans", weight: 700, style: "normal" },
+    // Uploaded twice — same family, weight and style. Content-addressed, so it is the same FILE.
+    { family: "Brand Sans", weight: 700, style: "normal" },
+    { family: "Brand Serif", weight: 400, style: "normal" }
+  ]);
+  assert.equal(familyFaces("Brand Sans", "user").length, 2, "a duplicate upload is one cut, not two rows pinning identical bytes.");
+  assert.equal(
+    faceControlBlocked({ fontRef: userRegular, fontWeight: 400, italic: false }, "bold"),
+    undefined,
+    "THE SEAM S2.7 LEFT: once an uploaded font has known siblings, bold stops refusing."
+  );
+  const userPlan = planFaceChange({ fontRef: userRegular, fontWeight: 400, italic: false }, { bold: true });
+  assert.deepEqual(
+    userPlan,
+    { kind: "face", source: "user", family: "Brand Sans", weight: 700, style: "normal" },
+    "…and the plan carries the STORE, because a user cut is one this account uploaded and can never be fetched."
+  );
+
+  /**
+   * **T-18 holds for uploaded fonts too, and this is the arm the rule was written for.** The user
+   * has uploaded no italic. A nearest-match resolver would answer with the roman and the layer would
+   * claim a cut that does not exist — "an uploaded roman silently answers a bold request", one axis
+   * over. Grouping gives the resolver more to say, never permission to guess.
+   */
+  assert.equal(familyHasItalic("Brand Sans", "user"), false);
+  assert.equal(resolveFamilyFace("Brand Sans", 400, "italic", "user"), undefined, "no italic uploaded, no italic answered.");
+  assert.ok(faceControlBlocked({ fontRef: userRegular, fontWeight: 400, italic: false }, "italic"));
+  assert.equal(planFaceChange({ fontRef: userRegular, fontWeight: 400, italic: false }, { italic: true }).kind, "unavailable");
+  // Brand Serif has only a regular, so it behaves exactly like Anton — the single-cut path is not
+  // special-cased per store.
+  const serifRef: FontRef = { source: "user", family: "Brand Serif", weight: 400, style: "normal", fileHash: "h2", ownerId: "u1" };
+  assert.equal(planFaceChange({ fontRef: serifRef, fontWeight: 400, italic: false }, { bold: true }).kind, "unavailable");
+
+  /**
+   * **The two stores do not blur, and this is D4 showing up in the resolver.** A user who uploads
+   * their own "Arimo" — one weight — must NOT have Google's Arimo answer for its bold, or the editor
+   * would pin a catalogue file the layer never named and a render for another account would then
+   * resolve it perfectly happily.
+   */
+  registerUserFontFaces([{ family: "Arimo", weight: 400, style: "normal" }]);
+  assert.equal(familyFaces("Arimo", "user").length, 1, "the user's Arimo is theirs…");
+  assert.ok(familyFaces("Arimo", "catalogue").length >= 4, "…and the catalogue's Arimo is unaffected.");
+  const userArimo: FontRef = { source: "user", family: "Arimo", weight: 400, style: "normal", fileHash: "h3", ownerId: "u1" };
+  assert.equal(
+    planFaceChange({ fontRef: userArimo, fontWeight: 400, italic: false }, { bold: true }).kind,
+    "unavailable",
+    "an uploaded single-weight Arimo must not borrow Google's bold — same name, different store, different font."
+  );
+  assert.equal(
+    planFaceChange({ fontRef: arimo(400), fontWeight: 400, italic: false }, { bold: true }).kind,
+    "face",
+    "…while the CATALOGUE Arimo still bolds, from its own store."
+  );
+  registerUserFontFaces([]);
+  assert.equal(familyFaces("Arimo", "user").length, 0, "registering an empty set clears it — removing a font removes its cuts.");
 
   /* ---- D1a: the legacy path is UNTOUCHED, including the weight it has always written. -------- */
   const legacyInput = { fontRef: legacy, fontWeight: 400, italic: false };
@@ -167,7 +232,7 @@ function main(): void {
 
   console.log(
     `Face resolution passed. Arimo ${familyFaces("Arimo").length} cuts, Cairo ${familyFaces("Cairo").length} (no italic), ` +
-      `Anton ${familyFaces("Anton").length} — bold refused, not faked.`
+      `Anton ${familyFaces("Anton").length} — bold refused, not faked; uploaded families group without loosening T-18.`
   );
 }
 

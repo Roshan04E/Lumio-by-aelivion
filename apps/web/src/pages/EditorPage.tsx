@@ -238,6 +238,9 @@ import { FontPicker } from "../editor/controls/FontPicker";
 // it is testable without a browser; `pinFont` turns the chosen cut into bytes (mirroring if needed).
 import { faceControlBlocked, isBoldActive, isItalicActive, planFaceChange, FACE_BOLD_WEIGHT, FACE_REGULAR_WEIGHT } from "@orreris/shared";
 import { fontPinState, fontPinVersion, pinFont, subscribeFontPins } from "../lib/font-pin";
+// ADR-023 T-18 (S3) — an uploaded font's other cuts come from this account's own registry, never
+// from the shared index. The two stores are two types precisely so this cannot blur.
+import { listUserFonts, userFontRef } from "../lib/user-fonts";
 import { NumberControl } from "../editor/inspector/controls/NumberControl";
 import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
@@ -15198,6 +15201,24 @@ function FaceToggleControl({
         if (plan.kind === "unavailable") return;
         if (plan.kind === "css") {
           onChange((item) => ({ ...item, fontWeight: plan.fontWeight, italic: plan.italic }));
+          return;
+        }
+        /**
+         * ADR-023 D4/T-3 + T-18 (S3) — the two stores resolve two ways, and the plan says which.
+         *
+         * A user cut is a file this account already uploaded: it is found in the local registry and
+         * pinned immediately, never fetched, because there is nowhere to fetch it from. A catalogue
+         * cut goes to the mirror. Sending a user font down the mirror path would ask Google for a
+         * family only this account has — which is the "resolve a font without discriminating on the
+         * store" that T-3 exists to make impossible.
+         */
+        if (plan.source === "user") {
+          const record = listUserFonts().find(
+            (entry) => entry.family === plan.family && entry.weight === plan.weight && entry.style === plan.style
+          );
+          // The plan came from the same registry, so a miss means it changed underneath us. Writing
+          // nothing is the right answer: the layer keeps the cut it has.
+          if (record) onChange((item) => ({ ...item, fontRef: userFontRef(record) }));
           return;
         }
         setResolving(true);

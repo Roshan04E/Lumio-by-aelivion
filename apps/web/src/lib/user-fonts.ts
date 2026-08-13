@@ -34,6 +34,7 @@ import {
   FontIngestError,
   readFontIdentity,
   type FontIdentity,
+  registerUserFontFaces,
   type FontRef
 } from "@orreris/shared";
 import { getAssetBlobStore } from "./asset-blob-store";
@@ -86,8 +87,29 @@ function readRegistry(): UserFontRecord[] {
 
 function writeRegistry(records: UserFontRecord[]): void {
   localStorage.setItem(REGISTRY_KEY, JSON.stringify(records));
+  syncFaceRegistry();
   notify();
 }
+
+/**
+ * ADR-023 T-18 (S3) — hand this account's uploaded cuts to the face resolver.
+ *
+ * **This is what closes the seam S2.7 left.** Until an uploaded font had known siblings, both weight
+ * controls correctly reported "we don't know what other cuts this has" and refused to turn bold ON
+ * — right when you know nothing, wrong the moment you do. Scoped to the signed-in account for the
+ * same reason `listUserFonts` is: the browser registry is shared by everyone who uses this machine.
+ */
+function syncFaceRegistry(): void {
+  registerUserFontFaces(listUserFonts());
+}
+
+/**
+ * Seed the face registry at module load: the local registry outlives the session that wrote it, so
+ * a reload must restore an uploaded font's known cuts BEFORE the inspector renders its weight
+ * controls. Otherwise the first paint after a refresh reports "we don't know what other cuts this
+ * has" for a font sitting right there in the list — S2.7's seam, reopened once per reload.
+ */
+if (typeof window !== "undefined") syncFaceRegistry();
 
 /**
  * This account's uploaded fonts.

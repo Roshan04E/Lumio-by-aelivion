@@ -69,18 +69,51 @@ export interface FaceDescriptor {
 }
 
 /**
- * The faces a family actually offers.
+ * ADR-023 T-18 (S3) — **the faces of a family a USER uploaded.**
  *
- * The remote index wins over the bundled catalogue where both know the family, because the index is
- * the full picture: we bundle Arimo 400 and 700 but the family also has italics, and a user should
- * be able to reach them — the mirror will fetch the cut on demand (S2.6). The bundled list is the
- * fallback for a family the index does not carry.
+ * A user font's siblings cannot be looked up: they are whatever that account happened to upload, so
+ * the editor pushes them in here and this module reads them back. Deliberately a registry rather
+ * than a parameter threaded through every call — `planFaceChange` is called from a click handler,
+ * and giving it a "and also here is my font library" argument would put the same list at every call
+ * site for one of them to get wrong.
  *
- * Empty for anything unknown, which includes `source: "user"` fonts (S3): we hold one uploaded file
- * and know nothing about its siblings, so every cut-changing control correctly reports "no other
- * cut" rather than guessing. That is the honest answer until S3 gives a user font a family group.
+ * Empty is the honest default. Before this stage that emptiness was the whole of S2.7's seam: every
+ * cut-changing control reported "we don't know what other cuts this has" and refused to turn bold
+ * ON, which is right when you know nothing and wrong once you do.
  */
-export function familyFaces(family: string): readonly FaceDescriptor[] {
+const userFaces = new Map<string, FaceDescriptor[]>();
+
+/**
+ * Replace the known faces of this account's uploaded fonts. Called whenever the local registry
+ * changes; a full replacement rather than an append, so removing a font actually removes its cuts.
+ */
+export function registerUserFontFaces(records: ReadonlyArray<{ family: string; weight: number; style: "normal" | "italic" }>): void {
+  userFaces.clear();
+  for (const record of records) {
+    const list = userFaces.get(record.family) ?? [];
+    // Same family, same weight, same style uploaded twice is one cut. It is also the same FILE
+    // (content-addressed), so counting it twice would offer a duplicate that pins identical bytes.
+    if (!list.some((face) => face.weight === record.weight && face.style === record.style)) {
+      list.push({ weight: record.weight, style: record.style });
+    }
+    userFaces.set(record.family, list);
+  }
+}
+
+/**
+ * The faces a family actually offers, **within the store the layer's font came from**.
+ *
+ * The store is part of the question rather than a detail, and D4 is why: a user who uploads their
+ * own "Roboto" has a family that is theirs, and answering a bold request for it out of Google's
+ * index would send the editor after a catalogue file the layer never named. The two stores are two
+ * types precisely so that this cannot happen by accident.
+ *
+ * For the shared stores the remote index wins over the bundled catalogue where both know the
+ * family, because the index is the full picture: we bundle Arimo 400 and 700 but the family also has
+ * italics, and the mirror will fetch a cut on demand (S2.6).
+ */
+export function familyFaces(family: string, source?: "catalogue" | "user"): readonly FaceDescriptor[] {
+  if (source === "user") return userFaces.get(family) ?? [];
   const indexed = fontIndexFamily(family);
   if (indexed) return indexed.faces;
   const bundled = catalogueFamily(family);
@@ -96,8 +129,13 @@ export function familyFaces(family: string): readonly FaceDescriptor[] {
  * point of this module — those two are answering "what should I show", and this one is answering
  * "does the cut you asked for exist".
  */
-export function resolveFamilyFace(family: string, weight: number, style: "normal" | "italic"): FaceDescriptor | undefined {
-  const pool = familyFaces(family).filter((face) => face.style === style);
+export function resolveFamilyFace(
+  family: string,
+  weight: number,
+  style: "normal" | "italic",
+  source?: "catalogue" | "user"
+): FaceDescriptor | undefined {
+  const pool = familyFaces(family, source).filter((face) => face.style === style);
   if (!pool.length) return undefined;
   let best: FaceDescriptor | undefined;
   let bestDistance = Number.POSITIVE_INFINITY;
@@ -112,13 +150,13 @@ export function resolveFamilyFace(family: string, weight: number, style: "normal
 }
 
 /** Does this family ship a bold cut in the requested style? */
-export function familyHasBold(family: string, style: "normal" | "italic" = "normal"): boolean {
-  return familyFaces(family).some((face) => face.style === style && face.weight >= BOLD_THRESHOLD);
+export function familyHasBold(family: string, style: "normal" | "italic" = "normal", source?: "catalogue" | "user"): boolean {
+  return familyFaces(family, source).some((face) => face.style === style && face.weight >= BOLD_THRESHOLD);
 }
 
 /** Does this family ship an italic at all? */
-export function familyHasItalic(family: string): boolean {
-  return familyFaces(family).some((face) => face.style === "italic");
+export function familyHasItalic(family: string, source?: "catalogue" | "user"): boolean {
+  return familyFaces(family, source).some((face) => face.style === "italic");
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -135,8 +173,15 @@ export interface FaceRequestInput {
 export type FaceChangePlan =
   /** Legacy path: write CSS exactly as this editor always has. No files are involved (D1a). */
   | { kind: "css"; fontWeight: number; italic: boolean }
-  /** Pinned path: the layer needs a ref for THIS cut. The caller resolves it to bytes. */
-  | { kind: "face"; family: string; weight: number; style: "normal" | "italic" }
+  /**
+   * Pinned path: the layer needs a ref for THIS cut. The caller resolves it to bytes.
+   *
+   * `source` travels with it because resolving differs entirely by store (D4/T-3): a catalogue cut
+   * is mirrored on demand, a user cut is one this account already uploaded and can never be fetched
+   * from anywhere. A plan without it would leave the caller to guess, which is exactly the "resolve
+   * a font without discriminating on the store" T-3 forbids.
+   */
+  | { kind: "face"; source: "catalogue" | "user"; family: string; weight: number; style: "normal" | "italic" }
   /** The family has no such cut, and we will not fake one. `reason` is shown to the user. */
   | { kind: "unavailable"; reason: string };
 
@@ -160,19 +205,20 @@ export function isItalicActive(input: FaceRequestInput): boolean {
 export function faceControlBlocked(input: FaceRequestInput, control: "bold" | "italic"): string | undefined {
   const ref = input.fontRef;
   if (!ref || ref.source === "system") return undefined;
+  const source = ref.source;
   if (control === "bold") {
     const style = ref.style;
-    if (familyHasBold(ref.family, style)) return undefined;
+    if (familyHasBold(ref.family, style, source)) return undefined;
     // Already on the bold cut and asking to turn it OFF must always be allowed, or a user who
     // pinned bold could never get back to regular.
     if (ref.weight >= BOLD_THRESHOLD) return undefined;
-    return familyFaces(ref.family).length
+    return familyFaces(ref.family, source).length
       ? `${ref.family} has no bold cut. Pick another family for bold — we won't fake one.`
       : `We don't know what other cuts ${ref.family} has, so bold can't be resolved to a real file.`;
   }
-  if (familyHasItalic(ref.family)) return undefined;
+  if (familyHasItalic(ref.family, source)) return undefined;
   if (ref.style === "italic") return undefined;
-  return familyFaces(ref.family).length
+  return familyFaces(ref.family, source).length
     ? `${ref.family} has no italic. Pick another family for italic — we won't slant it artificially.`
     : `We don't know what other cuts ${ref.family} has, so italic can't be resolved to a real file.`;
 }
@@ -193,11 +239,11 @@ export function planFaceChange(input: FaceRequestInput, change: { bold?: boolean
   }
 
   const style = wantItalic ? ("italic" as const) : ("normal" as const);
-  const face = resolveFamilyFace(ref.family, wantBold ? FACE_BOLD_WEIGHT : FACE_REGULAR_WEIGHT, style);
+  const face = resolveFamilyFace(ref.family, wantBold ? FACE_BOLD_WEIGHT : FACE_REGULAR_WEIGHT, style, ref.source);
   if (!face) {
     return {
       kind: "unavailable",
-      reason: familyFaces(ref.family).length
+      reason: familyFaces(ref.family, ref.source).length
         ? `${ref.family} has no ${style === "italic" ? "italic" : "upright"} cut.`
         : `We don't know what cuts ${ref.family} has.`
     };
@@ -211,5 +257,5 @@ export function planFaceChange(input: FaceRequestInput, change: { bold?: boolean
   // The asymmetry is deliberate and needs no branch: turning bold ON must find a cut at or above the
   // threshold or refuse, while turning it OFF simply takes the nearest cut to 400 — a family whose
   // lightest weight is 700 legitimately stays at 700, because that is the lightest thing it has.
-  return { kind: "face", family: ref.family, weight: face.weight, style };
+  return { kind: "face", source: ref.source, family: ref.family, weight: face.weight, style };
 }
