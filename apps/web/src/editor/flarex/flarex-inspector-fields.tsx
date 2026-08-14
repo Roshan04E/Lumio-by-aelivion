@@ -69,7 +69,6 @@ import { LutFileImport } from "../../components/LutFileImport";
 import type { PropertyField, PropertyFieldAxis } from "../inspector/PropertyFieldList";
 import { KeyframeButtons } from "../inspector/controls/KeyframeButtons";
 import { FlarexKeyColorPicker } from "./FlarexKeyColorPicker";
-import { FlarexSourcePicker, type FlarexSourceAssetOption } from "./FlarexSourcePicker";
 import { FlarexTrackPicker } from "./FlarexTrackPicker";
 import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 import type { SavedTrack } from "../../lib/trackLibrary";
@@ -84,6 +83,18 @@ import {
 } from "./flarex-keyframes";
 // Slider ranges live in ONE place so the inspector rows and the graph-editor lanes clamp identically.
 import { FLAREX_PARAM_RANGES as RANGES } from "./flarex-param-meta";
+
+/**
+ * One media-pool entry a MediaIn node may reference. Lives with the adapter since S4b: the WIDGET
+ * moved to the shared controls (`inspector/controls/ReferenceControl`, where a renderer is allowed to
+ * import it from), and what stays behind is the domain shape this adapter's resolver reads.
+ */
+export interface FlarexSourceAssetOption {
+  id: string;
+  name: string;
+  thumbnailUrl?: string | undefined;
+  type?: "video" | "image" | undefined;
+}
 
 /** Enum params → dropdown options (the only per-type enum vocabularies not already in the node def). */
 const ENUMS: Record<string, readonly string[]> = {
@@ -575,13 +586,32 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
           return { ...cur, nodes: { ...cur.nodes, [nodeId]: { ...target, params: { ...target.params, sourceAssetId: nextId }, label: nextId === "" ? undefined : picked?.name ?? target.label } } };
         });
       };
+      // ADR-003's `reference`/asset, since S4b — the renderer builds the picker, this adapter says
+      // what the id points at. The media pool IS the list (no embedded copy that can go stale), so
+      // what the resolver answers for is the CURRENT selection: its name, its thumbnail, and whether
+      // the pool still holds it at all.
       fields.push({
-        kind: "control",
+        kind: "reference",
+        refType: "asset",
         key,
         label: "Source",
         icon: <Film size={14} />,
         className: "flarex-row-source",
-        control: <FlarexSourcePicker value={current} assets={sourceAssets} onOpenPicker={onPickSource ? () => onPickSource(nodeId) : undefined} onClear={() => onPick("")} onInspect={onInspectSource} />,
+        refId: current,
+        emptyLabel: "Host clip",
+        resolve: (refId) => {
+          const asset = sourceAssets.find((entry) => entry.id === refId);
+          if (!asset) return null;
+          return {
+            label: asset.name,
+            missing: false,
+            thumbnailUrl: asset.thumbnailUrl,
+            ...(asset.type === "video" ? { badge: "VID" } : {}),
+          };
+        },
+        ...(onPickSource ? { onBrowse: () => onPickSource(nodeId) } : {}),
+        onClear: () => onPick(""),
+        onInspect: onInspectSource,
       });
       continue;
     }

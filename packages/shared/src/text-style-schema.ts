@@ -14,10 +14,10 @@
  * carries `presetable: false` because a box width is placement, not a look: pasting a look must not
  * reflow the target's line breaks.
  *
- * ONLY FROZEN KINDS (ADR-003). `fontFamily` is a `reference`/`font`, not a new "font" kind, and the
- * adapter bridges it to today's `FontPicker` through the `control` escape hatch — the renderer ships a
- * subset of the taxonomy and that is the sanctioned way to consume a kind it lacks. No kind was added
- * for this stage, and none is needed.
+ * ONLY FROZEN KINDS (ADR-003). `fontFamily` is a `reference`/`font`, not a new "font" kind. S4 had to
+ * bridge it to the `FontPicker` through an escape hatch because the renderer shipped no `reference`
+ * branch; **S4b built the branch**, so the declaration below is now rendered as what it says it is.
+ * Nothing here changed for that: the schema was already right, and the renderer caught up to it.
  *
  * `defaultValue` MEANS "WHAT ABSENT RENDERS AS" — {@link compositionTextDefaults}, the resolver's
  * fallback. It is deliberately NOT the authoring default the New Text button stamps

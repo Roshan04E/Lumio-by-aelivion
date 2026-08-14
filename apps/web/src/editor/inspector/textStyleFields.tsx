@@ -8,13 +8,17 @@
  * and styling instead of re-deriving them — which is what the panel used to do, as a fourth copy of
  * the "param → control" dispatch ADR-002 exists to delete.
  *
- * BESPOKE EDITORS COME IN AS SLOTS. Five fields have a canonical editor the shared renderer does not
- * ship: the font picker (`reference`/font — ADR-003 puts fonts on `reference`, and the renderer's
- * subset has no `reference` branch), the two face toggles, the alignment strip and the direction
- * select. Each is emitted as a `control` field carrying a host-supplied node — the escape hatch
- * ADR-002 sanctions for exactly this, and the reason S4 adds NO new field kind. Those widgets keep
- * their own behaviour (S2.7's async face resolution in particular), and the adapter still owns which
- * schema field becomes which row, in which group, with which label.
+ * BESPOKE EDITORS COME IN AS SLOTS. Four fields have a canonical editor the shared renderer does not
+ * ship: the two face toggles, the alignment strip and the direction select. Each is emitted as a
+ * `custom` field carrying a host-supplied node — the escape hatch ADR-002 sanctions for exactly this,
+ * and the reason S4 added NO new field kind. Those widgets keep their own behaviour (S2.7's async
+ * face resolution in particular), and the adapter still owns which schema field becomes which row, in
+ * which group, with which label.
+ *
+ * **The font was the fifth, and stopped being a slot in S4b.** It is a `reference`/font — which the
+ * schema always said it was — and the renderer can now build that kind, so what crosses this boundary
+ * is the VALUE and the writes, not a widget. The gap between a kind being frozen into the taxonomy
+ * and a kind being buildable is what turns a schema field into a slot; closing it turns it back.
  *
  * WRITE HANDLERS ARE COPIED VERBATIM from the panel this replaces. A refactor of the inspector must
  * not change what any control WRITES: every write is a future pixel, and S4's acceptance bar is that
@@ -34,11 +38,11 @@ import {
   PenLine,
   Radius,
   Sparkles,
-  Square,
-  Type
+  Square
 } from "lucide-react";
 import { textStyleSchema, type TextStyleSchemaKey, type TimelineLayer } from "@orreris/shared";
 import { buildBackgroundColor, parseBackgroundColor } from "../../lib/colorBackground";
+import { fontReferenceId, fontReferenceResolver, type FontPickerValue } from "../controls/FontPicker";
 import type { PropertyField } from "./PropertyFieldList";
 
 /** The keyframe wiring for `style.*` numeric tracks (EditorPage's `makeStyleKeyframeTools`). */
@@ -77,7 +81,19 @@ export interface TextStyleAuthoringDefaults {
 }
 
 /** Schema fields whose canonical editor the shared renderer does not ship — supplied by the host. */
-export type TextStyleSlotKey = "fontFamily" | "fontWeight" | "italic" | "textAlign" | "direction" | "strokePaintOrder";
+export type TextStyleSlotKey = "fontWeight" | "italic" | "textAlign" | "direction" | "strokePaintOrder";
+
+/**
+ * The font row's domain values and writes (S4b). The host supplies the VALUE and the handlers; the
+ * adapter shapes them into a `reference` field; the renderer picks the editor from `refType`. The
+ * widget itself no longer travels through here, which is the difference between a schema field and a
+ * slot — and the reason S6's preset picker is a field rather than a third bespoke widget.
+ */
+export interface TextStyleFontReference {
+  value: FontPickerValue;
+  onPick: (next: FontPickerValue) => void;
+  onReset: () => void;
+}
 
 export interface TextStyleAdapterContext {
   layer: TimelineLayer;
@@ -87,6 +103,8 @@ export interface TextStyleAdapterContext {
   defaults: TextStyleAuthoringDefaults;
   /** Writes the layer's `shadow` effect on/off alongside a blur write (EditorPage's helper). */
   setShadowEnabled: (layer: TimelineLayer, enabled: boolean) => TimelineLayer;
+  /** Absent → no font row, exactly as an absent slot means no row. */
+  font?: TextStyleFontReference | undefined;
   slots: Partial<Record<TextStyleSlotKey, ReactNode>>;
 }
 
@@ -177,7 +195,25 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
   };
 
   // --- Typography ---------------------------------------------------------------------------
-  put(slotField(ctx, "fontFamily"));
+  // The font is a `reference`/font (ADR-003), and since S4b that is a kind the renderer can BUILD —
+  // so it is a field here rather than a host-supplied widget. The id it serializes as is the file for
+  // a pinned ref and the CSS stack for a legacy one; `fontReferenceResolver` is what turns either
+  // back into the name on the row.
+  if (ctx.font) {
+    const { value, onPick, onReset } = ctx.font;
+    fields.fontFamily = {
+      kind: "reference",
+      refType: "font",
+      key: "fontFamily",
+      label: labelOf("fontFamily", "Font"),
+      refId: fontReferenceId(value),
+      resolve: fontReferenceResolver(value),
+      emptyLabel: "None",
+      value,
+      onPick,
+      onReset
+    };
+  }
   put(
     styleNumberField(ctx, {
       key: "fontSize",
@@ -400,7 +436,6 @@ export function pickTextStyleFields(
 
 /** Icons the host reuses when it supplies a slot widget, so labels and glyphs stay in one place. */
 export const textStyleSlotIcons = {
-  fontFamily: <Type size={14} />,
   textAlign: <AlignLeft size={14} />,
   direction: <ArrowLeftRight size={14} />,
   strokePaintOrder: <PenLine size={15} />

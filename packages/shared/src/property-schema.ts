@@ -23,11 +23,18 @@
  * The frozen field taxonomy (ADR-003) — 15 data kinds + 2 meta escape hatches.
  *
  * This union is the **target API**, and stating it here is not the same as shipping it: the renderer
- * today implements a subset (`number`/`vec2`/`boolean`/`enum`/`color`/`text`/`control`/`custom`), and a
- * schema field on a kind the renderer lacks is bridged by its adapter through `control` — which is what
- * that escape hatch is for. Adding a member to this union is a doctrine change under ADR-003's
- * four-part promotion rule (distinct shape, distinct editor, distinct validation/keyframe semantics,
- * two unrelated systems), never a stage decision. Metadata evolves before taxonomy.
+ * today implements a subset (`number`/`vec2`/`boolean`/`enum`/`color`/`text`/`reference`/`control`/
+ * `custom`), and a schema field on a kind the renderer lacks is bridged by its adapter through
+ * `control` — which is what that escape hatch is for. Adding a member to this union is a doctrine
+ * change under ADR-003's four-part promotion rule (distinct shape, distinct editor, distinct
+ * validation/keyframe semantics, two unrelated systems), never a stage decision. Metadata evolves
+ * before taxonomy.
+ *
+ * **Promoting a kind out of the unbuilt remainder is a different act, governed by a different rule.**
+ * `reference` was frozen into this union from the start and became buildable in ADR-023 S4b under the
+ * renderer-subset clause ("promoted on first genuine two-system demand"), with no change to the
+ * taxonomy and no four-part test. Check which of the two states a kind is in before concluding that a
+ * promotion review is owed.
  */
 export type PropertyFieldKind =
   // Primitive
@@ -52,6 +59,45 @@ export type PropertyFieldKind =
   // Meta escape hatches
   | "control"
   | "custom";
+
+/**
+ * **Interpolability is a property of the KIND** (ADR-003, Consequences), stated here once rather than
+ * as a per-field flag every adapter could get wrong in a different way.
+ *
+ * A kind is interpolable when a value halfway between two values of it is a meaningful value of it.
+ * That is the whole test, and it is why `reference` is false: half of asset A and asset B is not an
+ * asset, and a font halfway between two files is not a font. Such a property can still be ANIMATED —
+ * a hold/step track switches from one reference to another at a keyframe — but that is a different
+ * mechanism from interpolation and no consumer should infer one from the other.
+ *
+ * The renderer enforces this structurally as well: the `reference` field carries no `keyframe`
+ * member, so an adapter cannot hand one to a picker even by accident.
+ */
+export const propertyKindInterpolable: Readonly<Record<PropertyFieldKind, boolean>> = {
+  number: true,
+  boolean: false,
+  text: false,
+  enum: false,
+  color: true,
+  vector: true,
+  transform: true,
+  gradient: true,
+  list: false,
+  reference: false,
+  file: false,
+  curve: true,
+  colorCurves: true,
+  colorWheels: true,
+  spline: true,
+  // The escape hatches describe an editor, not a data shape, so the kind cannot answer this — the
+  // widget owns whatever semantics it brought with it.
+  control: false,
+  custom: false
+};
+
+export function isInterpolablePropertyKind(kind: PropertyFieldKind): boolean {
+  return propertyKindInterpolable[kind];
+}
 
 /** What a `reference` field points at (ADR-003: reference absorbs asset/clip/composition/font/…). */
 export type PropertyReferenceType =

@@ -33,11 +33,13 @@ import {
   catalogueFontRef,
   fontCatalogue,
   FONT_SCRIPT_FILTERS,
+  isPinnedFontRef,
   queryFontIndex,
   renderSafeFonts,
   resolveFamilyFace,
   type FontIndexFamily,
-  type FontRef
+  type FontRef,
+  type PinnedFontRef
 } from "@orreris/shared";
 import {
   cataloguePreviewVersion,
@@ -48,6 +50,7 @@ import {
   subscribeCataloguePreviews
 } from "../../lib/font-catalogue-preview";
 import { clearFontPinState, fontPinState, fontPinVersion, pinFont, subscribeFontPins } from "../../lib/font-pin";
+import type { ReferenceResolver, ResolvedReference } from "../inspector/controls/ReferenceControl";
 import {
   addUserFont,
   listUserFonts,
@@ -58,6 +61,14 @@ import {
   type UserFontRecord
 } from "../../lib/user-fonts";
 
+/**
+ * S4b. The picker is now the canonical editor for `refType: "font"` — one arm of the shared
+ * `reference` kind (ADR-003) rather than a bespoke widget behind ADR-002's escape hatch. Two things
+ * changed and no more: the row's LABEL comes from a resolver instead of being derived in here, and
+ * the widget is reached through `PropertyFieldList`. The list, the virtualization, the batched face
+ * loading and every write are untouched — a shared picker that wrote a different shape is the entire
+ * risk of consolidating.
+ */
 export interface FontPickerValue {
   /** The layer's CSS stack — what a system pick sets and what a legacy layer already has. */
   fontFamily: string;
@@ -72,6 +83,42 @@ export interface FontPickerValue {
    */
   weight?: number | undefined;
   italic?: boolean | undefined;
+}
+
+/** The ref a layer is actually pinned to, if any — a `system` ref is the legacy CSS stack, not a pin. */
+function pinnedRefOf(value: FontPickerValue): PinnedFontRef | undefined {
+  return value.fontRef && isPinnedFontRef(value.fontRef) ? value.fontRef : undefined;
+}
+
+/**
+ * The id a font reference serializes as (ADR-003: a reference serializes as an id): the FILE for a
+ * pinned ref, the CSS stack for a legacy one. Those are the two identities a text layer can carry,
+ * and D1a is the reason the second still exists.
+ */
+export function fontReferenceId(value: FontPickerValue): string {
+  const pinned = pinnedRefOf(value);
+  return pinned ? pinned.fileHash : value.fontFamily;
+}
+
+/**
+ * The canonical `refType: "font"` resolver. It closes over the layer's ref because a `FontRef` is
+ * SELF-DESCRIBING — the file it names may be absent from every store, but what it claims to be is in
+ * the ref itself, which is exactly why D1 made the ref the render identity.
+ *
+ * **`missing` is therefore never true here, and that is not an oversight.** Whether a pinned file can
+ * actually be installed is answered by `fontPinState` / the substitution surface S2 already ships,
+ * on its own schedule and with its own wording. Teaching this resolver to also declare a font missing
+ * would put two different answers to that question on screen; S4b is a refactor and does not get to
+ * introduce a second one.
+ */
+export function fontReferenceResolver(value: FontPickerValue): ReferenceResolver {
+  const pinned = pinnedRefOf(value);
+  return (refId) => {
+    if (pinned && refId === pinned.fileHash) {
+      return { label: `${pinned.family}${pinned.weight >= 600 ? " Bold" : ""}`, missing: false, badge: "pinned" };
+    }
+    return { label: renderSafeFonts.find((font) => font.family === refId)?.label ?? refId, missing: false };
+  };
 }
 
 /** Row geometry. Fixed height is what makes the window computable without measuring anything. */
@@ -91,10 +138,13 @@ const bundledFamilies = new Set(fontCatalogue.map((entry) => entry.family));
 
 export function FontPicker({
   value,
+  resolved,
   onPick,
   onReset
 }: {
   value: FontPickerValue;
+  /** What the current id points at, resolved by the shared `reference` machinery (S4b). */
+  resolved: ResolvedReference;
   /** Called with the COMPLETE font identity — both fields, always, so neither can be left stale. */
   onPick: (next: FontPickerValue) => void;
   onReset?: (() => void) | undefined;
@@ -129,7 +179,7 @@ export function FontPicker({
     };
   }, [open]);
 
-  const pinned = value.fontRef && value.fontRef.source !== "system" ? value.fontRef : undefined;
+  const pinned = pinnedRefOf(value);
   const weight = value.weight ?? 400;
   const style = value.italic ? ("italic" as const) : ("normal" as const);
 
@@ -230,10 +280,6 @@ export function FontPicker({
     [onPick, style, weight]
   );
 
-  const currentLabel = pinned
-    ? `${pinned.family}${pinned.weight >= 600 ? " Bold" : ""}`
-    : (renderSafeFonts.find((font) => font.family === value.fontFamily)?.label ?? value.fontFamily);
-
   return (
     <div className="font-picker" ref={rootRef}>
       <button
@@ -248,8 +294,12 @@ export function FontPicker({
         <span className="control-icon">
           <Type size={14} />
         </span>
-        <span className="font-picker-current">{currentLabel}</span>
-        {pinned ? <span className="font-picker-pin" title="Pinned to a specific font file">pinned</span> : null}
+        <span className="font-picker-current">{resolved.label}</span>
+        {resolved.badge ? (
+          <span className="font-picker-pin" title="Pinned to a specific font file">
+            {resolved.badge}
+          </span>
+        ) : null}
         <ChevronDown size={13} aria-hidden="true" />
       </button>
       {onReset ? (

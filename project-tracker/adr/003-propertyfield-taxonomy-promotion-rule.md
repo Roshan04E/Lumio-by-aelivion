@@ -65,6 +65,20 @@ Worth stating for whoever reads this next: a kind being *frozen into the taxonom
 duplication accumulates silently. Check the subset note before concluding a promotion review is
 needed.
 
+**Built 2026-08-14 (ADR-023 S4b).** `reference` is now one of the kinds the renderer ships, resolver-
+backed, dispatching on `refType`; both pickers are on it and neither is behind an escape hatch. The
+renderer's subset is therefore `number`/`vec2`/`boolean`/`enum`/`color`/`text`/`reference`/`control`/
+`custom`. Two findings worth carrying forward:
+
+- **The refTypes wanted different resolvers, not different semantics.** Resolution, a named missing
+  state and an empty state are identical for a font and an asset; only the browsing UI differs. Had
+  the semantics diverged, that would have been evidence against a shared kind — the outcome this
+  decision was explicitly prepared to hear.
+- **Interpolability, being a property of the kind, is now enforced by the type**: the renderer's
+  `reference` field has no `keyframe` member at all, and `propertyKindInterpolable` (in `shared`)
+  states the rule for consumers that are not the inspector. A reference can still be *animated* by a
+  hold track; that is a different mechanism and nothing should infer one from the other.
+
 ## Alternatives considered
 
 - **Open taxonomy, add kinds freely.** Rejected: the switch becomes a feature dump; drift returns.

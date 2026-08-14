@@ -16,7 +16,7 @@ import { InspectorSection } from "../inspector/InspectorSection";
 import { PropertyFieldList } from "../inspector/PropertyFieldList";
 import { FlarexNodeIcon } from "./flarex-node-icons";
 import { buildFlarexColorNodeSections, buildFlarexNodeFields } from "./flarex-inspector-fields";
-import type { FlarexSourceAssetOption } from "./FlarexSourcePicker";
+import type { FlarexSourceAssetOption } from "./flarex-inspector-fields";
 import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 import type { SavedTrack } from "../../lib/trackLibrary";
 

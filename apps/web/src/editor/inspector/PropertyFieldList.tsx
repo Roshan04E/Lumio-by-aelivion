@@ -11,7 +11,15 @@
  * `PropertyField[]` (see `flarex/flarex-inspector-fields.tsx` for the node-graph adapter). Deleting that
  * adapter removes only the translation — every widget still lives in the shared controls this file drives.
  * The taxonomy is a superset of the clip-effect param schema (number/boolean/color/enum/text) plus vec2,
- * a generic control row, and a custom escape hatch for specialized data editors (curves, point lists).
+ * `reference`, a generic control row, and a custom escape hatch for specialized data editors (curves,
+ * point lists).
+ *
+ * The kinds implemented here are a SUBSET of ADR-003's frozen fifteen, and the gap is where
+ * escape-hatch duplication collects: a schema declares a kind the renderer cannot build, its adapter
+ * bridges it through `control`/`custom`, and the second system to need it writes a second widget.
+ * That is what happened to `reference` — Flarex's asset picker and text's font picker — and S4b is
+ * ADR-003's renderer-subset clause firing on it. **No kind was added; the taxonomy is unchanged.**
+ * When a schema here declares a kind this switch lacks, promoting it is the fix, not a third copy.
  */
 
 import type { ReactNode } from "react";
@@ -23,6 +31,8 @@ import { BooleanControl } from "./controls/BooleanControl";
 import { SelectControl } from "./controls/SelectControl";
 import { ColorControl } from "../../components/ColorControl";
 import { ThemedSelect } from "./controls/ThemedSelect";
+import { AssetReferenceControl, resolveReference, type ReferenceResolver } from "./controls/ReferenceControl";
+import { FontPicker, type FontPickerValue } from "../controls/FontPicker";
 import type { KeyframeButtonsProps } from "./controls/KeyframeButtons";
 
 export interface SelectOption {
@@ -111,6 +121,41 @@ export type PropertyField =
       placeholder?: string | undefined;
       onChange: (value: string) => void;
     }
+  /**
+   * ADR-003's `reference` — an id plus a resolver, dispatching on `refType` (S4b).
+   *
+   * `refType` picks the canonical editor the way `kind` picks it everywhere else: fonts get the
+   * catalogue picker, assets get the media-pool trigger. What every arm shares is the SEMANTICS —
+   * resolution, a named missing state, an empty state — which live in `controls/ReferenceControl`
+   * and not in the widgets.
+   *
+   * **There is no `keyframe` member, on purpose.** Interpolability is declared on the kind
+   * (`propertyKindInterpolable`), and half of one font is not a font. An adapter therefore cannot
+   * hand a reference a keyframe diamond by accident; the type refuses it.
+   */
+  | ({
+      kind: "reference";
+      key: string;
+      label: string;
+      icon?: ReactNode | undefined;
+      className?: string | undefined;
+      /** What this reference serializes as. `""` = nothing referenced (a state, not a failure). */
+      refId: string;
+      /** Supplied by the adapter — never a pre-computed label, which could disagree with the id. */
+      resolve: ReferenceResolver;
+      /** Wording for `refId === ""` — "Host clip", "None". */
+      emptyLabel: string;
+      onReset?: (() => void) | undefined;
+    } & (
+      | { refType: "font"; value: FontPickerValue; onPick: (next: FontPickerValue) => void }
+      | {
+          refType: "asset";
+          /** Open the pool in pick-one mode; omitted → the trigger is inert (no pool wiring). */
+          onBrowse?: (() => void) | undefined;
+          onClear: () => void;
+          onInspect?: ((refId: string) => void) | undefined;
+        }
+    ))
   /** A shared PropertyRow whose control is supplied by the adapter (asset picker, grouped select, …) —
    *  still the ONE row shell, just a bespoke control cell. */
   | {
@@ -243,6 +288,32 @@ export function PropertyFieldView({ field }: { field: PropertyField }) {
           }
         />
       );
+    case "reference": {
+      // Resolve ONCE, here, for every refType — so "what does this id point at" and "what does a
+      // dangling id look like" have exactly one answer in the product.
+      const resolved = resolveReference(field.refId, field.resolve, field.emptyLabel);
+      switch (field.refType) {
+        case "font":
+          // The font picker carries its own row chrome (it is a trigger + popup, not a control cell),
+          // so it is handed the resolution and nothing else. Wrapping it in PropertyRow would render
+          // the label twice — see `textStyleFields`' note on why this slot was `custom`, not `control`.
+          return <FontPicker value={field.value} resolved={resolved} onPick={field.onPick} onReset={field.onReset} />;
+        case "asset":
+          return (
+            <AssetReferenceControl
+              label={field.label}
+              icon={field.icon}
+              className={field.className}
+              refId={field.refId}
+              resolved={resolved}
+              onBrowse={field.onBrowse}
+              onClear={field.onClear}
+              onInspect={field.onInspect}
+              onReset={field.onReset}
+            />
+          );
+      }
+    }
     case "control":
       return <PropertyRow label={field.label} icon={field.icon} className={field.className} control={field.control} />;
     case "custom":

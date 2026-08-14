@@ -45,3 +45,13 @@ then just "run the adapter, hand the result to PropertyFieldList, add shared lay
   resolvability; two unrelated systems: Flarex assets, text fonts). **Recorded, not acted on.**
   Promoting a kind is a doctrine decision under ADR-003, not something a stage may take, and S4
   deliberately added none. The review is owed a decision before a third instance appears.
+- **Decided and built — 2026-08-14 (ADR-023 S4b).** Two corrections to the paragraph above, which
+  should be read as the reasoning of the day rather than as the rule. First, **the four-part test was
+  never the governing test here**: `reference` was already inside ADR-003's frozen fifteen, with
+  `font` and `asset` named as refTypes, so nothing was promoted *into* the taxonomy. What fired was
+  ADR-003's renderer-subset clause — the renderer ships a subset, the rest arrive on first genuine
+  two-system demand — and reaching for the promotion test was the trap ADR-003's own note now warns
+  about. Second, the debt is **cleared**: `PropertyFieldList` builds `reference`, and both the Flarex
+  asset picker and the text font picker are fields rather than escape hatches. The asset widget moved
+  to `inspector/controls/ReferenceControl` — a renderer may not import a domain folder, and the
+  widget was only ever Flarex-*located*.

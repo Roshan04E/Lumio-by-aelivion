@@ -10,7 +10,8 @@ import {
   type RenderComparisonFixtureKey
 } from "@orreris/shared";
 import { VideoPreview } from "../components/VideoPreview";
-import { FontPicker, type FontPickerValue } from "../editor/controls/FontPicker";
+import { fontReferenceId, fontReferenceResolver, type FontPickerValue } from "../editor/controls/FontPicker";
+import { PropertyFieldList } from "../editor/inspector/PropertyFieldList";
 import {
   cataloguePreviewVersion,
   isPreviewLoaded,
@@ -186,7 +187,24 @@ function PickerProbe() {
   return (
     <section data-render-fixture="ready" data-picker-probe="ready" style={{ padding: 24, width: 420 }}>
       <div data-picked-ref={value.fontRef ? JSON.stringify(value.fontRef) : ""} data-picked-family={value.fontFamily} />
-      <FontPicker value={value} onPick={(next) => setValue({ ...next, weight: value.weight })} />
+      {/* S4b: through `PropertyFieldList`, because that is now the path the editor uses. A gate
+          pointed at the widget directly would keep passing after the shared renderer started
+          mounting all 1,942 rows, which is the exact regression this fixture exists to catch. */}
+      <PropertyFieldList
+        fields={[
+          {
+            kind: "reference",
+            refType: "font",
+            key: "fontFamily",
+            label: "Font",
+            refId: fontReferenceId(value),
+            resolve: fontReferenceResolver(value),
+            emptyLabel: "None",
+            value,
+            onPick: (next) => setValue({ ...next, weight: value.weight })
+          }
+        ]}
+      />
     </section>
   );
 }

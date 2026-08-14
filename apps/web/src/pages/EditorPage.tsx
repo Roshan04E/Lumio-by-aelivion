@@ -235,7 +235,6 @@ import type { PlanStep } from "../ai/types";
 import { orisNoteGraphWrite } from "../editor/oris-write-probe";
 import { appendEditCommit, appendHistoryAction } from "../ai/experience/stream";
 import { shouldRecordHistoryEntry, type CommitIntent } from "../editor/gesture-scope";
-import { FontPicker } from "../editor/controls/FontPicker";
 // ADR-023 S2.7 — Bold/Italic resolve to a real FACE over a pinned ref. The rule lives in shared so
 // it is testable without a browser; `pinFont` turns the chosen cut into bytes (mirroring if needed).
 import { faceControlBlocked, isBoldActive, isItalicActive, planFaceChange, FACE_BOLD_WEIGHT, FACE_REGULAR_WEIGHT } from "@orreris/shared";
@@ -14990,29 +14989,29 @@ function TextGraphicControls({
     styleKf,
     defaults: defaultTextStyle,
     setShadowEnabled,
+    /* ADR-023 S2.5, through the shared `reference` kind since S4b. Picking a catalogue face writes a
+       `fontRef` carrying a `fileHash` — the one write the whole S2 contract is downstream of, and the
+       reason this crosses as a VALUE and a write rather than as a widget: a shared picker that wrote
+       a different shape is the entire risk of consolidating, so the shape stays stated right here.
+       Reset returns the layer to the legacy default AND clears the ref, because a stale pin surviving
+       a reset would be a font the user believes they removed still deciding the export. */
+    font: {
+      value: {
+        fontFamily: layer.fontFamily ?? renderSafeFonts[0].family,
+        fontRef: layer.fontRef,
+        // S2.6/S2.7: a pinned ref's weight/style come from the REF, because they describe the file
+        // (`fontRefCss`). So the picker is told what the layer is asking for — read from the REF when
+        // there is one, or picking a new family would silently drop the cut the user is already on
+        // back to regular upright.
+        weight: isBoldActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
+          ? FACE_BOLD_WEIGHT
+          : FACE_REGULAR_WEIGHT,
+        italic: isItalicActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
+      },
+      onReset: () => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined })),
+      onPick: (next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))
+    },
     slots: {
-      /* ADR-023 S2.5. Picking a catalogue face writes a `fontRef` carrying a `fileHash` — the one
-         write the whole S2 contract is downstream of. Reset returns the layer to the legacy default
-         AND clears the ref, because a stale pin surviving a reset would be a font the user believes
-         they removed still deciding the export. */
-      fontFamily: (
-        <FontPicker
-          value={{
-            fontFamily: layer.fontFamily ?? renderSafeFonts[0].family,
-            fontRef: layer.fontRef,
-            // S2.6/S2.7: a pinned ref's weight/style come from the REF, because they describe the
-            // file (`fontRefCss`). So the picker is told what the layer is asking for — read from the
-            // REF when there is one, or picking a new family would silently drop the cut the user is
-            // already on back to regular upright.
-            weight: isBoldActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
-              ? FACE_BOLD_WEIGHT
-              : FACE_REGULAR_WEIGHT,
-            italic: isItalicActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
-          }}
-          onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined }))}
-          onPick={(next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))}
-        />
-      ),
       /* ADR-023 S2.7 — Bold picks the bold FILE. Over a pinned ref these toggles rewrite the ref to
          the family's matching cut (async, because a cut we do not hold has to be mirrored first);
          over a legacy system stack they write CSS exactly as they always have. A family with no such

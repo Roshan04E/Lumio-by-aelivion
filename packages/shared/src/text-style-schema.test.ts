@@ -18,7 +18,12 @@
  */
 
 import { getCompositionTextStyle } from "./composition-style";
-import { migratePropertyValues, propertySchemaDefaults, propertySchemaPresetKeys } from "./property-schema";
+import {
+  isInterpolablePropertyKind,
+  migratePropertyValues,
+  propertySchemaDefaults,
+  propertySchemaPresetKeys
+} from "./property-schema";
 import {
   TEXT_STYLE_FIELD_KEYS,
   TEXT_STYLE_SCHEMA_VERSION,
@@ -276,6 +281,24 @@ const pinnedLora: FontRef = {
 
   const collision = migratePropertyValues(schema, { schemaId: "text-style", version: 1, values: { fillColor: "#ff0000", color: "#0000ff" } });
   check("migration: a rename never clobbers the newer name", collision.ok && (collision.values as Record<string, unknown>).color === "#0000ff");
+}
+
+// --- S4b: keyframe semantics are the KIND's, not the field's -------------------------------------
+//
+// ADR-003's consequence is that interpolability is declared once per kind. The way that decision goes
+// wrong is not a wrong entry in the table — it is a schema field quietly claiming an animatable track
+// for a kind whose values cannot be interpolated, which the renderer would then have to refuse
+// per-field. Assert the two can never disagree.
+{
+  const animatable = textStyleSchema.fields.filter((field) => field.animatableAs);
+  check("kinds: there are animatable fields to check", animatable.length > 0);
+  const offenders = animatable.filter((field) => !isInterpolablePropertyKind(field.kind));
+  check(
+    `kinds: no field animates a non-interpolable kind${offenders.length ? ` (${offenders.map((f) => `${f.key}:${f.kind}`).join(", ")})` : ""}`,
+    offenders.length === 0
+  );
+  check("kinds: a reference is not interpolable (half of one font is not a font)", !isInterpolablePropertyKind("reference"));
+  check("kinds: a number is", isInterpolablePropertyKind("number"));
 }
 
 if (failures > 0) {

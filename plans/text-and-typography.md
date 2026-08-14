@@ -22,7 +22,7 @@ S2.6 the catalogue goes VAST             virtualized list + mirror-on-pick      
 S2.7 Bold picks the bold FILE            weight resolves to a face, not CSS    S2.6 made it reachable
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unblocks S6
-S4b `reference` renderable in PropertyFieldList  ADR-003 subset clause fired; before S6
+S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both pickers moved
 S5  tier-1 texture + CSS depth            rides S4
 S6  caption + text preset library         rides S4; highest product value
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
@@ -501,6 +501,35 @@ next consumer builds its own.
 
 **Risk:** moderate. Two live surfaces move onto shared code at once, and one of them is the
 virtualized 1,942-family list.
+
+**SHIPPED 2026-08-14.**
+
+- `apps/web/src/editor/inspector/controls/ReferenceControl.tsx` — the resolver contract
+  (`ResolvedReference` / `ReferenceResolver` / `resolveReference`) plus the canonical `refType:
+  "asset"` editor, which is `flarex/FlarexSourcePicker` moved: the widget was never Flarex-specific,
+  only Flarex-located, and a shared renderer may not import a domain folder. Its DOM and
+  `flarex-source-*` class names are carried over unchanged.
+- `PropertyFieldList` gains one `reference` branch that resolves the id ONCE and then dispatches on
+  `refType`. **The field type carries no `keyframe` member**, so ADR-003's "interpolability is a
+  property of the kind" is enforced by the type rather than by everyone remembering it; the
+  positive declaration lives in `propertyKindInterpolable` (shared), where a non-inspector consumer
+  can read it.
+- Both pickers moved. The font row stopped being a slot — the schema always called it
+  `reference`/font, and what crosses the adapter boundary now is the value and the writes, not a
+  widget. Flarex's `sourceAssetId` became a `reference` field whose resolver reads the media pool.
+- What is deliberately NOT shared is the browsing experience: a searchable 1,900-family list and a
+  "click a tile in the pool" mode are different editors over identical semantics, which is the axis
+  `refType` exists to dispatch on. **The two wanted different resolvers, not different semantics** —
+  the question this stage was told to stop and report on if it went the other way.
+
+**Evidence:** `render:baseline` 78/78 unchanged at zero tolerance versus `a1af4ef` (the claim, not a
+regression check — this commit does not batch), `textstyle:golden` 54/54 byte-identical including key
+order and `undefined`-vs-absent, and `font:picker-perf` at 1,949 rows / **16 mounted** / 50 ms to
+open / 13.4 ms median frame, with the `fileHash` assertion passing *through the shared path* — the
+fixture was moved onto `PropertyFieldList` for exactly that reason, since a gate pointed at the
+widget directly would keep passing after the shared renderer started mounting all 1,949 rows.
+`textstyle:schema` gains one assertion (no schema field may declare `animatableAs` on a
+non-interpolable kind), falsified by giving `fontFamily` a track and watching it fail.
 
 ---
 
