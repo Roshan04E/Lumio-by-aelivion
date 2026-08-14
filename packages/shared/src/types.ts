@@ -218,6 +218,13 @@ export interface ProjectEffect {
  */
 export interface TextStyleFields {
   fontFamily?: string | undefined;
+  /**
+   * ADR-023 S4. The pinned font file travels WITH the stack, always (D1/T-1): a `{source:"system"}`
+   * ref means "read the stack", so carrying one without the other is a look that renders in a
+   * different typeface than the one it was captured from. It was missing here until S4 — the S1
+   * hand-written-list defect, in the preset path instead of the manifest path.
+   */
+  fontRef?: FontRef | undefined;
   fontSize?: number | undefined;
   fontWeight?: number | undefined;
   italic?: boolean | undefined;
@@ -237,6 +244,12 @@ export interface TextStyleFields {
   shadowOffsetX?: number | undefined;
   shadowOffsetY?: number | undefined;
   textAlign?: "left" | "center" | "right" | "start" | "end" | undefined;
+  /**
+   * ADR-023 S4. Base paragraph direction is part of the look (it is a paragraph setting in After
+   * Effects and Premiere too) and was likewise absent from the pre-S4 copy list. Absent stays absent
+   * on capture AND on apply — see `applyTextStyle`, which never writes a key the style does not carry.
+   */
+  direction?: "auto" | "ltr" | "rtl" | undefined;
 }
 
 /** A named, reusable text look saved in the project (§2 Text Styles). Applied by BAKING its fields

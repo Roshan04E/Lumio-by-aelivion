@@ -583,6 +583,22 @@ a declared key set with a compile-time exhaustiveness constraint (the `TEXT_STYL
 `satisfies` pattern at `text-styles.ts:10-29` is the shape), every future field is one omission away
 from the same silent divergence, in two places at once.
 
+**T-15 CONFIRMED BY A SECOND INSTANCE, in the list this rule held up as the good example. (S4,
+2026-08-14.)** `TEXT_STYLE_FIELD_KEYS` — cited above as the *shape to copy* — was itself two fields
+behind the layer: `fontRef` (S2) and `direction` (S0b) were never added to it, so **Save Style and
+Apply silently dropped the pinned font and the base direction**, and a saved look re-rendered in a
+different typeface than the layer it was captured from. The `satisfies` clause did not catch it,
+because `satisfies` only proves every key LISTED is real; it says nothing about a key that is missing.
+Half a constraint reads exactly like a whole one.
+
+Two corrections follow. First, an exhaustiveness half is **not optional** — the pattern is the pair
+(`satisfies` plus an `Exclude<…> extends never` assertion), as `MANIFEST_LAYER_STYLE_KEYS` already had
+and this list did not. Second, **a copy list is a defect home wherever it lives**, not only in the
+manifest: the preset/clipboard path is a second consumer that a renderer-parity gate is equally blind
+to, and it drifted for two stages without anyone noticing. S4 derives the list from the `text-style`
+schema's `presetable` fields and proves *exactly* that set equals `TextStyleFields` in both
+directions — a dropped field and a smuggled-in one are each a named compile error.
+
 **T-13a addendum — the multi-run path is unreachable without a visible change, and that is a
 property of the design, not a hole in the gate.** (S0c, b3adaa0.) An attempt to build a pixel arm for
 T-13a failed for an instructive reason: `collapseLine` keys on the *effective draw style*, so every

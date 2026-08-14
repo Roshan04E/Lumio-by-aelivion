@@ -66,6 +66,11 @@ export * from "./scene";
 export * from "./schemas";
 export * from "./skills";
 export * from "./templates";
+// ADR-004's PropertySchema and its first adopter (ADR-023 S4). `property-schema` is inert metadata;
+// `text-style-schema` is the description the inspector adapter, the style resolver, saved styles, the
+// clipboard and (S6) presets all read.
+export * from "./property-schema";
+export * from "./text-style-schema";
 export * from "./text-styles";
 export * from "./text-script";
 export * from "./text-warp";

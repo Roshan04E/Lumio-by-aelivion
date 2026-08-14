@@ -35,7 +35,6 @@ import {
   AlignRight,
   ArrowLeftRight,
   Bold,
-  CaseSensitive,
   Italic,
   LayoutList,
   Lock,
@@ -179,6 +178,9 @@ import {
   type NestBreadcrumbEntry,
   applyTextStyle,
   captureTextStyle,
+  captureTextStylePreset,
+  readTextStylePreset,
+  type TextStylePreset,
   createTextStyleFromLayer,
   createDefaultMask,
   containContentRect,
@@ -245,6 +247,9 @@ import { NumberControl } from "../editor/inspector/controls/NumberControl";
 import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
 import { InspectorHost } from "../editor/inspector/InspectorHost";
+// ADR-023 S4 — the text look's inspector rows come from the schema adapter, through the one renderer.
+import { PropertyFieldList } from "../editor/inspector/PropertyFieldList";
+import { buildTextStyleFields, pickTextStyleFields } from "../editor/inspector/textStyleFields";
 import {
   validateEditorCommand,
   type EditorCommandId,
@@ -470,7 +475,6 @@ import { probeDecodableEndSeconds } from "../export/webcodecs-decoder";
 import { Modal } from "../components/Modal";
 import { PasteAttributesModal } from "../components/PasteAttributesModal";
 import { AssetViewerModal, type AssetViewerTarget } from "../components/AssetViewerModal";
-import { buildBackgroundColor, parseBackgroundColor } from "../lib/colorBackground";
 import { defaultColorPalette, extractPaletteFromAsset } from "../lib/colorPalette";
 import { useWheelScrollPerformance } from "../lib/useWheelScrollPerformance";
 import {
@@ -810,6 +814,11 @@ export function EditorPage() {
   // Which saved track (if any) the Track modal is currently editing/retracking - undefined id means "new track".
   const [trackModalState, setTrackModalState] = useState<{ editingTrackId?: string | undefined } | undefined>(undefined);
   const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
+  // ADR-023 S4 / T-10 — the copied text LOOK, held as the shared `{schemaId, version, values}`
+  // envelope: the same shape a saved style and (S6) a preset use, so all three pass through one set
+  // of migrations. Deliberately NOT the system clipboard: writing there would clobber whatever text
+  // the user had copied, and reading it back needs a permission prompt on every paste.
+  const [lookClipboard, setLookClipboard] = useState<TextStylePreset | null>(null);
   // Nesting (NESTING_MATURITY.md Block 2): when non-empty, `composition`/`graph.composition` is a
   // NESTED sequence being edited in place (swap trick — see `handleOpenNestedClip`) and this is the
   // ancestor chain root→…→direct parent. Multi-level (nests-in-nests open fine). Restored on load
@@ -4364,6 +4373,43 @@ export function EditorPage() {
     const ids = layers.filter((item) => selected.has(item.id) && item.type === "text").map((item) => item.id);
     if (ids.length) return ids;
     return inspectorLayer?.type === "text" ? [inspectorLayer.id] : [];
+  }
+
+  /**
+   * ADR-023 S4 — copy a LOOK off the inspected text layer. The payload is the schema envelope, so
+   * what gets copied is decided by the schema's `presetable` fields rather than by a list somebody
+   * has to remember to update: `fontRef` and `direction` travel now, and before S4 they did not.
+   */
+  function handleCopyTextLook() {
+    if (inspectorLayer?.type !== "text") {
+      setNotice("Select a text layer to copy its look");
+      return;
+    }
+    setLookClipboard(captureTextStylePreset(inspectorLayer));
+    setNotice("Look copied");
+  }
+
+  /** Paste that look onto every selected text layer — one undo entry, mirroring Apply. */
+  async function handlePasteTextLook() {
+    if (!lookClipboard) {
+      setNotice("Copy a look first");
+      return;
+    }
+    const targetIds = textStyleTargetIds();
+    if (!targetIds.length) {
+      setNotice("Select a text layer to paste the look onto");
+      return;
+    }
+    // Read the envelope rather than trusting it: a look copied by an older or newer build migrates or
+    // is REFUSED with a reason. Silently pasting most of a look is the failure mode worth avoiding —
+    // the user cannot see which half went missing.
+    const read = readTextStylePreset(lookClipboard);
+    if (!read.ok) {
+      setNotice(`Can't paste this look — ${read.reason}`);
+      return;
+    }
+    await updateLayers(targetIds, (item) => applyTextStyle(item, read.values));
+    setNotice(targetIds.length > 1 ? `Look pasted onto ${targetIds.length} layers` : "Look pasted");
   }
 
   async function handleSaveTextStyle() {
@@ -8057,7 +8103,12 @@ export function EditorPage() {
     onApplyTextStyle: (style: TextStyle) => void handleApplyTextStyle(style),
     onUpdateTextStyle: (styleId: string) => void handleUpdateTextStyle(styleId),
     onRenameTextStyle: (styleId: string, name: string) => void handleRenameTextStyle(styleId, name),
-    onDeleteTextStyle: (styleId: string) => void handleDeleteTextStyle(styleId)
+    onDeleteTextStyle: (styleId: string) => void handleDeleteTextStyle(styleId),
+    // ADR-023 S4 — copy/paste a look between layers, over the shared envelope. (The "is anything
+    // copied" flag is a VALUE, not a handler, so it travels as an ordinary prop — `useStableHandlers`
+    // freezes callback identities and takes functions only.)
+    onCopyTextLook: () => handleCopyTextLook(),
+    onPasteTextLook: () => void handlePasteTextLook()
   });
 
   const stablePreviewCommitMaskPoints = useStableHandler((layerId: string, maskId: string, points: MaskPoint[]) =>
@@ -9215,6 +9266,7 @@ export function EditorPage() {
                   {(currentTime) => (
                 <LayerInspector
                   {...inspectorHandlers}
+                  hasCopiedTextLook={lookClipboard !== null}
                   assets={assets}
                   palette={imagePalette}
                   hideAssetBin
@@ -14115,6 +14167,9 @@ function LayerInspectorImpl({
   onUpdateTextStyle,
   onRenameTextStyle,
   onDeleteTextStyle,
+  onCopyTextLook,
+  onPasteTextLook,
+  hasCopiedTextLook,
   autoKeyframe,
   requestColorTab,
   onConsumeColorTab,
@@ -14175,6 +14230,10 @@ function LayerInspectorImpl({
   onUpdateTextStyle?: ((styleId: string) => void) | undefined;
   onRenameTextStyle?: ((styleId: string, name: string) => void) | undefined;
   onDeleteTextStyle?: ((styleId: string) => void) | undefined;
+  /** ADR-023 S4 — copy the inspected layer's look, paste it onto the selected text layer(s). */
+  onCopyTextLook?: (() => void) | undefined;
+  onPasteTextLook?: (() => void) | undefined;
+  hasCopiedTextLook?: boolean | undefined;
   /** Consume-once flag from the topbar "Color" button / Alt+3 — switches this inspector to the Color
    *  tab (color's only home now that the left Color panel is gone), then calls onConsumeColorTab. */
   requestColorTab?: boolean | undefined;
@@ -14312,6 +14371,9 @@ function LayerInspectorImpl({
             onUpdate={onUpdateTextStyle}
             onRename={onRenameTextStyle}
             onDelete={onDeleteTextStyle}
+            onCopyLook={onCopyTextLook}
+            onPasteLook={onPasteTextLook}
+            hasCopiedLook={hasCopiedTextLook ?? false}
           />
         ) : null}
         </>
@@ -14916,6 +14978,65 @@ function TextGraphicControls({
     .sort((a, b) => b.timeSeconds - a.timeSeconds)
     .find((key) => key.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
 
+  // ADR-023 S4 / ADR-005. The look's rows are produced by the text-style ADAPTER and rendered by
+  // `PropertyFieldList` (ADR-002) — this panel no longer owns a "param → control" dispatch of its
+  // own. The five widgets below are handed in as slots because their canonical editors are not in the
+  // renderer's subset of the frozen taxonomy; see `textStyleFields.tsx` for why they arrive as
+  // `custom` rather than `control`, and why no kind was added.
+  const styleFields = buildTextStyleFields({
+    layer,
+    palette,
+    onChange,
+    styleKf,
+    defaults: defaultTextStyle,
+    setShadowEnabled,
+    slots: {
+      /* ADR-023 S2.5. Picking a catalogue face writes a `fontRef` carrying a `fileHash` — the one
+         write the whole S2 contract is downstream of. Reset returns the layer to the legacy default
+         AND clears the ref, because a stale pin surviving a reset would be a font the user believes
+         they removed still deciding the export. */
+      fontFamily: (
+        <FontPicker
+          value={{
+            fontFamily: layer.fontFamily ?? renderSafeFonts[0].family,
+            fontRef: layer.fontRef,
+            // S2.6/S2.7: a pinned ref's weight/style come from the REF, because they describe the
+            // file (`fontRefCss`). So the picker is told what the layer is asking for — read from the
+            // REF when there is one, or picking a new family would silently drop the cut the user is
+            // already on back to regular upright.
+            weight: isBoldActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
+              ? FACE_BOLD_WEIGHT
+              : FACE_REGULAR_WEIGHT,
+            italic: isItalicActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
+          }}
+          onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined }))}
+          onPick={(next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))}
+        />
+      ),
+      /* ADR-023 S2.7 — Bold picks the bold FILE. Over a pinned ref these toggles rewrite the ref to
+         the family's matching cut (async, because a cut we do not hold has to be mirrored first);
+         over a legacy system stack they write CSS exactly as they always have. A family with no such
+         cut DISABLES the control with a reason rather than faux-bolding, which would smear on screen
+         and differ in the export. */
+      fontWeight: <FaceToggleControl layer={layer} control="bold" onChange={onChange} />,
+      italic: <FaceToggleControl layer={layer} control="italic" onChange={onChange} />,
+      textAlign: (
+        <AlignmentControl value={layer.textAlign ?? "center"} onChange={(value) => onChange((item) => ({ ...item, textAlign: value }))} />
+      ),
+      direction: <TextDirectionControl layer={layer} onChange={onChange} />,
+      /* ADR-023 D7 (S1). How an EXISTING project opts in — the value is stamped only on new text, so
+         this toggle is the migration, per project, per layer, and visible. */
+      strokePaintOrder: (
+        <ToggleControl
+          icon={<PenLine size={15} />}
+          label="Stroke behind fill"
+          active={(layer.strokePaintOrder ?? "over") === "under"}
+          onChange={(active) => onChange((item) => ({ ...item, strokePaintOrder: active ? "under" : "over" }))}
+        />
+      )
+    }
+  });
+
   function commitText(runs: TextRun[] | undefined, plainText: string) {
     onChange((item) => {
       const keys = item.sourceTextKeyframes ?? [];
@@ -14989,45 +15110,16 @@ function TextGraphicControls({
         </div>
         <div className="graphic-controls">
           <div className="icon-control-row">
-            {/* ADR-023 S2.5. Picking a catalogue face writes a `fontRef` carrying a `fileHash` —
-                the one write the whole S2 contract is downstream of. Reset returns the layer to the
-                legacy default AND clears the ref, because a stale pin surviving a reset would be a
-                font the user believes they removed still deciding the export. */}
-            <FontPicker
-              value={{
-                fontFamily: layer.fontFamily ?? renderSafeFonts[0].family,
-                fontRef: layer.fontRef,
-                // S2.6/S2.7: a pinned ref's weight/style come from the REF, because they describe
-                // the file (`fontRefCss`). So the picker is told what the layer is asking for —
-                // read from the REF when there is one, or picking a new family would silently drop
-                // the cut the user is already on back to regular upright.
-                weight: isBoldActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
-                  ? FACE_BOLD_WEIGHT
-                  : FACE_REGULAR_WEIGHT,
-                italic: isItalicActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
-              }}
-              onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined }))}
-              onPick={(next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))}
-            />
-            <NumberControl icon={<CaseSensitive size={14} />} label="Font size" keyframe={styleKf?.keyframe("style.fontSize", styleKf.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize))} value={styleKf?.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize) ?? layer.fontSize ?? defaultTextStyle.fontSize} min={1} max={1000} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => (styleKf ? styleKf.change("style.fontSize", value) : onChange((item) => ({ ...item, fontSize: value })))} />
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["fontFamily", "fontSize"])} />
           </div>
           <div className="icon-control-row">
-            {/* ADR-023 S2.7 — Bold picks the bold FILE. Over a pinned ref these toggles rewrite the
-                ref to the family's matching cut (async, because a cut we do not hold has to be
-                mirrored first); over a legacy system stack they write CSS exactly as they always
-                have. A family with no such cut DISABLES the control with a reason rather than
-                faux-bolding, which would smear on screen and differ in the export. */}
-            <FaceToggleControl layer={layer} control="bold" onChange={onChange} />
-            <FaceToggleControl layer={layer} control="italic" onChange={onChange} />
-            <AlignmentControl value={layer.textAlign ?? "center"} onChange={(value) => onChange((item) => ({ ...item, textAlign: value }))} />
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["fontWeight", "italic", "textAlign"])} />
           </div>
           <div className="icon-control-row">
-            <TextDirectionControl layer={layer} onChange={onChange} />
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["direction"])} />
           </div>
           <div className="icon-control-row">
-            <NumberControl icon={<MoveHorizontal size={14} />} label="Letter spacing" keyframe={styleKf?.keyframe("style.letterSpacing", styleKf.value("style.letterSpacing", layer.letterSpacing ?? 0))} value={styleKf?.value("style.letterSpacing", layer.letterSpacing ?? 0) ?? layer.letterSpacing ?? 0} min={-50} max={200} step={0.5} onReset={() => onChange((item) => ({ ...item, letterSpacing: defaultTextStyle.letterSpacing }))} onChange={(value) => (styleKf ? styleKf.change("style.letterSpacing", value) : onChange((item) => ({ ...item, letterSpacing: value })))} />
-            <NumberControl icon={<MoveVertical size={14} />} label="Line height" keyframe={styleKf?.keyframe("style.lineHeight", styleKf.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight))} value={styleKf?.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight) ?? layer.lineHeight ?? defaultTextStyle.lineHeight} min={0} max={5} step={0.05} onReset={() => onChange((item) => ({ ...item, lineHeight: defaultTextStyle.lineHeight }))} onChange={(value) => (styleKf ? styleKf.change("style.lineHeight", value) : onChange((item) => ({ ...item, lineHeight: value })))} />
-            <NumberControl icon={<MoveHorizontal size={14} />} label="Text box width" keyframe={styleKf?.keyframe("style.textWidthPercent", styleKf.value("style.textWidthPercent", layer.textWidthPercent ?? 0))} value={styleKf?.value("style.textWidthPercent", layer.textWidthPercent ?? 0) ?? layer.textWidthPercent ?? 0} min={0} max={100} step={1} onReset={() => onChange((item) => ({ ...item, textWidthPercent: defaultTextStyle.textWidthPercent }))} onChange={(value) => (styleKf ? styleKf.change("style.textWidthPercent", value) : onChange((item) => ({ ...item, textWidthPercent: value })))} />
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["letterSpacing", "lineHeight", "textWidthPercent"])} />
           </div>
         </div>
       </InspectorSection>
@@ -15035,19 +15127,10 @@ function TextGraphicControls({
       <InspectorSection icon={<PaintBucket size={15} />} title="Fill & stroke">
         <div className="graphic-controls">
           <div className="icon-control-row">
-            <ColorControl icon={<PaintBucket size={14} />} label="Fill color" palette={palette} value={layer.color ?? "#ffffff"} onReset={() => onChange((item) => ({ ...item, color: defaultTextStyle.color }))} onChange={(value) => onChange((item) => ({ ...item, color: value }))} />
-            <ColorControl icon={<PenLine size={14} />} label="Stroke color" palette={palette} value={layer.strokeColor ?? "#161618"} onReset={() => onChange((item) => ({ ...item, strokeColor: defaultTextStyle.strokeColor }))} onChange={(value) => onChange((item) => ({ ...item, strokeColor: value }))} />
-            <NumberControl icon={<PenLine size={14} />} label="Stroke width" keyframe={styleKf?.keyframe("style.strokeWidth", styleKf.value("style.strokeWidth", layer.strokeWidth ?? 0))} value={styleKf?.value("style.strokeWidth", layer.strokeWidth ?? 0) ?? layer.strokeWidth ?? 0} min={0} max={200} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultTextStyle.strokeWidth }))} onChange={(value) => (styleKf ? styleKf.change("style.strokeWidth", value) : onChange((item) => ({ ...item, strokeWidth: value })))} />
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["color", "strokeColor", "strokeWidth"])} />
           </div>
           <div className="icon-control-row">
-            {/* ADR-023 D7 (S1). How an EXISTING project opts in — the value is stamped only on new
-                text, so this toggle is the migration, per project, per layer, and visible. */}
-            <ToggleControl
-              icon={<PenLine size={15} />}
-              label="Stroke behind fill"
-              active={(layer.strokePaintOrder ?? "over") === "under"}
-              onChange={(active) => onChange((item) => ({ ...item, strokePaintOrder: active ? "under" : "over" }))}
-            />
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["strokePaintOrder"])} />
           </div>
         </div>
       </InspectorSection>
@@ -15246,55 +15329,14 @@ function BackgroundControls({
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
   styleKf?: StyleKeyframeTools | undefined;
 }) {
-  const background = parseBackgroundColor(layer.backgroundColor, "#08090d");
-  // Padding/radius rows display the em value ×100 — the keyframe track stores the raw em.
-  const paddingBase = Math.round((layer.backgroundPaddingEm ?? defaultTextStyle.backgroundPaddingEm) * 100);
-  const radiusBase = Math.round((layer.backgroundRadiusEm ?? defaultTextStyle.backgroundRadiusEm) * 100);
+  const fields = buildTextStyleFields({ layer, palette, onChange, styleKf, defaults: defaultTextStyle, setShadowEnabled, slots: {} });
   return (
     <div className="graphic-controls">
       <div className="icon-control-row">
-        <ColorControl
-          icon={<Square size={14} />}
-          label="Background"
-          palette={palette}
-          value={background.hex}
-          onReset={() => onChange((item) => ({ ...item, backgroundColor: defaultTextStyle.backgroundColor }))}
-          onChange={(value) => onChange((item) => ({ ...item, backgroundColor: buildBackgroundColor(value, background.alphaPercent) }))}
-        />
-        <NumberControl
-          icon={<Eye size={14} />}
-          label="Opacity"
-          value={background.alphaPercent}
-          min={0}
-          max={100}
-          step={1}
-          onReset={() => onChange((item) => ({ ...item, backgroundColor: defaultTextStyle.backgroundColor }))}
-          onChange={(value) => onChange((item) => ({ ...item, backgroundColor: buildBackgroundColor(background.hex, value) }))}
-        />
+        <PropertyFieldList fields={pickTextStyleFields(fields, ["backgroundColor", "backgroundColor.alpha"])} />
       </div>
       <div className="icon-control-row">
-        <NumberControl
-          icon={<Maximize2 size={14} />}
-          label="Padding"
-          keyframe={styleKf?.keyframe("style.backgroundPaddingEm", styleKf.value("style.backgroundPaddingEm", paddingBase, 100), 100)}
-          value={styleKf?.value("style.backgroundPaddingEm", paddingBase, 100) ?? paddingBase}
-          min={0}
-          max={100}
-          step={1}
-          onReset={() => onChange((item) => ({ ...item, backgroundPaddingEm: defaultTextStyle.backgroundPaddingEm }))}
-          onChange={(value) => (styleKf ? styleKf.change("style.backgroundPaddingEm", value, 100) : onChange((item) => ({ ...item, backgroundPaddingEm: value / 100 })))}
-        />
-        <NumberControl
-          icon={<Radius size={14} />}
-          label="Corner radius"
-          keyframe={styleKf?.keyframe("style.backgroundRadiusEm", styleKf.value("style.backgroundRadiusEm", radiusBase, 100), 100)}
-          value={styleKf?.value("style.backgroundRadiusEm", radiusBase, 100) ?? radiusBase}
-          min={0}
-          max={200}
-          step={1}
-          onReset={() => onChange((item) => ({ ...item, backgroundRadiusEm: defaultTextStyle.backgroundRadiusEm }))}
-          onChange={(value) => (styleKf ? styleKf.change("style.backgroundRadiusEm", value, 100) : onChange((item) => ({ ...item, backgroundRadiusEm: value / 100 })))}
-        />
+        <PropertyFieldList fields={pickTextStyleFields(fields, ["backgroundPaddingEm", "backgroundRadiusEm"])} />
       </div>
     </div>
   );
@@ -15957,20 +15999,15 @@ function ShadowControls({
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
   styleKf?: StyleKeyframeTools | undefined;
 }) {
-  const defaults = layer.type === "shape" ? defaultShapeStyle : defaultTextStyle;
+  // Shapes borrow the text-style shadow rows: the four fields, their bounds and their write handlers
+  // are identical, and only the RESET values differ (a shape's stock shadow is off, text's is not).
+  // Shapes get a schema of their own in S6 (ADR-023 D12, "shapes need a schema and presets, not an
+  // engine"); until then one adapter serving both beats a second copy of the same four rows.
+  const defaults = layer.type === "shape" ? { ...defaultTextStyle, ...defaultShapeStyle } : defaultTextStyle;
+  const fields = buildTextStyleFields({ layer, palette, onChange, styleKf, defaults, setShadowEnabled, slots: {} });
   return (
     <div className="icon-control-row">
-      <ColorControl icon={<Sparkles size={14} />} label="Shadow color" palette={palette} value={layer.shadowColor ?? "#000000"} onReset={() => onChange((item) => ({ ...item, shadowColor: defaults.shadowColor }))} onChange={(value) => onChange((item) => ({ ...item, shadowColor: value }))} />
-      <NumberControl icon={<Sparkles size={14} />} label="Shadow blur" keyframe={styleKf?.keyframe("style.shadowBlur", styleKf.value("style.shadowBlur", layer.shadowBlur ?? 0))} value={styleKf?.value("style.shadowBlur", layer.shadowBlur ?? 0) ?? layer.shadowBlur ?? 0} min={0} max={500} step={1} onReset={() => onChange((item) => setShadowEnabled({ ...item, shadowBlur: defaults.shadowBlur }, defaults.shadowBlur > 0))} onChange={(value) => {
-        if (styleKf) {
-          styleKf.change("style.shadowBlur", value);
-          if (value > 0) onChange((item) => setShadowEnabled(item, true));
-        } else {
-          onChange((item) => setShadowEnabled({ ...item, shadowBlur: value }, value > 0));
-        }
-      }} />
-      <NumberControl icon={<MoveHorizontal size={14} />} label="Shadow X" keyframe={styleKf?.keyframe("style.shadowOffsetX", styleKf.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0))} value={styleKf?.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0) ?? layer.shadowOffsetX ?? 0} min={-500} max={500} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetX: defaults.shadowOffsetX }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetX", value) : onChange((item) => ({ ...item, shadowOffsetX: value })))} />
-      <NumberControl icon={<MoveVertical size={14} />} label="Shadow Y" keyframe={styleKf?.keyframe("style.shadowOffsetY", styleKf.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0))} value={styleKf?.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0) ?? layer.shadowOffsetY ?? 0} min={-500} max={500} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetY: defaults.shadowOffsetY }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetY", value) : onChange((item) => ({ ...item, shadowOffsetY: value })))} />
+      <PropertyFieldList fields={pickTextStyleFields(fields, ["shadowColor", "shadowBlur", "shadowOffsetX", "shadowOffsetY"])} />
     </div>
   );
 }

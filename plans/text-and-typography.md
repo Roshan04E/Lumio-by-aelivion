@@ -21,7 +21,7 @@ S2.5 catalogue + font picker UI          the ceiling a user can SEE going       
 S2.6 the catalogue goes VAST             virtualized list + mirror-on-pick      the original ask
 S2.7 Bold picks the bold FILE            weight resolves to a face, not CSS    S2.6 made it reachable
 S3  user font upload                      storage + asset doctrine
-S4  TextStyle as a PropertySchema         migration; unblocks S6
+S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unblocks S6
 S5  tier-1 texture + CSS depth            rides S4
 S6  caption + text preset library         rides S4; highest product value
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
@@ -433,13 +433,37 @@ Copy-paste alone is a real user win and is the thing to demo for this stage.
 - Collapse the `layer.X ?? style.X ?? default` reads in `composition-style.ts` into one resolved
   style object. `getCompositionTextStyle` becomes schema-resolution → CSS emission, two steps
   instead of one tangled one.
-- The migration from loose fields. Sequence with S2's manifest migration: written together, applied
-  in order, tested against real saved projects.
+- ~~The migration from loose fields. Sequence with S2's manifest migration.~~ **There is no migration
+  — see the cross-cutting note.** A pre-S4 saved style is already the v1 value shape, so it is
+  *adopted* into the envelope without a value being read, written or defaulted.
 - Clipboard and (future) presets share the `{schemaId, version, values}` envelope (T-10).
 
 **Verification:** pixel-identical output for every existing fixture after the migration — this stage
 must change **no pixels**. That is the acceptance bar: a schema refactor that shifts a fixture has a
 bug in the migration.
+
+**SHIPPED 2026-08-14.**
+
+- `packages/shared/src/property-schema.ts` — ADR-004's first implementation, the minimal cut its own
+  self-critique recommends. Inert metadata; the frozen ADR-003 taxonomy stated as a union.
+- `packages/shared/src/text-style-schema.ts` — the `text-style` schema, v1, 21 described fields in 4
+  groups. **No kind was added**, and none was needed: fonts are `reference`/`font` per ADR-003, and
+  the five widgets the renderer's subset has no branch for arrive through ADR-002's escape hatch.
+- `getCompositionTextStyle` is now `resolveTextStyle` → CSS emission. The precedence chain and the
+  keyframe reads live in the first step; the second emits declarations and nothing else.
+- **The preset key list is derived from the schema, with two compile-time constraints** (every
+  `TextStyleFields` key is described; the presetable set is *exactly* `TextStyleFields`). This closed a
+  live T-15 defect: the hand-written list had fallen two fields behind the layer, so **Save Style
+  silently dropped `fontRef` and `direction`** — a saved look applied in a different typeface than the
+  one it was captured from, and no parity gate could see it.
+- Copy Look / Paste Look in the Text tab, over the envelope. Refuses a foreign schema or a
+  newer-version payload with a reason rather than pasting half a look.
+
+**Evidence:** `render:baseline` 78/78 unchanged at zero tolerance (the acceptance bar), plus a new
+`textstyle:golden` gate — 54 emitted-style cases across the branch matrix, byte-identical including
+key order and `undefined`-vs-absent — and `textstyle:schema`, which sweeps all 20 presetable fields
+through capture → envelope → apply and asserts each one *changes the emitted style* (T-15). Both new
+gates were falsified before being trusted.
 
 ---
 
@@ -585,8 +609,18 @@ its own shaping context, changing kerning. Decide the model before writing the a
 `apps/worker/src/remotion/Root.tsx`, in the same change, with a `render:compare:pixels` fixture
 (T-9). Text parity is free for *layout* and for nothing else.
 
-**Two migrations, one design.** S2's manifest migration and S4's schema migration touch the same
-saved data. Write both before shipping either.
+**~~Two migrations, one design.~~ DELETED 2026-08-14 (S4) — the obligation was moot as written.**
+This said S2's manifest migration and S4's schema migration touch the same saved data and had to be
+written together. **Neither migration exists.** D1a decided S2 has no migration, ever, by design (S2's
+own scope says so: an existing `fontFamily` stack normalizes to `{ source: "system" }` and keeps
+rendering exactly as today, permanently), and S4 inherited that shape rather than inventing a second
+one — a pre-S4 saved style is already exactly the v1 value shape, so adopting it into the envelope
+reads and writes nothing. The instruction is deleted rather than marked done, because leaving it
+would have had the next stage sequencing against two migrations that were never going to be written.
+
+What survives is the *reason* the note existed: **absent stays absent, in every store.** Project data,
+saved styles, presets and the clipboard all decline to fill in a field nobody authored. That is the
+D1a rule, and it is what makes migrations unnecessary here rather than merely deferred.
 
 **Fixtures accumulate.** Each stage adds at least one. Before every pixel run, check for a stray
 headless Chrome or leftover vite-server node tree — a dirty machine has voided runs here before.

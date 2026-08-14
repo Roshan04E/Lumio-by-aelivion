@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Check, Pencil, Plus, RefreshCw, Trash2, Type } from "lucide-react";
+import { Check, ClipboardPaste, Copy, Pencil, Plus, RefreshCw, Trash2, Type } from "lucide-react";
 import type { TextStyle } from "@orreris/shared";
 import { InspectorSection } from "./InspectorSection";
 
@@ -21,7 +21,10 @@ export function TextStylesSection({
   onApply,
   onUpdate,
   onRename,
-  onDelete
+  onDelete,
+  onCopyLook,
+  onPasteLook,
+  hasCopiedLook = false
 }: {
   styles: TextStyle[];
   onSave: () => void;
@@ -29,6 +32,10 @@ export function TextStylesSection({
   onUpdate: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
+  /** ADR-023 S4 — copy/paste a look between layers without naming and saving it first. */
+  onCopyLook?: (() => void) | undefined;
+  onPasteLook?: (() => void) | undefined;
+  hasCopiedLook?: boolean | undefined;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -46,6 +53,26 @@ export function TextStylesSection({
         <button type="button" className="text-styles-save" onClick={onSave}>
           <Plus size={13} /> Save Style
         </button>
+
+        {/* ADR-023 S4. Copy/paste is the same operation Save/Apply performs — capture the schema's
+            presetable fields, bake them onto the targets — without the naming step. Saving is for a
+            look you want to keep; this is for the far more common "make that one look like this one".
+            Both carry the identical `{schemaId, version, values}` envelope (T-10). */}
+        {onCopyLook && onPasteLook ? (
+          <div className="text-styles-actions">
+            <button type="button" title="Copy this text layer's look" onClick={onCopyLook}>
+              <Copy size={13} /> Copy Look
+            </button>
+            <button
+              type="button"
+              disabled={!hasCopiedLook}
+              title={hasCopiedLook ? "Paste the copied look onto the selected text" : "Copy a look first"}
+              onClick={onPasteLook}
+            >
+              <ClipboardPaste size={13} /> Paste Look
+            </button>
+          </div>
+        ) : null}
 
         {styles.length ? (
           <div className="text-styles-list" role="listbox" aria-label="Saved text styles">

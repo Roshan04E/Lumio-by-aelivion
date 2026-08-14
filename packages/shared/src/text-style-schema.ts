@@ -1,0 +1,423 @@
+/**
+ * The `text-style` PropertySchema (ADR-023 S4 / D12) — the first adopter of ADR-004.
+ *
+ * A text style stops being a bag of loose CSS-ish fields and becomes a **versioned, described object**:
+ * one declaration that the inspector adapter (ADR-005), the style resolver in `composition-style.ts`,
+ * saved project styles, the clipboard and (S6) presets all read. That is what makes "a preset saved
+ * today still loads after the schema changes" true rather than aspirational — migrations run on all
+ * four, because all four are the same envelope (ADR-023 T-10).
+ *
+ * WHAT IS IN AND WHAT IS NOT. This schema describes the *look* of text: typography, fill and stroke,
+ * background box, shadow. It does not describe what the text SAYS (`text`/`textRuns`/
+ * `sourceTextKeyframes`), where it SITS (`transform`), or the warp envelope (`textWarp` — its own
+ * model and its own panel). `textWidthPercent` is described because the inspector edits it, and
+ * carries `presetable: false` because a box width is placement, not a look: pasting a look must not
+ * reflow the target's line breaks.
+ *
+ * ONLY FROZEN KINDS (ADR-003). `fontFamily` is a `reference`/`font`, not a new "font" kind, and the
+ * adapter bridges it to today's `FontPicker` through the `control` escape hatch — the renderer ships a
+ * subset of the taxonomy and that is the sanctioned way to consume a kind it lacks. No kind was added
+ * for this stage, and none is needed.
+ *
+ * `defaultValue` MEANS "WHAT ABSENT RENDERS AS" — {@link compositionTextDefaults}, the resolver's
+ * fallback. It is deliberately NOT the authoring default the New Text button stamps
+ * (`EditorPage.defaultTextStyle`, e.g. 72 px and `#4D9FFF`), which is a different question with a
+ * different answer. Fields whose absence is permanent legacy state (D1a) carry
+ * `absenceIsMeaningful` and no default at all: nothing may fill them in.
+ */
+
+import { compositionTextDefaults } from "./composition-style";
+import {
+  propertySchemaPresetKeys,
+  type PropertySchema,
+  type PropertySchemaField
+} from "./property-schema";
+import type { TextStyleFields, TimelineLayer } from "./types";
+import type { PropertyValuesEnvelope } from "./property-schema";
+
+/** Every key this schema describes. Constrained to real layer keys, so a typo cannot compile. */
+export type TextStyleSchemaKey = keyof TimelineLayer & (keyof TextStyleFields | "textWidthPercent");
+
+/** A key a preset/clipboard envelope carries — the `presetable` subset, and exactly `TextStyleFields`. */
+export type TextStyleFieldKey = keyof TextStyleFields & keyof TimelineLayer;
+
+export const textStyleGroups = [
+  { id: "typography", label: "Typography" },
+  { id: "fill", label: "Fill & stroke" },
+  { id: "background", label: "Background" },
+  { id: "shadow", label: "Shadow" }
+] as const;
+
+/**
+ * Declared `as const` so the KEY and `presetable` literals survive into the type system — that is what
+ * makes the two constraints at the bottom of this file real rather than decorative.
+ */
+const fields = [
+  // --- Typography ----------------------------------------------------------------------------
+  {
+    key: "fontFamily",
+    kind: "reference",
+    refType: "font",
+    group: "typography",
+    label: "Font",
+    defaultValue: compositionTextDefaults.fontFamily,
+    presetable: true,
+    documentation: {
+      description: "The typeface. Travels with `fontRef`, which is the render identity (D1/T-1).",
+      aiSynonyms: ["typeface", "font family"]
+    }
+  },
+  {
+    key: "fontRef",
+    kind: "reference",
+    refType: "font",
+    group: "typography",
+    label: "Font file",
+    // ADR-023 D1a. Absent is not "the default font" — it is "authored before FontRef existed, render
+    // the legacy CSS stack", permanently. `getCompositionFontRef` normalizes on read; nothing writes
+    // this in on load, and no migration may.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description:
+        "The pinned font file (`fileHash` + store) a render resolves. Absent means the legacy CSS stack.",
+      aiSynonyms: ["pinned font", "font file"]
+    }
+  },
+  {
+    key: "fontSize",
+    kind: "number",
+    unit: "px",
+    min: 1,
+    max: 1000,
+    step: 1,
+    group: "typography",
+    label: "Font size",
+    defaultValue: compositionTextDefaults.fontSize,
+    animatableAs: "style.fontSize",
+    presetable: true,
+    documentation: { aiSynonyms: ["size", "text size", "point size"] }
+  },
+  {
+    key: "fontWeight",
+    kind: "number",
+    min: 100,
+    max: 900,
+    step: 100,
+    group: "typography",
+    label: "Weight",
+    defaultValue: compositionTextDefaults.fontWeight,
+    presetable: true,
+    documentation: {
+      description:
+        "CSS weight for a legacy stack. Over a pinned `fontRef` the FILE decides weight (S2.7), so the inspector exposes this as the Bold toggle rather than a number.",
+      aiSynonyms: ["bold", "boldness"]
+    }
+  },
+  {
+    key: "italic",
+    kind: "boolean",
+    group: "typography",
+    label: "Italic",
+    defaultValue: false,
+    presetable: true,
+    documentation: { aiSynonyms: ["oblique", "slanted"] }
+  },
+  {
+    key: "letterSpacing",
+    kind: "number",
+    unit: "px",
+    min: -50,
+    max: 200,
+    step: 0.5,
+    group: "typography",
+    label: "Letter spacing",
+    defaultValue: 0,
+    animatableAs: "style.letterSpacing",
+    presetable: true,
+    documentation: { aiSynonyms: ["tracking", "kerning"] }
+  },
+  {
+    key: "lineHeight",
+    kind: "number",
+    unit: "ratio",
+    min: 0,
+    max: 5,
+    step: 0.05,
+    group: "typography",
+    label: "Line height",
+    defaultValue: compositionTextDefaults.lineHeight,
+    animatableAs: "style.lineHeight",
+    presetable: true,
+    documentation: { aiSynonyms: ["leading", "line spacing"] }
+  },
+  {
+    key: "textAlign",
+    kind: "enum",
+    group: "typography",
+    label: "Alignment",
+    options: [
+      { value: "left", label: "Left" },
+      { value: "center", label: "Center" },
+      { value: "right", label: "Right" },
+      { value: "start", label: "Start" },
+      { value: "end", label: "End" }
+    ],
+    defaultValue: "center",
+    presetable: true,
+    documentation: {
+      description: "`start`/`end` are LOGICAL and resolve against `direction`; `left`/`right` stay physical (D6a)."
+    }
+  },
+  {
+    key: "direction",
+    kind: "enum",
+    group: "typography",
+    label: "Direction",
+    options: [
+      { value: "auto", label: "Auto" },
+      { value: "ltr", label: "Left to right" },
+      { value: "rtl", label: "Right to left" }
+    ],
+    // ADR-023 D6a / T-13. Absent emits NO direction declaration at all, permanently — not `ltr`. A
+    // migration that wrote `ltr` in would change every legacy layer's emitted CSS, which is precisely
+    // the byte-identity claim D1a's shape exists to keep.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "Base paragraph direction. `auto` is resolved once, in shared, for both renderers (T-13 corrected).",
+      aiSynonyms: ["rtl", "bidi", "right to left"]
+    }
+  },
+  {
+    key: "textWidthPercent",
+    kind: "number",
+    unit: "percent",
+    min: 0,
+    max: 100,
+    step: 1,
+    group: "typography",
+    label: "Text box width",
+    defaultValue: 0,
+    animatableAs: "style.textWidthPercent",
+    // NOT presetable: a box width is placement, and pasting a look must not reflow the target's lines.
+    presetable: false,
+    documentation: { description: "0 = shrink-wrap (`max-content`); above 0 the box wraps at this width." }
+  },
+
+  // --- Fill & stroke -------------------------------------------------------------------------
+  {
+    key: "color",
+    kind: "color",
+    group: "fill",
+    label: "Fill color",
+    defaultValue: compositionTextDefaults.color,
+    presetable: true,
+    documentation: { aiSynonyms: ["text color", "fill"] }
+  },
+  {
+    key: "strokeColor",
+    kind: "color",
+    group: "fill",
+    label: "Stroke color",
+    defaultValue: "#000000",
+    presetable: true,
+    documentation: { aiSynonyms: ["outline color", "border color"] }
+  },
+  {
+    key: "strokeWidth",
+    kind: "number",
+    unit: "px",
+    min: 0,
+    max: 200,
+    step: 1,
+    group: "fill",
+    label: "Stroke width",
+    defaultValue: 0,
+    animatableAs: "style.strokeWidth",
+    presetable: true,
+    documentation: { aiSynonyms: ["outline", "border width"] }
+  },
+  {
+    key: "strokePaintOrder",
+    kind: "enum",
+    group: "fill",
+    label: "Stroke behind fill",
+    options: [
+      { value: "over", label: "Stroke over fill" },
+      { value: "under", label: "Stroke behind fill" }
+    ],
+    // ADR-023 D7 (S1). Absent renders as "over" but is NOT defaulted to it: emitting `paint-order`
+    // for a legacy layer would change its CSS. Only an explicit "under" emits a declaration.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: { description: "`paint-order: stroke fill` — a heavy stroke stops eating the letterform." }
+  },
+
+  // --- Background ----------------------------------------------------------------------------
+  {
+    key: "backgroundColor",
+    kind: "color",
+    group: "background",
+    label: "Background",
+    defaultValue: compositionTextDefaults.backgroundColor,
+    presetable: true,
+    documentation: { description: "Transparent by default — new text is a clean overlay, not a grey box." }
+  },
+  {
+    key: "backgroundPaddingEm",
+    kind: "number",
+    unit: "em",
+    min: 0,
+    max: 4,
+    step: 0.01,
+    group: "background",
+    label: "Padding",
+    defaultValue: compositionTextDefaults.paddingEmY,
+    animatableAs: "style.backgroundPaddingEm",
+    presetable: true,
+    documentation: { description: "Vertical padding in em; horizontal is twice this." }
+  },
+  {
+    key: "backgroundRadiusEm",
+    kind: "number",
+    unit: "em",
+    min: 0,
+    max: 4,
+    step: 0.01,
+    group: "background",
+    label: "Corner radius",
+    defaultValue: compositionTextDefaults.borderRadiusEm,
+    animatableAs: "style.backgroundRadiusEm",
+    presetable: true
+  },
+
+  // --- Shadow --------------------------------------------------------------------------------
+  {
+    key: "shadowColor",
+    kind: "color",
+    group: "shadow",
+    label: "Shadow color",
+    defaultValue: compositionTextDefaults.shadowColor,
+    presetable: true
+  },
+  {
+    key: "shadowBlur",
+    kind: "number",
+    unit: "px",
+    min: 0,
+    max: 200,
+    step: 1,
+    group: "shadow",
+    label: "Shadow blur",
+    // No `defaultValue`, and that is the honest answer: what absence resolves to depends on the LAYER
+    // — 19 when a `shadow` effect is present, 0 when it is not (`getTextShadowCss`). A single number
+    // here would be wrong half the time, so the resolver states it and the schema does not pretend.
+    animatableAs: "style.shadowBlur",
+    presetable: true,
+    documentation: { description: "0 emits no shadow. Absent means 19 when the layer carries a `shadow` effect, else 0." }
+  },
+  {
+    key: "shadowOffsetX",
+    kind: "number",
+    unit: "px",
+    min: -500,
+    max: 500,
+    step: 1,
+    group: "shadow",
+    label: "Shadow X",
+    defaultValue: compositionTextDefaults.shadowOffsetX,
+    animatableAs: "style.shadowOffsetX",
+    presetable: true
+  },
+  {
+    key: "shadowOffsetY",
+    kind: "number",
+    unit: "px",
+    min: -500,
+    max: 500,
+    step: 1,
+    group: "shadow",
+    label: "Shadow Y",
+    defaultValue: compositionTextDefaults.shadowOffsetY,
+    animatableAs: "style.shadowOffsetY",
+    presetable: true
+  }
+] as const satisfies ReadonlyArray<PropertySchemaField<TextStyleSchemaKey>>;
+
+/**
+ * Version 1. There is no version 0 to migrate FROM: pre-schema saved styles are bare
+ * `TextStyleFields` with no envelope, and {@link normalizeTextStylePreset} adopts them as v1 without
+ * touching a value — see its comment for why that is a normalization and not a migration.
+ */
+export const TEXT_STYLE_SCHEMA_VERSION = 1;
+
+export const textStyleSchema: PropertySchema<TextStyleSchemaKey> = {
+  id: "text-style",
+  version: TEXT_STYLE_SCHEMA_VERSION,
+  metadata: {
+    name: "Text style",
+    description: "How text looks: typography, fill and stroke, background box, and shadow."
+  },
+  groups: [...textStyleGroups],
+  fields,
+  migrations: [],
+  documentation: {
+    description:
+      "The look of a text layer, independent of what it says and where it sits. Shared by the inspector, saved project styles, the clipboard and presets."
+  }
+};
+
+/**
+ * The keys a preset / clipboard envelope carries — derived from the schema, never hand-written.
+ *
+ * WHY DERIVED (ADR-023 T-15). The hand-written list this replaces was the same defect shape T-15 was
+ * written about: `fontRef` and `direction` were added to the layer by S2 and S0b and never added to
+ * the copy list, so "Save Style" silently dropped the font pin and the base direction — a saved look
+ * that quietly rendered in a different typeface when applied. Parity gates cannot see that, because a
+ * field that never reaches the data is a field both renderers agree about perfectly. The exhaustiveness
+ * constraint below is what makes the next omission a compile error instead of a user's discovery.
+ */
+export const TEXT_STYLE_FIELD_KEYS: ReadonlyArray<TextStyleFieldKey> = propertySchemaPresetKeys(
+  textStyleSchema
+) as TextStyleFieldKey[];
+
+/** The keys actually declared above, read back out of the literal. */
+type DeclaredTextStyleKey = (typeof fields)[number]["key"];
+/** The keys declared above with `presetable: true` — what an envelope will really carry. */
+type PresetableTextStyleKey = Extract<(typeof fields)[number], { presetable: true }>["key"];
+
+/**
+ * The two constraints that make the derivation above load-bearing, both proved against the literal
+ * rather than restated:
+ *
+ * 1. **Described.** Every `TextStyleFields` key has a schema field. Add a look field to the interface
+ *    and forget the schema entry → the offender is named in the error text.
+ * 2. **Carried.** The presetable set is EXACTLY `TextStyleFields` — no missing key (the S1/S2 defect:
+ *    a field the copy path silently drops) and no extra key (a placement field like
+ *    `textWidthPercent` sneaking into a look and reflowing the target).
+ */
+type UndescribedTextStyleKeys = Exclude<keyof TextStyleFields, DeclaredTextStyleKey>;
+const _everyLookFieldIsDescribed: UndescribedTextStyleKeys extends never
+  ? true
+  : ["text-style schema is missing these TextStyleFields keys", UndescribedTextStyleKeys] = true;
+
+type UncarriedTextStyleKeys = Exclude<keyof TextStyleFields, PresetableTextStyleKey>;
+type OvercarriedTextStyleKeys = Exclude<PresetableTextStyleKey, keyof TextStyleFields>;
+const _presetKeysAreExactlyTheLook: [UncarriedTextStyleKeys, OvercarriedTextStyleKeys] extends [never, never]
+  ? true
+  : [
+      "presetable fields must be exactly TextStyleFields — these are dropped / these are extra",
+      UncarriedTextStyleKeys,
+      OvercarriedTextStyleKeys
+    ] = true;
+void _everyLookFieldIsDescribed;
+void _presetKeysAreExactlyTheLook;
+
+/** A saved look / clipboard payload — the ADR-004 envelope, shared with presets (T-10). */
+export type TextStylePreset = PropertyValuesEnvelope<TextStyleFields>;
+
+/** Wrap captured values in the current envelope. */
+export function textStylePreset(values: TextStyleFields): TextStylePreset {
+  return { schemaId: textStyleSchema.id, version: TEXT_STYLE_SCHEMA_VERSION, values };
+}

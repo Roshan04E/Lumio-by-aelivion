@@ -708,34 +708,133 @@ function animStyleNumber(
   return evaluateAnimatedValue({ baseValue: base, keyframes, property, scope: "layer", timeSeconds: layerTime }) as number;
 }
 
-export function getCompositionTextStyle(layer: CompositionLayerStyleInput | TimelineLayer, options: CompositionStyleOptions = {}) {
+/**
+ * A text layer's look, RESOLVED — one value per `text-style` schema field, with the layer / style-bag /
+ * default precedence and the keyframe evaluation already applied (ADR-023 S4).
+ *
+ * This is step one of the two `getCompositionTextStyle` is now split into. Before S4 the precedence
+ * chain, the animation reads and the CSS emission were interleaved in a single 70-line object literal,
+ * so "what is this layer's stroke width" and "what declaration does that produce" could not be asked
+ * separately — and everything that wants the first question (the inspector, a preset, an AI edit, the
+ * warp builder) had to re-derive it and risk answering differently.
+ *
+ * ABSENCE SURVIVES RESOLUTION. `direction` and `strokeUnderFill` keep their D1a/D6a shape: a field
+ * that was never authored resolves to "no declaration", not to the default's value. That distinction
+ * is the whole legacy claim, so it is carried in the resolved type rather than reconstructed during
+ * emission.
+ *
+ * Defaults come from {@link compositionTextDefaults}, which is also what the `text-style` schema
+ * declares as each field's `defaultValue`. The dependency runs schema → composition-style and never
+ * back: this module must not import the schema, or the schema's field literals would initialize
+ * against a half-loaded module.
+ */
+export interface ResolvedTextStyle {
+  fontRef: FontRef;
+  /** From `fontRefCss` — the legacy stack unchanged, or the pinned face's family. */
+  fontFamily: string;
+  /** A pinned ref decides weight/style, because those describe the FILE (S2.7). */
+  fontWeight: number;
+  fontStyle: "italic" | "normal";
+  fontSize: number;
+  letterSpacing: number;
+  lineHeight: number;
+  textAlign: "left" | "center" | "right" | "start" | "end";
+  /** Concrete or ABSENT — `"auto"` is resolved here, once, for every renderer (T-13 corrected). */
+  direction: "ltr" | "rtl" | undefined;
+  textWidthPercent: number;
+  color: string;
+  strokeColor: string;
+  strokeWidth: number;
+  /** `strokePaintOrder === "under"`. Absent reads as false without being written back as `"over"`. */
+  strokeUnderFill: boolean;
+  backgroundColor: string;
+  backgroundPaddingEm: number;
+  backgroundRadiusEm: number;
+  shadowColor: string;
+  /** Already carries the effect-conditional default: 19 with a `shadow` effect on the layer, else 0. */
+  shadowBlur: number;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
+}
+
+/**
+ * Step one: resolve the layer's declared look. Pure, no CSS, no transform, no effects — those belong
+ * to emission, because they are not properties of the style.
+ */
+export function resolveTextStyle(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  options: CompositionStyleOptions = {}
+): ResolvedTextStyle {
   const style = styleOf(layer);
-  const transform = getCompositionTransform(layer, options);
-  const shadowCss = getTextShadowCss(layer, style, options);
-  const textWidth = animStyleNumber(layer, options, "style.textWidthPercent", numberOr(layer.textWidthPercent ?? style.textWidthPercent, 0));
-  const strokeWidth = animStyleNumber(layer, options, "style.strokeWidth", numberOr(layer.strokeWidth ?? style.strokeWidth, 0));
-  const strokeColor = stringOr(layer.strokeColor ?? style.strokeColor, "#000000");
-  // ADR-023 D7 (S1). ABSENT resolves to "over" — the legacy look — and only an explicit "under"
-  // changes anything, so every project authored before this field existed emits exactly the CSS it
-  // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
-  const strokeUnderFill = (layer.strokePaintOrder ?? style.strokePaintOrder) === "under";
-  // ADR-023 D6a (S0b) / T-13 corrected (S0c). ABSENT emits NOTHING — no `direction`, no
-  // `unicode-bidi` — so an existing project keeps rendering at the CSS initial `ltr` exactly as it
-  // does today, permanently. Only a declared value produces declarations, and `"auto"` is resolved
-  // to a concrete direction HERE so the DOM and the raster cannot answer it differently.
-  const direction = resolveTextDirection(layer.direction ?? style.direction, layer);
   // ADR-023 D1/D1a/T-1. One read of the layer's font identity, normalized on the way through, so
-  // both renderers see the same answer and neither has to know that legacy data exists.
-  const fontCss = fontRefCss(getCompositionFontRef(layer));
+  // both renderers see the same answer and neither has to know that legacy data exists. A layer with
+  // no `fontRef` normalizes to `{ source: "system" }` carrying the legacy stack, and `fontRefCss`
+  // returns it unchanged with NO weight or style opinion — which is what keeps the three font
+  // declarations byte-identical to what they were before `FontRef` existed.
+  const fontRef = getCompositionFontRef(layer);
+  const fontCss = fontRefCss(fontRef);
+  // The shadow's absent-blur default depends on the LAYER, not on the field: a `shadow` effect means
+  // the layer asked for the stock shadow, and no effect means no shadow at all.
+  const hasShadowEffect = hasCompositionEffect(layer.effects, "shadow");
+
+  return {
+    fontRef,
+    fontFamily: fontCss.fontFamily,
+    fontWeight: fontCss.fontWeight ?? numberOr(layer.fontWeight ?? style.fontWeight, compositionTextDefaults.fontWeight),
+    fontStyle: fontCss.fontStyle ?? ((layer.italic ?? style.italic) ? "italic" : "normal"),
+    fontSize: animStyleNumber(layer, options, "style.fontSize", numberOr(layer.fontSize ?? style.fontSize, compositionTextDefaults.fontSize)),
+    letterSpacing: animStyleNumber(layer, options, "style.letterSpacing", numberOr(layer.letterSpacing ?? style.letterSpacing, 0)),
+    lineHeight: animStyleNumber(layer, options, "style.lineHeight", numberOr(layer.lineHeight ?? style.lineHeight, compositionTextDefaults.lineHeight)),
+    textAlign: getTextAlign(layer.textAlign ?? style.textAlign),
+    // ADR-023 D6a (S0b) / T-13 corrected (S0c). ABSENT stays absent — no `direction`, no
+    // `unicode-bidi` — so an existing project keeps rendering at the CSS initial `ltr` exactly as it
+    // does today, permanently. Only a declared value resolves, and `"auto"` resolves HERE so the DOM
+    // and the raster cannot answer it differently.
+    direction: resolveTextDirection(layer.direction ?? style.direction, layer),
+    textWidthPercent: animStyleNumber(layer, options, "style.textWidthPercent", numberOr(layer.textWidthPercent ?? style.textWidthPercent, 0)),
+    color: stringOr(layer.color ?? style.color, compositionTextDefaults.color),
+    strokeColor: stringOr(layer.strokeColor ?? style.strokeColor, "#000000"),
+    strokeWidth: animStyleNumber(layer, options, "style.strokeWidth", numberOr(layer.strokeWidth ?? style.strokeWidth, 0)),
+    // ADR-023 D7 (S1). ABSENT resolves to "over" — the legacy look — and only an explicit "under"
+    // changes anything, so every project authored before this field existed emits exactly the CSS it
+    // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
+    strokeUnderFill: (layer.strokePaintOrder ?? style.strokePaintOrder) === "under",
+    backgroundColor: stringOr(layer.backgroundColor ?? style.backgroundColor, compositionTextDefaults.backgroundColor),
+    backgroundPaddingEm: animStyleNumber(
+      layer,
+      options,
+      "style.backgroundPaddingEm",
+      numberOr(layer.backgroundPaddingEm ?? style.backgroundPaddingEm, compositionTextDefaults.paddingEmY)
+    ),
+    backgroundRadiusEm: animStyleNumber(
+      layer,
+      options,
+      "style.backgroundRadiusEm",
+      numberOr(layer.backgroundRadiusEm ?? style.backgroundRadiusEm, compositionTextDefaults.borderRadiusEm)
+    ),
+    shadowColor: stringOr(layer.shadowColor ?? style.shadowColor, compositionTextDefaults.shadowColor),
+    shadowBlur: animStyleNumber(
+      layer,
+      options,
+      "style.shadowBlur",
+      numberOr(layer.shadowBlur ?? style.shadowBlur, hasShadowEffect ? compositionTextDefaults.shadowBlur : 0)
+    ),
+    shadowOffsetX: animStyleNumber(layer, options, "style.shadowOffsetX", numberOr(layer.shadowOffsetX ?? style.shadowOffsetX, compositionTextDefaults.shadowOffsetX)),
+    shadowOffsetY: animStyleNumber(layer, options, "style.shadowOffsetY", numberOr(layer.shadowOffsetY ?? style.shadowOffsetY, compositionTextDefaults.shadowOffsetY))
+  };
+}
+
+/**
+ * Step two: emit CSS from a resolved style plus the things that are NOT style — placement, blend,
+ * effect filters. Key order and the `undefined`-vs-absent shape are load-bearing: `scene-text-raster`
+ * builds its content-cache key from this object.
+ */
+export function getCompositionTextStyle(layer: CompositionLayerStyleInput | TimelineLayer, options: CompositionStyleOptions = {}) {
+  const resolved = resolveTextStyle(layer, options);
+  const transform = getCompositionTransform(layer, options);
   const effectCss = getEffectCss(layer.effects, layer.animations as TimelineKeyframeV2[] | undefined, layer.startSeconds, options.currentTimeSeconds);
-  const paddingEmY = animStyleNumber(
-    layer,
-    options,
-    "style.backgroundPaddingEm",
-    numberOr(layer.backgroundPaddingEm ?? style.backgroundPaddingEm, compositionTextDefaults.paddingEmY)
-  );
+  const paddingEmY = resolved.backgroundPaddingEm;
   const paddingEmX = paddingEmY * 2;
-  const letterSpacing = animStyleNumber(layer, options, "style.letterSpacing", numberOr(layer.letterSpacing ?? style.letterSpacing, 0));
   // NOTE: text warp is NOT a CSS filter here. It is rendered as a vector <path>
   // overlay (opentype outline + envelope mesh) by buildWarpedTextPathSvg; see
   // VideoPreview.tsx / remotion/Root.tsx and font-outlines.ts.
@@ -746,37 +845,33 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     top: `${transform.y}%`,
     maxWidth: `${compositionTextDefaults.maxWidthPercent}%`,
     padding: `${paddingEmY}em ${paddingEmX}em`,
-    borderRadius: `${animStyleNumber(layer, options, "style.backgroundRadiusEm", numberOr(layer.backgroundRadiusEm ?? style.backgroundRadiusEm, compositionTextDefaults.borderRadiusEm))}em`,
-    background: stringOr(layer.backgroundColor ?? style.backgroundColor, compositionTextDefaults.backgroundColor),
-    color: stringOr(layer.color ?? style.color, compositionTextDefaults.color),
-    // ADR-023 D1/D1a. A layer with no `fontRef` normalizes to `{ source: "system" }` carrying this
-    // exact stack, and `fontRefCss` returns it unchanged with NO weight or style opinion — so the
-    // three declarations below are byte-identical to what they were before `FontRef` existed. Only a
-    // pinned ref overrides weight/style, and it does so because those describe the FILE.
-    fontFamily: fontCss.fontFamily,
-    fontSize: animStyleNumber(layer, options, "style.fontSize", numberOr(layer.fontSize ?? style.fontSize, compositionTextDefaults.fontSize)),
-    fontWeight: fontCss.fontWeight ?? numberOr(layer.fontWeight ?? style.fontWeight, compositionTextDefaults.fontWeight),
-    fontStyle: fontCss.fontStyle ?? ((layer.italic ?? style.italic) ? "italic" : "normal"),
-    letterSpacing: letterSpacing !== 0 ? `${letterSpacing}px` : undefined,
-    lineHeight: animStyleNumber(layer, options, "style.lineHeight", numberOr(layer.lineHeight ?? style.lineHeight, compositionTextDefaults.lineHeight)),
+    borderRadius: `${resolved.backgroundRadiusEm}em`,
+    background: resolved.backgroundColor,
+    color: resolved.color,
+    fontFamily: resolved.fontFamily,
+    fontSize: resolved.fontSize,
+    fontWeight: resolved.fontWeight,
+    fontStyle: resolved.fontStyle,
+    letterSpacing: resolved.letterSpacing !== 0 ? `${resolved.letterSpacing}px` : undefined,
+    lineHeight: resolved.lineHeight,
     opacity: transform.opacity / 100,
     mixBlendMode: cssBlendMode(getCompositionBlendMode(layer)),
-    textAlign: getTextAlign(layer.textAlign ?? style.textAlign),
-    textShadow: shadowCss,
+    textAlign: resolved.textAlign,
+    textShadow: textShadowCss(resolved),
     filter,
     transform: compositionTransformCss(transform),
     transformOrigin: compositionTransformOriginCss(transform),
-    width: textWidth > 0 ? `${textWidth}%` : "max-content",
-    WebkitTextStroke: strokeWidth > 0 ? `${strokeWidth}px ${strokeColor}` : undefined,
+    width: resolved.textWidthPercent > 0 ? `${resolved.textWidthPercent}%` : "max-content",
+    WebkitTextStroke: resolved.strokeWidth > 0 ? `${resolved.strokeWidth}px ${resolved.strokeColor}` : undefined,
     // `paint-order: stroke fill` moves the stroke BEHIND the fill so a heavy stroke stops eating the
     // letterform. `undefined` (the legacy case) emits no declaration at all, which is what keeps an
     // existing project's CSS byte-identical rather than merely equivalent.
-    paintOrder: strokeUnderFill && strokeWidth > 0 ? ("stroke fill" as const) : undefined,
+    paintOrder: resolved.strokeUnderFill && resolved.strokeWidth > 0 ? ("stroke fill" as const) : undefined,
     // ADR-023 D6a / T-13 corrected. Always a CONCRETE direction by the time it reaches here —
-    // `"auto"` was resolved above, once, for both paths. Isolated so the layer can neither leak its
-    // level into, nor inherit one from, whatever DOM happens to surround it in the editor.
-    direction,
-    unicodeBidi: direction ? ("isolate" as const) : undefined,
+    // `"auto"` was resolved during resolution, once, for both paths. Isolated so the layer can neither
+    // leak its level into, nor inherit one from, whatever DOM happens to surround it in the editor.
+    direction: resolved.direction,
+    unicodeBidi: resolved.direction ? ("isolate" as const) : undefined,
     whiteSpace: "pre-wrap" as const
   };
 }
@@ -1208,26 +1303,10 @@ export function isTextVisualOrderUnavailable(layer: {
   return signatures.size > 1;
 }
 
-function getTextShadowCss(
-  layer: CompositionLayerStyleInput | TimelineLayer,
-  style: Record<string, unknown>,
-  options: CompositionStyleOptions = {}
-) {
-  const hasShadow = hasCompositionEffect(layer.effects, "shadow");
-  const blur = animStyleNumber(
-    layer,
-    options,
-    "style.shadowBlur",
-    numberOr(layer.shadowBlur ?? style.shadowBlur, hasShadow ? compositionTextDefaults.shadowBlur : 0)
-  );
-  if (blur <= 0) {
-    return undefined;
-  }
-
-  const color = stringOr(layer.shadowColor ?? style.shadowColor, compositionTextDefaults.shadowColor);
-  const offsetX = animStyleNumber(layer, options, "style.shadowOffsetX", numberOr(layer.shadowOffsetX ?? style.shadowOffsetX, compositionTextDefaults.shadowOffsetX));
-  const offsetY = animStyleNumber(layer, options, "style.shadowOffsetY", numberOr(layer.shadowOffsetY ?? style.shadowOffsetY, compositionTextDefaults.shadowOffsetY));
-  return `${offsetX}px ${offsetY}px ${blur}px ${color}`;
+/** `text-shadow` from an already-resolved style. Zero blur emits no declaration. */
+function textShadowCss(resolved: ResolvedTextStyle): string | undefined {
+  if (resolved.shadowBlur <= 0) return undefined;
+  return `${resolved.shadowOffsetX}px ${resolved.shadowOffsetY}px ${resolved.shadowBlur}px ${resolved.shadowColor}`;
 }
 
 function getShapeShadowCss(layer: CompositionLayerStyleInput | TimelineLayer, style: Record<string, unknown>) {

@@ -36,3 +36,12 @@ then just "run the adapter, hand the result to PropertyFieldList, add shared lay
 - **Pre-existing debt:** Flarex's asset picker is currently smuggled through the `control` escape
   hatch (no `reference`/asset kind yet) — the canonical example of a `custom`/`control` that ADR-003
   would promote once a second system needs it.
+- **That second system has now arrived — 2026-08-14 (ADR-023 S4).** The text-style adapter's font
+  picker is a `reference` field (refType `font`, per ADR-003's explicit "font is a reference refType,
+  not a kind") bridged through the escape hatch for the same reason: the renderer ships no `reference`
+  branch. Two unrelated systems now hold reference-shaped pickers behind `control`/`custom`, which is
+  the recurrence this section says triggers an **ADR-003 promotion review** — the four-part test looks
+  satisfiable (distinct shape: an id + a resolver; distinct editor: a picker; distinct validation:
+  resolvability; two unrelated systems: Flarex assets, text fonts). **Recorded, not acted on.**
+  Promoting a kind is a doctrine decision under ADR-003, not something a stage may take, and S4
+  deliberately added none. The review is owed a decision before a third instance appears.
