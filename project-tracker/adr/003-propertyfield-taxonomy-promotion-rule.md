@@ -42,6 +42,29 @@ asset/clip/composition/font (`reference` refType), rect/vec2/vec3/dual-range (`v
 > (`number`/`vec2`/`boolean`/`enum`/`color`/`text`/`control`/`custom`); the remaining kinds are
 > promoted on first genuine two-system demand, under the rule above.
 
+## Renderer-subset promotion: `reference` — FIRED 2026-08-14
+
+**The taxonomy is unchanged. No kind was added, and the four-part test above is not the governing
+test for this.** The clause that fired is the note directly above: the renderer ships a subset of
+the frozen set, and the remaining kinds are promoted "on first genuine two-system demand."
+
+Two unrelated systems now hold `reference`-shaped pickers behind ADR-002's `custom`/`control`
+escape hatch: **Flarex's asset picker**, and **text's font picker** (ADR-023 S4, `5cb1d4e`). ADR-023
+S6's preset library would make a third. Both already *declare* `reference` correctly in their
+schemas — `refType: "font"` and `refType: "asset"` are both named on line 33 — so the schemas are
+right and the renderer cannot build what they declare.
+
+This is precisely the drift ADR-002 exists to stop, arriving through the escape hatch rather than
+through the kind union: two bespoke pickers, no shared validation, no shared keyframe or resolver
+semantics. **Decision: implement `reference` in `PropertyFieldList`, resolver-backed, dispatching on
+`refType`. Both existing pickers move onto it.** Recorded here rather than as an amendment because
+nothing about the rule changed — the rule anticipated this and named the trigger in advance.
+
+Worth stating for whoever reads this next: a kind being *frozen into the taxonomy* and a kind being
+*buildable by the renderer* are two different states, and the gap between them is where escape-hatch
+duplication accumulates silently. Check the subset note before concluding a promotion review is
+needed.
+
 ## Alternatives considered
 
 - **Open taxonomy, add kinds freely.** Rejected: the switch becomes a feature dump; drift returns.

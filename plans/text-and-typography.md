@@ -22,6 +22,7 @@ S2.6 the catalogue goes VAST             virtualized list + mirror-on-pick      
 S2.7 Bold picks the bold FILE            weight resolves to a face, not CSS    S2.6 made it reachable
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unblocks S6
+S4b `reference` renderable in PropertyFieldList  ADR-003 subset clause fired; before S6
 S5  tier-1 texture + CSS depth            rides S4
 S6  caption + text preset library         rides S4; highest product value
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
@@ -464,6 +465,42 @@ bug in the migration.
 key order and `undefined`-vs-absent — and `textstyle:schema`, which sweeps all 20 presetable fields
 through capture → envelope → apply and asserts each one *changes the emitted style* (T-15). Both new
 gates were falsified before being trusted.
+
+---
+
+## S4b — `reference` becomes a kind the renderer can build
+
+**Win:** one picker, shared. The font picker and Flarex's asset picker stop being two bespoke
+widgets behind the escape hatch and become one resolver-backed field with shared validation and
+shared behaviour — which also means the next picker is free rather than a third copy.
+
+**This is ADR-002/003 work, not ADR-023 work**, and it is scheduled here only because this
+programme is what surfaced it. ADR-003's renderer-subset clause fired on 2026-08-14: `reference` is
+already in the frozen fifteen with `font` and `asset` both named as refTypes, and both systems
+already *declare* it correctly. The renderer simply cannot build what they declare. **No new kind.
+No taxonomy change. Do not reopen the four-part test — it does not govern this.**
+
+**Before S6, and that is the whole reason for the position.** S6's preset library adds a third
+reference-shaped picker. Two bespoke copies is a finding; three is a pattern that gets defended.
+This is the same argument that put S0's detector ahead of S0b — claim the shared thing before the
+next consumer builds its own.
+
+**Scope**
+- `reference` in `PropertyFieldList`, resolver-backed, dispatching on `refType`.
+- Move both existing pickers onto it: text's font picker (S4, `5cb1d4e`) and Flarex's asset picker.
+- Keyframe and validation semantics declared on the kind, not per field (ADR-003's consequence:
+  "interpolability is a declared property of the kind").
+
+**Verification**
+- Both pickers behave as they do today — this is a refactor with no intended user-visible change,
+  so `render:baseline` at zero tolerance is the claim, and the S4 golden-style gate still passes.
+- The font picker still writes a `FontRef` with a `fileHash` (S2.5's assertion, unchanged) — a
+  shared picker that writes the wrong shape is the whole risk of consolidating.
+- `font:picker-perf` unchanged: 1,949 rows must still virtualize. A generic renderer that mounts
+  every row would be a real regression hidden inside a "no user-visible change" stage.
+
+**Risk:** moderate. Two live surfaces move onto shared code at once, and one of them is the
+virtualized 1,942-family list.
 
 ---
 
