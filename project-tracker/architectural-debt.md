@@ -3541,3 +3541,45 @@ mechanism that produced two bugs in two slices is still in place and still silen
   entirely: readiness is now a fourth not-ready EVENT at the capture boundary
   (`ScenePreviewCanvas.tsx`'s `renderIsolated`), not a cache-key axis. All three acceptance links
   (repro / falsifier / spin-guard) measured on a real running editor via Playwright.
+
+---
+
+### DEBT-021 — the un-retimed pending soft-degrade regressed, and its guard is a known-flaky fixture's only backstop
+
+- Status: **open**, unowned, and NOT attributable to the text programme
+- Registered: 2026-08-14, by the auditor, on a report from the ADR-023 S4b session
+- Symptom: `pnpm --filter @orreris/shared flarex:test` fails one assertion at HEAD —
+
+  ```
+  FAIL  an UN-retimed unready loader still soft-degrades to the host (renderer parity)
+  ```
+
+  The other twenty checks in that block pass, including the three neighbouring degrade cases
+  (`null` still degrades, an un-retimed MediaIn still degrades, a RETIMED unready loader correctly
+  yields nothing). Only the `resolveSourceDraw: () => "pending"` arm on an **un-retimed** node has
+  stopped returning `debugLayerId === "host"`.
+- Provenance: the assertion dates to `6974a06` (2026-07-29, "a retimed MediaIn must never fall back
+  to the playhead frame"), which is three weeks before the text programme began. The S4b session
+  reported it failing identically with its own changes stashed, and the auditor reproduced it at
+  HEAD. **Nothing in S0–S4b touches `compile-flarex`'s mediaIn path.** Recorded explicitly because a
+  failing test discovered during a programme tends to get attributed to it.
+- Why this is worth an entry rather than a bug note: the assertion is not incidental. Its own
+  comment (`flarex.test.ts:2368-2371`) records what it is defending —
+
+  > the two renderers do not become ready on the same frame, so dropping it turns a readiness race
+  > into a parity failure (`flarex-generators` went 0.000% → 86.895% when this was unscoped)
+
+  So this guard is the backstop for the `flarex-generators` flakiness already on record in
+  `pixel-gate-open-items` (86.895% then 0.000% across runs — flaky, not loose). **A broken guard here
+  predicts intermittent pixel-gate failures on that fixture**, which is the most expensive kind of
+  failure this repo has: a full sweep that fails for a reason unrelated to the commit under test.
+- What has NOT been established, and should not be assumed:
+  - **when** it regressed. No bisect was run. "Pre-existing on this branch" is the whole claim.
+  - whether `flarex-generators` is currently flaky in practice. The recent full sweeps have passed;
+    that is consistent with the guard mattering only on a readiness race that did not happen to
+    occur, and it is equally consistent with the guard being redundant now. Do not read the passing
+    sweeps as evidence either way.
+- Next step when someone picks this up: bisect the assertion, not the fixture. It is a pure-function
+  test that runs in seconds, so the bisect is cheap — which is the opposite of the usual situation
+  here and is the reason to do it before the next full sweep rather than after a flaky failure sends
+  someone hunting.
