@@ -642,6 +642,20 @@ hazard were closed alongside it: a bundled fast path served the roman under an i
 family topping out at 700 asked for 900 would have sent the mirror after a face that does not exist.
 Whenever a font resolver gains a second caller, ask which of the two questions it is being asked.
 
+**T-19 — An invariant is only as true as the deployment that serves it. Check where the bytes
+actually leave.** (S3, 275c201.) D4's two-store separation was correct in the key and undone by the
+mount: everything under `/storage` sits ahead of the credentialed `/api` gate with
+`Access-Control-Allow-Origin: *`, which is sound for media because those URLs are unguessable
+capability URLs. **A per-user font key is not one — it is content-addressed**, so two accounts
+holding byte-identical copies of the same commercial font produce the same hash, and D4 stores them
+twice on purpose. Anyone able to compute a SHA-256 could read the other copy. Anything new placed
+under `/storage` inherits a public read surface; a type-level invariant does not survive that on its
+own. Both exits are now closed by parsing the key back into the discriminated union — **not** a
+`startsWith("fonts/user/")` test, which is D4's forbidden boolean in a different hat — and the
+viewer is a required parameter that must be spelled even when `undefined`, so a caller who forgets
+gets a named abort rather than someone else's bytes. **404, never 403**: confirming a hash exists in
+another account's store is itself the disclosure.
+
 **T-14 — No feature may re-open the shaping boundary that D9a closes.** (D6a, OQ6) Any operation
 that transforms text below the level of a shaping run — per-character animation is the known case,
 because each animated grapheme cluster becomes its own shaping context and cursive joining breaks —
@@ -769,6 +783,18 @@ which of the two; that S9 may not simply ship over it is now decided.
 relink, then hard-fail on decline. But a collaborator who does not *own* the licensed font can never
 relink. What that project's export does — fail, or substitute with an explicit acknowledgement — is
 a product decision touching D4's licensing invariant, and it is not settled here.
+
+**CLOSED 2026-08-14 (S3, febfd74). Hard-fail the export, and surface it at SHARE time, not at the
+render boundary.** A user font is licensed to one person; a collaborator who cannot relink cannot
+lawfully be handed those bytes, so substitution-with-acknowledgement is the silent-wrong-pixels
+failure D3 and the warp-catalogue precedent exist to prevent — and worse here, because the
+deliverable gets published wrong. The owner's own second machine keeps the relink path (D5).
+
+**What makes the hard fail humane rather than a wall, and it is part of the decision, not a nicety:**
+when a project is opened by someone who cannot resolve its user fonts, list them as
+unresolvable-for-you at open time, by family name. The collaborator substitutes deliberately in the
+editor instead of discovering it when the render dies. **This generalises to OQ8**, which is the
+same shape one layer up — a preset naming a font the opener cannot provide.
 
 **OQ8 — How does a preset name a font it may not be able to provide?** A shared caption preset
 referencing a user-store font cannot resolve for another account (D4). A preset must therefore carry

@@ -409,6 +409,14 @@ project with user fonts is a supported flow.
 **Verification:** upload a font, render in the worker, confirm the bytes came from the per-user
 path. Plus a test that a second account **cannot** resolve the first account's font by hash.
 
+**OPEN TAIL (S3, 2026-08-14 — the only thing not done).** The authenticated `POST /api/fonts/user`
+round trip and the `.woff2` upload path both need `requireAuth`, which loads a user row, and the box
+S3 was built on has no database (Docker not running). The storage isolation guard is DB-free by
+design and is fully exercised against the real app on a real port; the upload route's ingest logic
+is the same shared code `font:ingest-test` covers. **What is unverified is the HTTP round trip
+itself.** Run it once against a live DB before S3 is called done in an environment that has one.
+This is a gap in evidence, not a known defect — do not let it be quietly reclassified as either.
+
 ---
 
 ## S4 — `TextStyle` as a PropertySchema
