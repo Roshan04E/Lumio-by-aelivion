@@ -659,6 +659,22 @@ buildable. Two findings worth carrying:
   general shape: fields that travel in the emitted style need no list; fields that travel beside it
   need one, and every such list is a T-15 defect waiting. `textWarp` is now the only one left.
 
+**T-15 addendum 3 — a difference assertion fails OPEN. Every falsifier in this document is one.**
+(STOP 1, `fe4f77c`; registered as DEBT-012's fifth shape.) T-15 says flip the field and prove the
+render changes — and "changes" needs only one reason to be satisfied, which the defect will happily
+supply. Two drafts of the no-media font gate passed while the defect was fully present, because each
+compared two *different fallbacks* rather than a font against a font: pinned Anton vs Anton-as-a-
+system-stack fall back to different families; pinned Anton 400 vs pinned Arimo 700 fall back to
+different weights. Both arms were wrong in both halves and `notEqual` was satisfied either way. Only
+two pinned families **at the same weight** collapse onto one picture when neither arrives.
+
+An equality assertion fails safe: it needs everything to match, so any defect breaks it. A difference
+assertion fails open: any asymmetry satisfies it, including two flavours of the same failure. **When
+writing a flip-and-prove-it-changes arm, name what the two sides share and check that the ONLY
+declared difference is the field under test.** Note the tell was already recorded eight lines above
+the arm being written — this ADR's T-17 says two system-named families collapse onto one fallback —
+and was walked past twice. Reading the tripwire is not the same as applying it.
+
 **T-16 — A "visible degraded state" is proven by pixels, never by computed style.** (D3, T-12; S0,
 2026-08-13.) D3's font-substitution surface and T-12's warp marker both exist to announce a silent
 degradation, which makes a marker that silently fails to paint the purest form of the bug it guards
