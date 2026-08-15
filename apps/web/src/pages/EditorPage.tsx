@@ -182,6 +182,13 @@ import {
   readTextStylePreset,
   type TextStylePreset,
   createTextStyleFromLayer,
+  // ADR-023 S6 — the preset library. Same envelope as the clipboard above (T-10).
+  applyStylePreset,
+  applyStylePresetToTrack,
+  captionTrackIdFor,
+  unresolvedPresetReferences,
+  type PresetReference,
+  type StylePreset,
   createDefaultMask,
   containContentRect,
   type AssetSource,
@@ -267,6 +274,7 @@ import GraphicsAlignPanel from "../editor/inspector/panels/GraphicsAlignPanel";
 import GraphicsPinPanel from "../editor/inspector/panels/GraphicsPinPanel";
 import { reflowCompositionForResize } from "../editor/inspector/panels/graphicsReflow";
 import { TextStylesSection } from "../editor/inspector/TextStylesSection";
+import { StylePresetsSection } from "../editor/inspector/StylePresetsSection";
 import { FrameEffectCard } from "../editor/inspector/FrameEffectCard";
 import { deleteGraphicPreset, listGraphicPresets, subscribeGraphicPresets } from "../editor/graphic-presets";
 import { RichTextEditor } from "../components/RichTextEditor";
@@ -389,6 +397,7 @@ import {
   type ProjectRecord
 } from "../lib/api";
 import { usePro } from "../lib/proMode";
+import { useAuth } from "../lib/auth";
 import { collectGraphAssetIds, ensureProjectMediaLocal, refreshAssetFromCloud } from "../lib/media-pull";
 import { putBlobToCloud } from "../lib/cloud-upload";
 import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
@@ -787,6 +796,9 @@ export function EditorPage() {
   seedBuiltinRegistries();
   const { projectId } = useParams();
   const navigate = useNavigate();
+  // ADR-023 S6/OQ8 — the SIGNED-IN account, not the project owner. A user-store font resolves for
+  // its owner and nobody else (D4/T-3), and "who is looking at this" is the question that answers.
+  const { user } = useAuth();
   const [pro] = usePro();
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -4435,6 +4447,76 @@ export function EditorPage() {
     // One history entry across all targets (batch), mirroring Align/distribute.
     await updateLayers(targetIds, (item) => applyTextStyle(item, style.style));
     setNotice(targetIds.length > 1 ? `Applied "${style.name}" to ${targetIds.length} layers` : `Applied "${style.name}"`);
+  }
+
+  /**
+   * ADR-023 S6 — what this viewer cannot resolve in a preset, by name.
+   *
+   * OQ7 closed on "hard-fail the render, surface it at SHARE time by family name, so the person
+   * substitutes deliberately rather than discovering it when the render dies". OQ8 is that one layer
+   * up, and this is its humane half: the warning arrives while the user is looking at the look, in
+   * the editor. Nothing here softens the render boundary — a pinned font still aborts the export
+   * (T-2) and an unresolvable fill still renders byte-identically to no fill (S5b).
+   */
+  function unresolvedForPreset(preset: StylePreset) {
+    return unresolvedPresetReferences(preset, {
+      viewerId: user?.id,
+      hasAsset: (assetId) => resolvedAssets.some((asset) => asset.id === assetId)
+    });
+  }
+
+  function presetTargetIds(preset: StylePreset): string[] {
+    const wanted = preset.envelope.schemaId === "shape-style" ? "shape" : "text";
+    const selected = new Set(selectedLayerIds);
+    const ids = layers.filter((item) => selected.has(item.id) && item.type === wanted).map((item) => item.id);
+    if (ids.length) return ids;
+    return inspectorLayer?.type === wanted ? [inspectorLayer.id] : [];
+  }
+
+  async function handleApplyStylePreset(preset: StylePreset) {
+    const targetIds = presetTargetIds(preset);
+    if (!targetIds.length) {
+      setNotice(`Select a ${preset.envelope.schemaId === "shape-style" ? "shape" : "text"} layer to apply "${preset.name}"`);
+      return;
+    }
+    // One failure surface: `applyStylePreset` reads the envelope through the schema's migrations, so
+    // a preset from an older or newer build migrates or is REFUSED with a reason — exactly what
+    // Paste Look does, because it is exactly the same envelope (T-10).
+    let refusal: string | undefined;
+    await updateLayers(targetIds, (item) => {
+      const result = applyStylePreset(item, preset);
+      if (!result.ok) {
+        refusal = result.reason;
+        return item;
+      }
+      return result.layer;
+    });
+    if (refusal) {
+      setNotice(`Can't apply "${preset.name}" — ${refusal}`);
+      return;
+    }
+    const missing = unresolvedForPreset(preset);
+    if (missing.length) {
+      setNotice(`Applied "${preset.name}" — ${missing.map((ref) => `${ref.kind} "${ref.label}"`).join(", ")} isn't available to you`);
+      return;
+    }
+    setNotice(targetIds.length > 1 ? `Applied "${preset.name}" to ${targetIds.length} layers` : `Applied "${preset.name}"`);
+  }
+
+  /** The stage's product win: one look across every caption on the track, in one undo entry. */
+  async function handleApplyStylePresetToCaptions(preset: StylePreset) {
+    if (!composition) return;
+    const result = applyStylePresetToTrack(composition, captionTrackIdFor(composition), preset);
+    if (!result.ok) {
+      setNotice(`Can't apply "${preset.name}" — ${result.reason}`);
+      return;
+    }
+    if (!result.applied) {
+      setNotice("No captions on the caption track to style");
+      return;
+    }
+    await updateComposition(result.composition);
+    setNotice(`Applied "${preset.name}" to ${result.applied} captions`);
   }
 
   async function handleUpdateTextStyle(styleId: string) {
@@ -8131,7 +8213,11 @@ export function EditorPage() {
     // copied" flag is a VALUE, not a handler, so it travels as an ordinary prop — `useStableHandlers`
     // freezes callback identities and takes functions only.)
     onCopyTextLook: () => handleCopyTextLook(),
-    onPasteTextLook: () => void handlePasteTextLook()
+    onPasteTextLook: () => void handlePasteTextLook(),
+    // ADR-023 S6 — the preset library, and the one-click caption pass over it.
+    onApplyStylePreset: (preset: StylePreset) => void handleApplyStylePreset(preset),
+    onApplyStylePresetToCaptions: (preset: StylePreset) => void handleApplyStylePresetToCaptions(preset),
+    unresolvedForStylePreset: (preset: StylePreset) => unresolvedForPreset(preset)
   });
 
   const stablePreviewCommitMaskPoints = useStableHandler((layerId: string, maskId: string, points: MaskPoint[]) =>
@@ -9296,6 +9382,12 @@ export function EditorPage() {
                 <LayerInspector
                   {...inspectorHandlers}
                   hasCopiedTextLook={lookClipboard !== null}
+                  // S6: is there a caption track to sweep a look across? The id is the one
+                  // `applyCaptionTrackToComposition` builds, read through the shared helper so the
+                  // editor and the applier cannot disagree about which track is "the captions".
+                  hasCaptionTrack={Boolean(
+                    composition && composition.tracks.some((track) => track.id === captionTrackIdFor(composition))
+                  )}
                   assets={assets}
                   onBrowseFillTexture={(layerId) => {
                     // ADR-023 S5b: the same "Replace asset" pool mode Flarex's MediaIn uses, third
@@ -14212,6 +14304,10 @@ function LayerInspectorImpl({
   onCopyTextLook,
   onPasteTextLook,
   hasCopiedTextLook,
+  onApplyStylePreset,
+  onApplyStylePresetToCaptions,
+  unresolvedForStylePreset,
+  hasCaptionTrack,
   autoKeyframe,
   requestColorTab,
   onConsumeColorTab,
@@ -14278,6 +14374,12 @@ function LayerInspectorImpl({
   onCopyTextLook?: (() => void) | undefined;
   onPasteTextLook?: (() => void) | undefined;
   hasCopiedTextLook?: boolean | undefined;
+  /** ADR-023 S6 — the preset library: apply one look, or one look across the whole caption track. */
+  onApplyStylePreset?: ((preset: StylePreset) => void) | undefined;
+  onApplyStylePresetToCaptions?: ((preset: StylePreset) => void) | undefined;
+  /** OQ8 — what THIS viewer cannot resolve in a preset, named before they apply it. */
+  unresolvedForStylePreset?: ((preset: StylePreset) => PresetReference[]) | undefined;
+  hasCaptionTrack?: boolean | undefined;
   /** Consume-once flag from the topbar "Color" button / Alt+3 — switches this inspector to the Color
    *  tab (color's only home now that the left Color panel is gone), then calls onConsumeColorTab. */
   requestColorTab?: boolean | undefined;
@@ -14422,9 +14524,27 @@ function LayerInspectorImpl({
             hasCopiedLook={hasCopiedTextLook ?? false}
           />
         ) : null}
+        {onApplyStylePreset ? (
+          <StylePresetsSection
+            layerType="text"
+            onApply={onApplyStylePreset}
+            onApplyToCaptions={onApplyStylePresetToCaptions}
+            hasCaptionTrack={hasCaptionTrack ?? false}
+            unresolvedFor={unresolvedForStylePreset}
+          />
+        ) : null}
         </>
       ) : null}
-      {layer.type === "shape" ? <ShapeGraphicControls layer={layer} palette={palette} onChange={onChange} /> : null}
+      {layer.type === "shape" ? (
+        <>
+          <ShapeGraphicControls layer={layer} palette={palette} onChange={onChange} />
+          {/* D12's second schema, in the same list. A shape preset is the same envelope over
+              `shape-style` — which is why one panel serves both rather than one panel per type. */}
+          {onApplyStylePreset ? (
+            <StylePresetsSection layerType="shape" onApply={onApplyStylePreset} unresolvedFor={unresolvedForStylePreset} />
+          ) : null}
+        </>
+      ) : null}
 
       <InspectorHost
         layer={layer}

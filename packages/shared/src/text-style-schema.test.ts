@@ -272,7 +272,28 @@ const pinnedLora: FontRef = {
   const parts = String(three.textShadow).split(/,(?![^(]*\))/).map((p) => p.trim());
   check("S5 stack: three copies", parts.length === 3);
   check("S5 stack: at 1x, 2x, 3x the offset, NEAREST first (CSS paints entry 0 on top)", parts[0]!.startsWith("2px 4px ") && parts[1]!.startsWith("4px 8px ") && parts[2]!.startsWith("6px 12px "));
-  check("S5 stack: zero blur still emits nothing, stack or no stack", getCompositionTextStyle(textLayer({ shadowLayers: 8 })).textShadow === undefined);
+  /**
+   * CORRECTED 2026-08-15 (S6). This assertion used to read "zero blur still emits nothing, stack or
+   * no stack" — it codified the defect. `shadowLayers` documents itself as "a faked 3D extrude,
+   * authored at blur 0", and at blur 0 the emitter returned `undefined` and threw the stack away. The
+   * gate agreed with the code because it was written from the code.
+   *
+   * The three arms below are the corrected contract, and the middle one is the feature.
+   */
+  check(
+    "S5 stack: zero blur + one copy still emits nothing (D1a — every legacy layer resolves here)",
+    getCompositionTextStyle(textLayer({ shadowBlur: 0 })).textShadow === undefined
+  );
+  {
+    const extrude = getCompositionTextStyle(textLayer({ shadowBlur: 0, shadowOffsetX: 3, shadowOffsetY: 3, shadowLayers: 8 }));
+    const copies = String(extrude.textShadow).split(/,(?![^(]*\))/);
+    check("S5 stack: zero blur + a stack + an offset IS the extrude, and emits every copy", copies.length === 8);
+    check("S5 stack: at zero blur, so it reads as a slab rather than a smear", copies.every((part) => / 0px /.test(part)));
+  }
+  check(
+    "S5 stack: a stack with NO offset stays silent — N copies exactly behind the glyph paint nothing",
+    getCompositionTextStyle(textLayer({ shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0, shadowLayers: 8 })).textShadow === undefined
+  );
   check("S5 stack: a fractional or negative count is one shadow", getCompositionTextStyle(textLayer({ shadowBlur: 10, shadowLayers: -3 })).textShadow === getCompositionTextStyle(textLayer({ shadowBlur: 10 })).textShadow);
 }
 

@@ -518,6 +518,17 @@ anything else.
 **T-10 — Presets, project data and clipboard share one envelope and one migration set.** (ADR-004,
 via D12)
 
+**SATISFIED 2026-08-15 (S6).** A `StylePreset` is `{id, name, category, origin}` plus an `envelope`
+MEMBER — not a flattened object that carries `schemaId`/`values` alongside its own keys. The
+distinction is the obligation: `preset.envelope` is byte-identical to what `captureTextStylePreset`
+produces for the clipboard, so the two can be read by one function and migrated by one runner.
+Flattening would leave them merely similar, and the first consumer to serialize one into the other
+would be the one to find out. `readStylePreset` dispatches on the envelope's OWN `schemaId` rather
+than on which list a preset was found in, which is what keeps `migratePropertyValues`' mismatched-
+schema refusal reachable — a text look dropped on a shape is a refusal with a reason, not a partial
+paste. Two schemas now share the envelope (`text-style`, `shape-style`); that is the rule working,
+not an exception to it.
+
 **T-11 — A mirrored font is never stored, and never served, without its license file alongside it.**
 (D4a) The mirror write path and the license-file write are one operation, not two steps a future
 change can drift apart. A mirror entry missing its license file is a defect to fix before ship, not
@@ -892,3 +903,69 @@ same shape one layer up — a preset naming a font the opener cannot provide.
 referencing a user-store font cannot resolve for another account (D4). A preset must therefore carry
 either a catalogue-only `FontRef` or an explicit "uses your font" slot. Unresolved, and it gates
 preset *sharing*, not preset *saving*.
+
+**CLOSED 2026-08-15 (S6). Same shape as OQ7, one layer up — and the question was never only about
+fonts.** The rule, in `presetReferences`/`presetPortability`/`unresolvedPresetReferences`:
+
+- **Saving is always allowed.** A personal look built on your own licensed font is a legitimate thing
+  to keep, and it works perfectly for the person who saved it. Gating saving would be a rule that
+  protects nobody from anything.
+- **Sharing hard-fails, by family name, at SHARE time.** Verbatim OQ7's closed answer: substitution
+  with an acknowledgement is the silent-wrong-pixels failure, and worse for a preset than for a
+  project, because a shared preset is applied by someone who never saw the original. The remedy the
+  UI offers is substitution BEFORE sharing — swap the user font for a catalogue face and the preset
+  becomes shareable, a deliberate act by the person who knows what they meant.
+- **Applying a preset whose references you cannot resolve is ALLOWED**, and reports what did not
+  resolve, by name, in the editor. Refusing the apply would be worse than useless: you cannot
+  substitute a font you could not get onto the layer. This is the humane half OQ7's closing note
+  describes, at the moment the person is looking at the look rather than at a failed render.
+- **The render boundary is untouched.** A pinned font still aborts the export (T-2); an unresolvable
+  fill still renders byte-identically to no fill (S5b). Nothing above softens either; it exists so
+  neither is met for the first time in an unattended render.
+
+**What the question missed, and it is the useful part.** OQ8 was written about fonts. S5b, three days
+before this stage read it, put a SECOND reference kind in the same envelope: `fillTextureAssetId`. A
+project asset is account-scoped for the same reason a user font is, so a preset carrying one is
+exactly as unshareable — and if the rule had been written about `fontRef` specifically, the second
+kind would have travelled unchecked. The classification is therefore over REFERENCES
+(`{kind, field, label, scope}`), not over fonts, and the next reference kind added to the envelope
+joins it by declaring a scope rather than by someone remembering this open question existed.
+
+A `{source: "system"}` ref is deliberately not a reference: it names no store, it is a CSS stack, and
+flagging every legacy look as unportable would change nothing about what any of them renders. A
+warning nobody can act on is the kind that teaches people to ignore warnings.
+
+---
+
+## 8. Defects found by looking (S6, 2026-08-15)
+
+Both were found by rendering the first-party preset library through the real renderer and looking at
+the picture (`preset:sheet`), after every other gate was green. They are recorded here rather than in
+a stage note because neither belongs to the stage that found them.
+
+**`shadowLayers` could never produce the extrude it documents. FIXED in S6.** `textShadowCss` gated
+on `shadowBlur > 0`, and an extrude is authored at blur 0 — the emitter's own comment said so,
+directly above the line that discarded it. Every S5 instrument passed: the T-15 falsifier flipped the
+field at a non-zero blur (which does move the render), the golden gate captured whatever was emitted,
+and both renderers agreed perfectly about a declaration neither was given. **The S5 gate had gone
+further and asserted the defect as the contract** — `"S5 stack: zero blur still emits nothing, stack
+or no stack"` — which is what happens when a gate is written from the code instead of from the claim.
+Corrected contract: a stack is honoured when it displaces (`shadowLayers >= 2` and a non-zero offset);
+a single copy at blur 0 still emits nothing, because that is what every legacy layer resolves to
+(D1a). One golden moved; `render:baseline` covers the rest.
+
+**A pinned font does not reach the glyphs when the composition has no media layer. OPEN — belongs to
+S2/D3, not S6.** Reproduction: `apps/worker/tmp/s6-bisect.ts`, which renders the `scaled-text` fixture
+twice with Anton pinned, once whole and once with every non-text layer removed. Whole: Anton. Text
+only: the `sans-serif` fallback. The mirror is seeded, `resolveManifestFonts` returns the face with
+227KB of bytes (removing the seed aborts by name, so the refs demonstrably reach the resolver), and
+`InstallFonts` holds a `delayRender` handle until `document.fonts.load` resolves — yet the glyphs are
+fallback. The likely mechanism is the scene raster drawing and caching before the face is usable, with
+nothing invalidating it on font load; a media layer's own load is what incidentally delays the first
+raster today.
+
+**Why this matters more than a synthetic-fixture bug sounds:** a title card, a caption-only overlay
+project, or any text-over-colour composition has no media layer, and this is a SILENT substitution in
+an unattended export — the precise failure D3 and T-2 are written against. It is invisible to
+`font:install-gate` and to every pixel fixture because they all carry media. Whoever takes it should
+treat "the raster's font readiness" as the subject, not "the still renderer".

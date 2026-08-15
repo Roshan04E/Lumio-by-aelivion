@@ -25,7 +25,7 @@ S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unbl
 S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both pickers moved
 S5  tier-1 texture + CSS depth            SHIPPED 2026-08-15; variable axes deferred (not OQ2)
 S5b `fillTexture` presetable + an editor   SHIPPED 2026-08-15; decomposed, no new kind
-S6  caption + text preset library         rides S4; highest product value
+S6  caption + text preset library         SHIPPED 2026-08-15; OQ8 closed; 18 first-party looks
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
                                                           half only; largest blast radius
 S8  SVG: multi-stroke + path text
@@ -738,6 +738,70 @@ and the reason S4 is worth doing.
 
 **Blocked on:** OQ8 — a preset that references a user-store font cannot resolve for another account.
 Gates preset *sharing*; does not gate preset *saving*, so S6 can ship single-user first.
+
+### SHIPPED 2026-08-15
+
+**A preset is a named envelope and nothing else.** `{schemaId, version, values}` — byte-identical to
+what the clipboard carries and to what a saved project style carries, wrapped with an id, a name and
+a category so it can be listed (`style-presets.ts`). T-10 taken literally rather than approximately:
+a format that merely *resembled* the clipboard would be two formats with one name, and the second one
+would rot exactly the way a copy list rots.
+
+**Shapes got the schema they were owed.** `shape-style` is ADR-004's second adopter — 11 presetable
+fields over what `getCompositionShapeStyle` already emits, with the same pair of two-way constraints
+`text-style` carries. No renderer change, which is what "a schema and presets, not an engine" means
+when it is true rather than asserted. `shapeKind` is described and NOT presetable, for
+`textWidthPercent`'s reason one type over: a look that turned your ellipse into a rectangle would also
+orphan its `shapePath`.
+
+**D12 held.** Layer 2 is not here. A caption preset applied across the whole caption track is one
+call (`applyStylePresetToTrack`), and that call is the entire short-form-captions feature — no
+`TemplateDefinition`, no module graph, no credit price.
+
+**OQ8 CLOSED — see the ADR. The short form: it was never only about fonts.** S5b put a second
+reference kind in the same envelope three days earlier, and a project asset is account-scoped for the
+same reason a licensed font is. One rule covers both: save always, **share hard-fails by name**,
+apply is allowed and reports what did not resolve. The render boundary is untouched (T-2 still aborts,
+an unresolvable fill still degrades byte-identically).
+
+**Verification, and the part worth reading.** `presets:test` (28 assertions + a per-preset sweep)
+checks every hand-written value against the schema field that describes it, sweeps the whole library
+for URLs (T-20), and carries the stage's assertion: a look with a pinned catalogue font, a gradient
+and an image fill, through JSON, into a fresh project, emits an identical style key for key. It
+caught a `borderRadius: 999` on its first run — the CSS pill idiom, outside the schema's own envelope.
+
+**Then the renders were looked at, and that is where the two findings came from** (`preset:sheet`
+renders all 18 looks through the real Remotion renderer):
+
+1. **`shadowLayers` could never produce the extrude it documents.** `textShadowCss` returned
+   `undefined` at blur 0 — the only blur an extrude is authored at — so the whole stack vanished. The
+   emitter's own comment said "the extrude look is authored at blur 0" directly above the line that
+   threw it away, and S5's gate asserted the defect as the contract ("zero blur still emits nothing,
+   stack or no stack"). Fixed here, because the Extrude preset is built on it: a stack is honoured
+   when it displaces (`shadowLayers >= 2` and a non-zero offset); a single copy at blur 0 still emits
+   nothing, which is what every legacy layer resolves to. One golden moved, and it is the defect case.
+   *This is a correction to shipped S5 code — flagged rather than folded in.*
+2. **A pinned font does not reach the glyphs in a composition with no media layer.** Same graph, same
+   seeded mirror, same resolved bytes in `inputProps`; drop the image layer and Anton renders as the
+   `sans-serif` fallback. That is a silent substitution in an export — the exact failure D3/T-2 exists
+   to prevent — and it is invisible to `font:install-gate` because every fixture there carries media.
+   **Not fixed here**: it is an S2/D3 render-boundary defect, not S6's, and it is recorded with its
+   reproduction (`apps/worker/tmp/s6-bisect.ts`) rather than absorbed. `preset:sheet` puts a ground
+   layer behind the cells so the sheet tells the truth about typography, and says why.
+
+The sheet also earned the Extrude preset a `lineHeight` of 1.35 rather than its neighbours' 1.05: a
+7×4px stack reaches 28px past the baseline and lands on the next line at tight leading. Nothing but
+looking finds that.
+
+**Left standing deliberately: `captionStylePresets` in `captions.ts`.** The AUTO_CAPTIONS tool still
+carries its own six-entry look list — a hand-written struct of nine fields, which is a parallel copy
+list of the same kind T-15 is about, one layer up from the field list. It can express nine of the
+`text-style` schema's 28 presetable fields; no gradient, no per-line pill, no paint order, no
+`fontRef`. Folding it into the envelope is a real improvement and a real migration (`CaptionTrackData.
+stylePresetId` is persisted project data, and `CaptionSegmentStyleOverride` is a second parallel bag
+on top of it), and doing it inside S6 would have meant migrating caption project data in the stage
+that was supposed to ship a library. **Not in scope, and now cheap:** the target shape exists, and
+`applyStylePresetToTrack` already does the applying.
 
 ---
 

@@ -271,6 +271,34 @@ export interface TextStyleFields {
   direction?: "auto" | "ltr" | "rtl" | undefined;
 }
 
+/**
+ * The appearance subset of a SHAPE layer — what a shape preset carries (ADR-023 S6, D12).
+ *
+ * Same doctrine as {@link TextStyleFields} and the same boundary drawn in the same place: this is how
+ * a shape LOOKS, never what it is or where it sits. `shapeKind`, `shapePath`, `widthPercent` and
+ * `heightPercent` are deliberately absent — a preset that turned your ellipse into a rectangle, or
+ * resized it, is the shape equivalent of a text look reflowing the target's lines
+ * (`textWidthPercent`, which S4 excluded for exactly this reason).
+ *
+ * Every key here is a key `getCompositionShapeStyle` actually reads. That is what makes the schema a
+ * description of the renderer rather than a wish about it.
+ */
+export interface ShapeStyleFields {
+  color?: string | undefined;
+  strokeColor?: string | undefined;
+  strokeWidth?: number | undefined;
+  borderRadius?: number | undefined;
+  /** See {@link TimelineLayer.fillTextureAssetId}. Shapes paint the same texture through the same
+   *  resolver and the same `fillTexturePaint` (S5b), so a shape look carries it too. */
+  fillTextureAssetId?: string | undefined;
+  fillTextureFit?: "cover" | "tile" | undefined;
+  fillTextureScale?: number | undefined;
+  shadowColor?: string | undefined;
+  shadowBlur?: number | undefined;
+  shadowOffsetX?: number | undefined;
+  shadowOffsetY?: number | undefined;
+}
+
 /** A named, reusable text look saved in the project (§2 Text Styles). Applied by BAKING its fields
  *  onto a text layer (one-shot — no live link). Project-local; lives in {@link ProjectGraph.textStyles}. */
 export interface TextStyle {

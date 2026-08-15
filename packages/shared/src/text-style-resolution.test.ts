@@ -188,7 +188,11 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
   { name: "text/shadow-stack-one", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, shadowLayers: 1 }) },
   { name: "text/shadow-stack-absent", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6 }) },
   { name: "text/shadow-stack-four", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, shadowLayers: 4 }) },
+  // Re-captured 2026-08-15 (S6): this used to emit `undefined`, which was the extrude defect. It now
+  // emits four copies. The sibling below is the guard that keeps a zero-OFFSET stack silent — that
+  // one is the case where "nothing" is still the right answer.
   { name: "text/shadow-stack-zero-blur", layer: textLayer({ shadowOffsetY: 6, shadowLayers: 4 }) },
+  { name: "text/shadow-stack-zero-offset", layer: textLayer({ shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0, shadowLayers: 4 }) },
   { name: "text/shadow-stack-extrude", layer: textLayer({ effects: [shadowEffect], shadowBlur: 0.001, shadowOffsetX: 3, shadowOffsetY: 3, shadowLayers: 8 }) },
   { name: "text/shadow-stack-fractional", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, shadowLayers: 2.7 }) },
   { name: "text/shadow-stack-in-style-bag", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, style: { shadowLayers: 3 } }) },

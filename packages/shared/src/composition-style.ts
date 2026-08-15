@@ -1596,9 +1596,26 @@ export function isTextVisualOrderUnavailable(layer: {
  *
  * A stacked shadow with a non-zero BLUR is a smear, not a slab — that is CSS's answer as much as ours,
  * and the extrude look is authored at blur 0. Nothing here corrects for it.
+ *
+ * **CORRECTED 2026-08-15 (S6).** The blur gate above used to be unconditional, so `shadowLayers` could
+ * never produce the extrude the sentence above prescribes: at blur 0 — the ONLY blur an extrude is
+ * authored at — this returned `undefined` and the whole stack vanished. The comment and the code
+ * contradicted each other and the code won, silently.
+ *
+ * Every S5 instrument passed over it. The T-15 falsifier flipped `shadowLayers` at a non-zero blur
+ * (which does move the render), the golden gate captured whatever CSS was emitted, and both renderers
+ * agreed perfectly about the declaration neither was given — the S5 lesson exactly: a green gate and a
+ * wrong picture. What found it was rendering the documented recipe and LOOKING at it (`preset:sheet`).
+ *
+ * The gate stays for a single shadow, because "blur 0, one copy, no offset opinion" is what every
+ * legacy layer resolves to and emitting a declaration for it would move bytes in projects nobody
+ * touched (D1a). A stack is only honoured when it actually displaces: `shadowLayers >= 2` AND a
+ * non-zero offset. A zero-offset stack paints N copies exactly behind the glyph — invisible, and worth
+ * keeping silent rather than emitting.
  */
 function textShadowCss(resolved: ResolvedTextStyle): string | undefined {
-  if (resolved.shadowBlur <= 0) return undefined;
+  const stacked = resolved.shadowLayers >= 2 && (resolved.shadowOffsetX !== 0 || resolved.shadowOffsetY !== 0);
+  if (resolved.shadowBlur <= 0 && !stacked) return undefined;
   const one = (k: number) =>
     `${resolved.shadowOffsetX * k}px ${resolved.shadowOffsetY * k}px ${resolved.shadowBlur}px ${resolved.shadowColor}`;
   if (resolved.shadowLayers <= 1) return one(1);

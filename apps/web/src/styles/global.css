@@ -9602,6 +9602,122 @@ input[type="checkbox"] {
   color: #e06a5c;
 }
 
+/* ADR-023 S6 — the style preset library. Deliberately borrows the Text Styles metrics above (24px
+   rows, the same tokens) so the shipped library and your saved looks read as one thing in two lists,
+   which is what D12 says they are. */
+.style-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.style-presets-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.style-presets-tabs button {
+  flex: 1 1 0;
+  height: 24px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  color: var(--editor-text-muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.style-presets-tabs button.is-active {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.style-presets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 208px;
+  overflow-y: auto;
+}
+
+.style-presets-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--editor-radius-sm);
+  background: none;
+  color: var(--editor-text-muted);
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.style-presets-row:hover {
+  background: var(--editor-input-bg);
+}
+
+.style-presets-row.is-selected {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.style-presets-name {
+  font-weight: 600;
+}
+
+.style-presets-desc {
+  color: var(--editor-text-dim);
+  font-size: 0.68rem;
+  line-height: 1.25;
+}
+
+.style-presets-warning {
+  margin: 0;
+  padding: 4px 6px;
+  border: 1px solid rgba(226, 168, 76, 0.35);
+  border-radius: var(--editor-radius-sm);
+  background: rgba(226, 168, 76, 0.1);
+  color: #e2a84c;
+  font-size: 0.68rem;
+  line-height: 1.3;
+}
+
+.style-presets-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.style-presets-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  color: var(--editor-text-muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.style-presets-actions button:hover:not(:disabled) {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.style-presets-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* "Align to: Frame | Selection" segmented control — sits above the align buttons. */
 .graphics-align-to {
   display: flex;
