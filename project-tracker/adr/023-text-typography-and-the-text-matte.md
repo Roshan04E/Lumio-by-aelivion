@@ -710,6 +710,25 @@ viewer is a required parameter that must be spelled even when `undefined`, so a 
 gets a named abort rather than someone else's bytes. **404, never 403**: confirming a hash exists in
 another account's store is itself the disclosure.
 
+**T-20 — A reference is stored as an id and resolved by the app at style-resolution time. A URL is
+never project data.** (S5b, `9e67a1c`.) `fillTexture` decomposed into `reference`/`enum`/`number`
+and its `url` did not survive, which was the one outcome that would have reopened the kind decision.
+It should not have survived: **a URL is an id already resolved for one machine**, and baking one into
+saved data is exactly what breaks the preset library S6 exists to build — looks would travel carrying
+another machine's URL. Resolution belongs to the app, supplied through the options bag
+(`CompositionStyleOptions.resolveAssetUrl`), applied once in shared, emitted into the style object.
+
+**Not** the `configureFontResolver` module-registry shape (`font-outlines.ts:86`): that is the
+mechanism §1 records as having shipped **empty**, silently rendering every warped layer in Roboto. A
+resolver installed as global module state fails silently when nobody installs it; a resolver passed
+as an argument fails at the call site.
+
+The deliberate narrowing, recorded so a later stage does not treat it as an oversight: **a text fill
+must now be a project asset, not an arbitrary URL.** No user capability was lost — nothing could
+author an arbitrary URL, there was no editor — and fills now inherit the local-first asset doctrine
+(D5). A future stage wanting a remote texture (stock, AI-generated) must bring it in as an asset
+first. This is the same answer OQ8 needs one layer up.
+
 **T-14 — No feature may re-open the shaping boundary that D9a closes.** (D6a, OQ6) Any operation
 that transforms text below the level of a shaping run — per-character animation is the known case,
 because each animated grapheme cluster becomes its own shaping context and cursive joining breaks —
