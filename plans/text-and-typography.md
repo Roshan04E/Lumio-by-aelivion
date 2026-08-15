@@ -24,6 +24,7 @@ S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unblocks S6
 S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both pickers moved
 S5  tier-1 texture + CSS depth            SHIPPED 2026-08-15; variable axes deferred (not OQ2)
+S5b `fillTexture` presetable + an editor   decomposed into existing kinds; gates S6
 S6  caption + text preset library         rides S4; highest product value
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
                                                           half only; largest blast radius
@@ -623,6 +624,48 @@ the two renderers *disagreeing*, with every gate green, because no gate compares
 anything. The DOM half is `position: relative` on the run span when a pill is present: no offset, it
 just moves the glyphs into the positioned-descendant layer, above all in-flow inline backgrounds. Both
 paths now say "every pill, then all the text."
+
+---
+
+## S5b — `fillTexture` joins the presetable set, and gets an editor on the way
+
+**Win:** image fill on text becomes usable and survives a saved style. Today `fillTexture` (shipped
+2026-07-17) renders correctly and **no editor writes it** — there is no picker — and it is absent
+from `TextStyleFields`, so Save Style and the clipboard silently drop it. A look you cannot author
+and cannot save.
+
+**Why it is a stage and why it is here.** S5 found it (T-15 addendum 2) and correctly left it rather
+than widen scope. **S6 may not ship presets over it**: a preset library that silently discards one
+look field is the same class of defect as a saved style that drops a pinned font, and S6 is where
+that becomes user-visible at scale.
+
+**The kind decision, which is the reason this needed the auditor rather than the stage.** `fillTexture`
+is a composite value — `{ assetId?, url, fit: cover|tile, scale }`. **Decompose it into existing
+kinds. Do not add a composite kind, and do not reach for `custom`.**
+
+- the image → `reference`, `refType: "asset"`
+- `fit` → `enum`
+- `scale` → `number`
+
+This is ADR-003's own precedent applied unchanged: `lut` is deliberately *not* a kind, it is
+`reference` + `number` (ADR-003 line 38). Metadata evolves before taxonomy. **The editor comes free**
+— S4b (`279a616`) made `reference` a kind the renderer builds, which is exactly why this is cheap
+now and would have meant a bespoke picker three stages ago.
+
+**Scope**
+- The three fields into the text schema, in the frozen kinds above.
+- `fillTexture` joins `TextStyleFields`, so S4's two-way constraint starts covering it — the
+  constraint was never wrong, it simply proved a set this field had never joined.
+- Absent stays absent, permanently. Same discipline as every stage since S1.
+
+**Verification**
+- The T-15 falsifier per field, **and** a look at the rendered picture. S5's pill-over-descenders
+  defect is the precedent: every gate was green while the render was wrong. A falsifier proves the
+  field is wired; nothing in this repo's vocabulary proves the picture is right except looking.
+- Save Style → apply on a fresh layer round-trips the fill. That assertion is the whole stage.
+- `render:baseline` at zero tolerance: no existing project has a `fillTexture`, so nothing may move.
+
+**Risk:** low. The renderer already paints it; this is authoring plus schema membership.
 
 ---
 
