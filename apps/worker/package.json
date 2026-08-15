@@ -20,7 +20,7 @@
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
     "render:baseline": "tsx src/render-baseline-gate.ts",
     "text:look-probe": "tsx src/text-look-clipboard-probe.ts",
-    "warp:shaping-gate": "tsx src/warp-shaping-gate.ts",
+    "warp:deform-gate": "tsx src/warp-deform-gate.ts",
     "text:direction-falsifier": "tsx src/text-direction-falsifier.ts",
     "text:s5-falsifier": "tsx src/text-s5-falsifier.ts",
     "font:ref-falsifier": "tsx src/font-ref-falsifier.ts",

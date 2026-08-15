@@ -31,6 +31,7 @@ import {
 import {
   getCompositionShapeStyle,
   getCompositionTextStyle,
+  getCompositionTextWarp,
   getCompositionTransform,
   getVisibleTextRuns,
   parseFillTexture,
@@ -164,7 +165,7 @@ export class SceneTextRasterizer {
       // EMITTED into the style now (resolved id → url), so it is keyed because everything emitted is
       // keyed — one less hand-written list of "things that also change the picture", which is the class
       // of list T-15 is about. `textWarp` remains the last one.
-      return JSON.stringify(["text", width, height, bucket, boxMode, this.fontsVersion, runs, style, layer.textWarp ?? null]);
+      return JSON.stringify(["text", width, height, bucket, boxMode, this.fontsVersion, runs, style, getCompositionTextWarp(layer) ?? null]);
     }
     const style = contentStyleForKey(getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...this.styleOptions }) as Record<string, unknown>);
     return JSON.stringify(["shape", width, height, bucket, boxMode, this.fontsVersion, style]);

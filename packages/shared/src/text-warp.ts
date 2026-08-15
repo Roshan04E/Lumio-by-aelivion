@@ -1,13 +1,15 @@
-import { detectTextScript } from "./text-script";
 import type { TextWarp } from "./types";
 
 /**
- * Text-warp parameter helpers. The actual warp is rendered by the vector envelope-mesh
- * engine: `font-outlines.ts` lays text out with opentype.js and `text-warp-mesh.ts`
- * pushes every glyph outline point through a per-style envelope. (The previous
- * `feImage`/`feDisplacementMap` pixel-displacement approach was removed - it smeared
- * glyphs and Chrome only resolved feImage for SVG-painted content, not HTML/CSS
- * filters.)
+ * Text-warp parameter helpers. The warp itself is RASTERIZE-THEN-DEFORM (ADR-023 D9a): the text is
+ * drawn by the browser, with the browser's own shaping, and the finished raster is pushed through
+ * the envelope field in `text-warp-mesh.ts` by `scene/text-warp-deform.ts`.
+ *
+ * Two earlier engines are recorded here so neither is reached for again. `feImage` /
+ * `feDisplacementMap` pixel displacement smeared glyphs, and Chrome only resolved `feImage` for
+ * SVG-painted content, not HTML/CSS filters. The `opentype.js` outline engine that replaced it
+ * deformed glyph OUTLINES, which meant it did glyph lookup rather than shaping and rendered every
+ * cursive, reordering or mark-positioning script wrong — the gap T-12 guarded and D9a closed.
  */
 
 export const defaultTextWarp: TextWarp = {
@@ -37,28 +39,13 @@ export function hasTextWarp(warp: TextWarp | undefined): boolean {
   return normalized.bend !== 0 || normalized.distortH !== 0 || normalized.distortV !== 0;
 }
 
-/**
- * S0 / ADR-023 T-12 — INTERIM. Delete this predicate when D9a lands (S7 half B).
- *
- * The warp engine lays text out with opentype.js `getPath()`, which is glyph LOOKUP, not shaping:
- * it maps code points to glyphs one at a time, at advance-width spacing. For a script whose correct
- * rendering depends on shaping — cursive joining, contextual forms, reordering, mark positioning,
- * conjuncts — that produces the wrong glyphs in the wrong places, silently, and has done since warp
- * shipped. The same shape of failure as the empty `warpFontCatalog` incident
- * (`font-outlines.ts:45-50`): a broken feature that looks like a working one.
- *
- * Until warp rasterizes-then-deforms (ADR-023 D9a — shaping happens in the browser BEFORE any
- * deformation, so this gap closes structurally), warp refuses to apply itself and the editor says
- * so. A visible refusal beats a wrong render.
- *
- * The detection itself is NOT here. It lives in `text-script.ts` because a second consumer (D6a /
- * plan S0b, base text direction) asks the same question of the same string, and two detectors
- * answering one question drift apart — ADR-023 T-12 makes the single detector an obligation. Warp
- * reads exactly one field of its reading, `shapingDependent`, and has no opinion on the rest.
- */
-export function isTextWarpSuppressed(warp: TextWarp | undefined, text: string | undefined): boolean {
-  return hasTextWarp(warp) && detectTextScript(text).shapingDependent;
-}
+// ADR-023 T-12 RETIRED 2026-08-15 (D9a). `isTextWarpSuppressed` lived here and is DELETED rather
+// than left returning false: warp now rasterizes through the browser's shaper before it deforms, so
+// there is no shaping-dependent script it renders wrong and nothing to suppress. A predicate that
+// always answers "no" is a trap for the next reader, who has to prove it is vacuous before touching
+// anything near it. The detector it called (`detectTextScript`) stays — it has two live consumers,
+// base direction (D6a/T-13) and S9's per-character animation, which cannot animate a cluster whose
+// shaping it would break (T-14).
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));

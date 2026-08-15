@@ -5,10 +5,11 @@ import { normalizeTextWarp } from "./text-warp";
  * Pure envelope-mesh math for text warp — no opentype/DOM dependency so it stays
  * unit-testable and runs identically in the web preview and Remotion.
  *
- * The Photoshop/Illustrator model: text is converted to glyph outlines, then every
- * anchor + bezier control point is pushed through a per-style envelope function over
- * the text's local box. `font-outlines.ts` supplies the laid-out outline commands and
- * the box bounds; this module does the geometry and serializes the warped SVG path.
+ * The Photoshop/Illustrator model, applied to COVERAGE rather than to outlines (ADR-023 D9a): the
+ * text is rasterized by the browser, with the browser's shaping, and `scene/text-warp-deform.ts`
+ * samples the envelope below on a grid to deform that raster. Until D9a this field was sampled at
+ * `opentype.js` bezier control points instead, which is why warp could not handle a script that
+ * needs shaping — the geometry here was never the problem, the stage it ran at was.
  */
 
 export type PathCommandType = "M" | "L" | "C" | "Q" | "Z";
@@ -102,7 +103,21 @@ function envelope(
   return { dx, dy, sx, sy };
 }
 
-function warpPoint(x: number, y: number, b: WarpBounds, warp: TextWarp, amp: number): { x: number; y: number } {
+/**
+ * Amplitude convention, shared so every consumer of the field agrees on its scale. Font-relative so
+ * a bend reads the same across sizes.
+ */
+export function warpAmplitude(fontSize: number): number {
+  return fontSize * 0.9;
+}
+
+/**
+ * The deformation field itself: box space → warped box space. Exported as of D9a because it now has
+ * a second consumer — the rasterize-then-deform path pushes a MESH through the same function the
+ * outline path used to push bezier control points through. That is the whole point of the rework:
+ * one field, two samplings of it, so a warp cannot mean two different shapes.
+ */
+export function warpPoint(x: number, y: number, b: WarpBounds, warp: TextWarp, amp: number): { x: number; y: number } {
   const width = b.width || 1;
   const height = b.height || 1;
   const u = (x - b.x0) / width;
@@ -135,54 +150,12 @@ function warpPoint(x: number, y: number, b: WarpBounds, warp: TextWarp, amp: num
 }
 
 /**
- * Warps a list of outline path commands through the envelope and returns an SVG path
- * `d` string. Bezier control points are mapped directly; glyph segments are short
- * enough that this is visually smooth.
+ * ADR-023 D9a (2026-08-15): `warpPathCommands` lived here — it pushed opentype.js bezier control
+ * points through the field above and serialized an SVG path `d`. Deleted with the outline engine
+ * that fed it. The FIELD is untouched and is now sampled on a grid by `scene/text-warp-deform.ts`
+ * instead, which is the whole of the D9a change: same geometry, applied after shaping rather than
+ * instead of it.
+ *
+ * `PathCommand` stays exported because `font-outlines.ts` still describes opentype.js's `getPath`
+ * signature for D2's name-table ingest parse.
  */
-export function warpPathCommands(
-  commands: PathCommand[],
-  bounds: WarpBounds,
-  warp: TextWarp | undefined,
-  fontSize: number
-): string {
-  const normalized = normalizeTextWarp(warp);
-  // Amplitude is font-relative so the bend reads the same across sizes.
-  const amp = fontSize * 0.9;
-  const round = (n: number) => Math.round(n * 100) / 100;
-  const parts: string[] = [];
-
-  for (const cmd of commands) {
-    switch (cmd.type) {
-      case "M": {
-        const p = warpPoint(cmd.x ?? 0, cmd.y ?? 0, bounds, normalized, amp);
-        parts.push(`M${round(p.x)} ${round(p.y)}`);
-        break;
-      }
-      case "L": {
-        const p = warpPoint(cmd.x ?? 0, cmd.y ?? 0, bounds, normalized, amp);
-        parts.push(`L${round(p.x)} ${round(p.y)}`);
-        break;
-      }
-      case "Q": {
-        const c = warpPoint(cmd.x1 ?? 0, cmd.y1 ?? 0, bounds, normalized, amp);
-        const p = warpPoint(cmd.x ?? 0, cmd.y ?? 0, bounds, normalized, amp);
-        parts.push(`Q${round(c.x)} ${round(c.y)} ${round(p.x)} ${round(p.y)}`);
-        break;
-      }
-      case "C": {
-        const c1 = warpPoint(cmd.x1 ?? 0, cmd.y1 ?? 0, bounds, normalized, amp);
-        const c2 = warpPoint(cmd.x2 ?? 0, cmd.y2 ?? 0, bounds, normalized, amp);
-        const p = warpPoint(cmd.x ?? 0, cmd.y ?? 0, bounds, normalized, amp);
-        parts.push(`C${round(c1.x)} ${round(c1.y)} ${round(c2.x)} ${round(c2.y)} ${round(p.x)} ${round(p.y)}`);
-        break;
-      }
-      case "Z":
-        parts.push("Z");
-        break;
-      default:
-        break;
-    }
-  }
-
-  return parts.join("");
-}

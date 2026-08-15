@@ -953,6 +953,58 @@ warning nobody can act on is the kind that teaches people to ignore warnings.
 
 ---
 
+## 8b. S7 half B shipped, and what it found (2026-08-15)
+
+**D9a is IMPLEMENTED; T-12 is RETIRED, deleted rather than disabled.** Warp rasterizes the text with
+the browser's own shaping — the same `fillText` path every other text layer uses — and pushes the
+finished raster through the envelope field on a triangle mesh (`scene/text-warp-deform.ts`). The
+FIELD is unchanged and now shared: `warpPoint` is the same function the outline engine sampled at
+bezier control points, sampled on a grid instead. `isTextWarpSuppressed`, the preview badge and
+`warp:shaping-gate` are gone; `warp:deform-gate` asserts the opposite property.
+
+`detectTextScript` SURVIVES the retirement and should not be deleted with its first consumer. D6a's
+base direction reads it, and S9 needs it to know which scripts it must not break by animating per
+cluster (T-14). Warp was the consumer that went away, not the question.
+
+**What the rework gained beyond shaping, none of it asked for.** Deforming the finished picture
+rather than a set of outlines means warped text now carries every style plain text has — shadow
+stacks, gradient and image glyph fills, per-line pills, paint order. The old path returned early
+before all of it. Multi-line warped text also works for the first time: the outline path concatenated
+every run into ONE line, having no wrap step of its own.
+
+### The defect this stage found: warp had NEVER rendered in the export
+
+The brand-new `text-warp` fixture rendered flat. Cause: `textWarp` travels in the manifest's STYLE
+BAG (`MANIFEST_LAYER_STYLE_KEYS`), and both rasterizers reached for `layer.textWarp`, a TOP-LEVEL
+field that exists only on an editor `TimelineLayer`. In the export that property was `undefined`,
+`hasTextWarp` answered false, and every warped project has been exporting flat text while the editor
+showed a bend.
+
+**This is T-9 in its purest form**, and it is worth stating precisely because the obligation is
+usually read as "keep the two renderers in sync". These two renderers agreed about every style they
+could SEE. They disagreed about where one of them LIVED. Nothing detected it for as long as warp has
+existed because there was no warp pixel fixture at all — warp shipped, was reworked twice, and no
+gate ever compared its picture to anything. Fixed by `getCompositionTextWarp`, which reads through
+`styleOf` the way every other style field is read.
+
+**Corollary worth carrying:** "both renderers, in the same change" is not satisfied by a shared
+function if the two callers hand it differently-shaped layers. The shared function has to be the one
+that resolves the shape.
+
+### Two instrument notes
+
+**The recursion had to be terminated at both homes.** The deform draws the unwarped text by calling
+`drawTextLayer` on a warp-stripped copy of the layer. Stripping only the top-level field terminated
+in the editor and recursed forever in the export — the same two-homes fact, arriving as a hang
+instead of a wrong picture, one hour later.
+
+**The mesh seam value was MEASURED, after two guesses.** Canvas anti-aliases a clip edge, so
+abutting triangles each contribute ~50% coverage at their shared edge and the mesh appears as a
+lattice of hairlines across the glyphs. At 0 the lattice is plain; at 0.5 it becomes fine diagonal
+seams along the cell diagonals (two AA edges overlapping rather than one covered by a neighbour's
+solid interior); at 1.5 it is clean. Recorded because the first two values were chosen by looking at
+the code rather than at the render.
+
 ## 8. Defects found by looking (S6, 2026-08-15)
 
 Both were found by rendering the first-party preset library through the real renderer and looking at

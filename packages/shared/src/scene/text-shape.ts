@@ -9,12 +9,14 @@
  * editor preview, local export, and the future Remotion SceneStage all rasterize identically.
  */
 
-import { buildWarpedTextPaths } from "../font-outlines";
 import type { CompositionStyleOptions } from "../composition-style";
+import { makeCanvas2D } from "./canvas-2d";
+import { drawWarpedRaster, textWarpField, warpOverhang, warpSupersampleScale } from "./text-warp-deform";
 import {
   compositionTextDefaults,
   getCompositionShapeStyle,
   getCompositionTextRunStyle,
+  getCompositionTextWarp,
   getCompositionTextStyle,
   getCompositionTransform,
   getVisibleTextRuns,
@@ -297,6 +299,13 @@ function fontString(style: { fontStyle?: unknown; fontWeight?: unknown; fontSize
  * and slant the glyph draw manually so the raster matches the DOM. ~ tan(14°), the CSS synthesis
  * angle. Fonts WITH a real italic face measure differently and are left to their true italics.
  */
+/**
+ * Bound on a warped layer's SOURCE raster, mirroring `MAX_RASTER_DIM` on the destination: the
+ * supersample factor multiplies an already-scaled box, and a strong fisheye on large text would
+ * otherwise ask for a canvas no GPU will take.
+ */
+const MAX_WARP_SOURCE_DIM = 4096;
+
 const ITALIC_SKEW = 0.25;
 const italicSynthesisCache = new Map<string, boolean>();
 function needsItalicSynthesis(ctx: Ctx, italicFont: string): boolean {
@@ -531,6 +540,31 @@ export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: 
  *  never clipped; a tight box would). Parsed from the same resolved style the draw uses, so it
  *  tracks the actual overhang. `W`/`H` (comp px) size percent-of-box overhangs (pen paths). */
 export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number, H: number, styleOptions: OverlayStyleOptions = {}): number {
+  const ink = overlayInkMargin(layer, t, styleOptions, W, H);
+  /**
+   * ADR-023 D9a: warp displaces ink OUT of the box it is defined over, so a tight-box raster that
+   * budgeted only for shadow and stroke would clip the bend itself. Measured from the field rather
+   * than derived per style — `arc` scales its amplitude by a parabola, `arch` by a sine, `bulge` not
+   * by translation at all but by a vertical scale, and a formula per style is exactly the
+   * hand-maintained list T-15 is about.
+   */
+  if (layer.type === "text" && hasTextWarp(getCompositionTextWarp(layer))) {
+    const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
+    const layout = measureOverlayBox(makeCanvas2D(1, 1).getContext("2d") as Ctx, layer, t, W, H, styleOptions);
+    if (layout.boxW > 0 && layout.boxH > 0) {
+      const field = textWarpField(getCompositionTextWarp(layer), layout.boxW, layout.boxH, num(style.fontSize, 72));
+      return ink + warpOverhang(field);
+    }
+  }
+  return ink;
+}
+
+/**
+ * The margin the UNDEFORMED picture needs: shadow, stroke, per-line pill, pen-path bulge. Split out
+ * from {@link overlayOverhangMargin} for D9a's warp path, which sizes its source raster from this and
+ * leaves the warp's own overhang to the destination.
+ */
+function overlayInkMargin(layer: TimelineLayer, t: number, styleOptions: OverlayStyleOptions = {}, W = 0, H = 0): number {
   let m = 2; // base anti-aliasing pad
   /**
    * ADR-023 S5: `text-shadow` is a LIST once `shadowLayers` stacks copies, and the FARTHEST copy is the
@@ -643,30 +677,66 @@ export async function drawTextLayer(
     ctx.fill();
   }
 
-  // Warp: draw the shared vector glyph outlines via Path2D (font-independent). Path2D works on both
-  // the main thread AND the export Worker's OffscreenCanvas — unlike createImageBitmap(svgBlob), which
-  // Chrome can't decode (it threw, so warp silently fell back to plain text in scene + local export).
-  if (hasTextWarp(layer.textWarp as TextWarp | undefined)) {
-    const warp = await buildWarpedTextPaths(layer.textWarp as TextWarp, runs, style).catch(() => undefined);
-    if (warp && warp.paths.length) {
-      ctx.save();
-      // Map the warp's local box (width×height) onto the text box (boxW×boxH), centred at the origin —
-      // the same stretch the old SVG raster did (viewBox→box, preserveAspectRatio="none").
-      ctx.translate(-boxW / 2, -boxH / 2);
-      ctx.scale(boxW / warp.width, boxH / warp.height);
-      for (const p of warp.paths) {
-        const path2d = new Path2D(p.d);
-        if (p.stroke && p.stroke.width > 0) {
-          // paint-order: stroke is painted UNDER the fill (matches the SVG `paint-order="stroke"`).
-          ctx.lineWidth = p.stroke.width;
-          ctx.strokeStyle = p.stroke.color;
-          ctx.lineJoin = "round";
-          ctx.stroke(path2d);
-        }
-        ctx.fillStyle = p.fill;
-        ctx.fill(path2d);
-      }
-      ctx.restore();
+  /**
+   * Warp (ADR-023 D9a): rasterize with the browser's own shaping, THEN deform.
+   *
+   * The text is drawn unwarped into an offscreen raster through this very function — same layout,
+   * same `fillText`, same shadow/stroke/fill/pill passes — and the finished raster is pushed through
+   * the envelope field. Two consequences worth being explicit about, because the old outline path
+   * had neither:
+   *
+   *  - Complex scripts warp CORRECTLY. Shaping happens in Chromium before the field is applied, so
+   *    Arabic joins, Devanagari reorders and marks are positioned. This is what retires T-12.
+   *  - Warped text carries every style plain text does. What is deformed is the finished picture,
+   *    not a set of outlines with a fill colour, so shadow stacks, gradient and image glyph fills,
+   *    per-line pills and paint order all survive the warp for the first time.
+   *
+   * The recursion is one level deep and cannot go further: `textWarp` is stripped from the layer the
+   * offscreen pass draws, so the inner call takes the ordinary path.
+   */
+  const activeWarp = getCompositionTextWarp(layer);
+  if (hasTextWarp(activeWarp)) {
+    const field = textWarpField(activeWarp, boxW, boxH, fontSize);
+    // Supersample from the field's OWN maximum local magnification, never a fixed multiplier: a
+    // gentle arc magnifies nothing and would pay for pixels it cannot use, while a strong bulge
+    // stretches its centre past 2× and would resample away detail the raster had before it was
+    // deformed.
+    const superSample = warpSupersampleScale(field);
+    // The source raster needs the ink margin (shadow, stroke, pill) but NOT the warp margin — it is
+    // the undeformed picture. The DESTINATION carries the warp margin, added by
+    // `overlayOverhangMargin`, which is what keeps a bend from being clipped by the box it bends out
+    // of when the caller sized a tight raster.
+    const inkMargin = overlayInkMargin(layer, t, styleOptions);
+    const srcW = boxW + 2 * inkMargin;
+    const srcH = boxH + 2 * inkMargin;
+    const srcScale = Math.min(rasterScale * superSample, Math.max(1, MAX_WARP_SOURCE_DIM / Math.max(srcW, srcH)));
+    const canvasW = Math.max(1, Math.ceil(srcW * srcScale));
+    const canvasH = Math.max(1, Math.ceil(srcH * srcScale));
+    const off = makeCanvas2D(canvasW, canvasH);
+    const offCtx = off.getContext("2d") as Ctx | null;
+    if (offCtx) {
+      // "box" mode centres the content in the canvas it is handed and pre-scales by `rasterScale`,
+      // which is exactly the offscreen contract needed here — so the inner draw is the ordinary one,
+      // not a warp-specific variant of it.
+      // Stripped from BOTH homes. `getCompositionTextWarp` reads the top-level field and the style
+      // bag, because those are the two shapes a layer arrives in (editor vs manifest) — so clearing
+      // only the one this layer happens to use makes the recursion terminate for the editor and run
+      // forever for the export, which is exactly what it did for one render.
+      const plain = {
+        ...layer,
+        textWarp: undefined,
+        ...("style" in layer && layer.style ? { style: { ...(layer.style as Record<string, unknown>), textWarp: undefined } } : {})
+      } as TimelineLayer;
+      await drawTextLayer(offCtx, plain, t, W, H, "box", srcScale, styleOptions);
+      drawWarpedRaster(ctx, {
+        ...field,
+        source: off as unknown as HTMLCanvasElement,
+        srcScale,
+        srcOriginX: -srcW / 2,
+        srcOriginY: -srcH / 2,
+        srcWidth: srcW,
+        srcHeight: srcH
+      });
       ctx.restore();
       ctx.letterSpacing = "";
       return { boxW, boxH };

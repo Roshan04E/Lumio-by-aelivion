@@ -112,6 +112,8 @@ export type RenderComparisonFixtureKey =
   | "feather-region-blur"
   | "tilt-3d"
   | "scaled-text"
+  | "text-warp"
+  | "text-warp-shaped"
   | "stroke-paint-order"
   | "bidi-direction"
   | "media-opacity"
@@ -202,6 +204,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "feather-region-blur",
   "tilt-3d",
   "scaled-text",
+  "text-warp",
+  "text-warp-shaped",
   "stroke-paint-order",
   "bidi-direction",
   "media-opacity",
@@ -1534,6 +1538,8 @@ interface FixtureVariant {
   textFillGradient?: { from: string; to: string; angle?: number };
   textPerLinePill?: { color: string; paddingEm?: number; radiusEm?: number };
   textShadowStack?: { layers: number; blur: number; offsetX: number; offsetY: number; color: string };
+  /** ADR-023 D9a — the warp field applied to the text layer. */
+  textWarp?: { style: string; bend: number; distortH?: number; distortV?: number };
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
    *  effects array — over a background layer so the keyed-away area is a real composite. */
   flarex?: FlarexComp;
@@ -1753,6 +1759,52 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", tilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
     case "scaled-text":
       return { effects: [], fit: "cover", textScale: 5 };
+    case "text-warp":
+      /**
+       * S7 half B (ADR-023 D9a). There was NO warp pixel fixture before this stage — warp shipped,
+       * was reworked twice, and no gate ever compared its picture to anything. This is the simple-
+       * script control the rework is measured against: a strong `arch` on heavy stroked glyphs,
+       * where a deformation that lost the stroke, clipped the bend, or seamed the mesh is legible
+       * rather than arguable.
+       *
+       * The stroke is deliberately heavy. The old outline engine painted stroke as an SVG
+       * `paint-order="stroke"` attribute on a path; the raster path paints it as a pass. If the two
+       * ever disagreed, a hairline stroke would hide it.
+       */
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 240,
+        textStrokeWidth: 12,
+        textContent: "WARP",
+        textWarp: { style: "arch", bend: 70 }
+      };
+    case "text-warp-shaped":
+      /**
+       * S7 half B (ADR-023 D9a) — the fixture S0 could not write.
+       *
+       * S0's own plan note says it: there was no "correct warped Arabic" render to compare against,
+       * because the engine did glyph LOOKUP and every warped Arabic render it produced was wrong.
+       * The interim was to detect the script and refuse (T-12). Warp now rasterizes through the
+       * browser's shaper before it deforms, so this fixture renders what S0 could only mark.
+       *
+       * Arabic is the subject because its shaping is CURSIVE: each letter's form depends on its
+       * neighbours, so an unshaped render is not subtly wrong but visibly a string of disconnected
+       * isolated forms. Same text as `bidi-direction`, minus the Latin word — the base-direction
+       * concern is that fixture's, and one fixture testing two things tells you neither when it
+       * moves.
+       */
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 150,
+        textStrokeWidth: 6,
+        textDirection: "auto",
+        textContent: "مرحبا بالعالم",
+        textWarp: { style: "arc", bend: 60 }
+      };
     case "stroke-paint-order":
       // S1 (ADR-023 D7). A HEAVY stroke is the whole point: at the default 4px the two paint orders
       // differ by a couple of pixels of letterform and a diff would be arguing about antialiasing.
@@ -2175,7 +2227,8 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
       variant.textDirection ||
       variant.textFillGradient ||
       variant.textPerLinePill ||
-      variant.textShadowStack
+      variant.textShadowStack ||
+      variant.textWarp
   );
   const textFixtureLayer: TimelineLayer = {
     id: "fixture_scaled_text",
@@ -2232,6 +2285,16 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
           backgroundColor: variant.textPerLinePill.color,
           ...(variant.textPerLinePill.paddingEm === undefined ? {} : { backgroundPaddingEm: variant.textPerLinePill.paddingEm }),
           ...(variant.textPerLinePill.radiusEm === undefined ? {} : { backgroundRadiusEm: variant.textPerLinePill.radiusEm })
+        }
+      : {}),
+    ...(variant.textWarp
+      ? {
+          textWarp: {
+            style: variant.textWarp.style,
+            bend: variant.textWarp.bend,
+            distortH: variant.textWarp.distortH ?? 0,
+            distortV: variant.textWarp.distortV ?? 0
+          } as TimelineLayer["textWarp"]
         }
       : {}),
     ...(variant.textShadowStack

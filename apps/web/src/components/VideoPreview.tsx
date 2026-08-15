@@ -19,8 +19,11 @@ import { createPortal } from "react-dom";
 import { Activity, ArrowLeftRight, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, ImagePlus, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
 import {
   buildColorFilterDefs,
+  drawTextLayer,
+  ensureOverlayFonts,
+  measureOverlayBox,
+  overlayOverhangMargin,
   buildMaskDefsSvg,
-  buildWarpedTextPathSvg,
   createBoxMask,
   createMask,
   getCompositionTransform,
@@ -77,7 +80,6 @@ import {
   getCompositionFontRef,
   isPinnedFontRef,
   isTextVisualOrderUnavailable,
-  isTextWarpSuppressed,
   normalizeTextWarp,
   setGlContextBudget,
   setGlGovernorEnabled,
@@ -2185,6 +2187,8 @@ function VideoPreviewImpl({
                     onCropLayer={onCropLayer}
                     onSelectLayer={onSelectLayer}
                     frameAspect={composition.width / composition.height}
+                    compWidth={composition.width}
+                    compHeight={composition.height}
                     rotationSnapEnabled={rotationSnapEnabled}
                     selected={!viewerPanMode && !pending && selectedLayerId === layer.id}
                     interactive={!viewerPanMode && realLayerIds.has(layer.id)}
@@ -2300,6 +2304,8 @@ function VideoPreviewImpl({
                       assets={resolvedAssets}
                       sourceAsset={sourceAsset}
                       frameAspect={composition.width / composition.height}
+                      compWidth={composition.width}
+                      compHeight={composition.height}
                       interactive={false}
                       selected={false}
                       sceneComposited
@@ -2506,6 +2512,10 @@ type PreviewLayerProps = {
   /** Composition frame aspect (w/h) — lets a `contain` media layer's selection box hug the source's natural
    *  rect (adaptive handles) instead of framing the whole canvas. */
   frameAspect?: number | undefined;
+  /** Comp pixel size. ADR-023 D9a: the warp overlay rasterizes through the shared text path, which
+   *  needs the comp box to resolve wrap width — the outline engine it replaced never wrapped. */
+  compWidth?: number | undefined;
+  compHeight?: number | undefined;
   onSelectLayer: (layerId: string) => void;
   rotationSnapEnabled?: boolean | undefined;
   /** This layer shares its asset with another active layer (same-source stack) — keep the element
@@ -2626,6 +2636,8 @@ const PreviewLayer = memo(function PreviewLayer({
   onCropLayer,
   onSelectLayer,
   frameAspect,
+  compWidth,
+  compHeight,
   rotationSnapEnabled = false,
   hideForTransition = false,
   hideVisual = false,
@@ -2642,7 +2654,7 @@ const PreviewLayer = memo(function PreviewLayer({
   flarexConcurrentLoaders = 0
 }: PreviewLayerProps) {
   bumpRenderCount("PreviewLayer");
-  const warpTextSvg = useWarpedTextSvg(layer, currentTime);
+  const warpTextImage = useWarpedTextImage(layer, currentTime, compWidth ?? 0, compHeight ?? 0);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   // R4 fix: last time (ms) the ramped-playback effect force-seeked the element. A ramped clip's rate
   // is curved between currentTime commits, so the element free-runs at whatever rate it last got —
@@ -3634,15 +3646,10 @@ const PreviewLayer = memo(function PreviewLayer({
   if (layer.type === "text") {
     const style = getCompositionTextStyle(layer, { currentTimeSeconds: currentTime });
     const visibleRuns = getVisibleTextRuns(layer, currentTime);
-    // Warp renders as a vector <path> overlay (opentype outline + envelope mesh). The
-    // HTML runs stay for box sizing/selection but go invisible once the warp is ready;
-    // while it loads (or if the font isn't hosted) the plain text shows instead.
-    const warpReady = warpTextSvg != null;
-    // S0 / ADR-023 T-12 (INTERIM — delete with the D9a rework): warp is requested but the engine
-    // refused it because this text needs shaping. Mark the layer in the preview, not only in the
-    // inspector: the failure this exists to prevent is a wrong render nobody notices, and a user
-    // with the warp panel closed would otherwise see silence.
-    const warpSuppressed = isTextWarpSuppressed(layer.textWarp, visibleRuns.map((run) => run.text).join(""));
+    // ADR-023 D9a: warp renders as a deformed RASTER of the shaped text, drawn through the same
+    // shared `drawTextLayer` the scene path and the export use. The HTML runs stay for box sizing and
+    // selection but go invisible once the warp is ready; while it rasterizes, the plain text shows.
+    const warpReady = warpTextImage != null;
     // S0c / ADR-023 T-13a + T-12: a line carrying two styles must be placed run by run, in LOGICAL
     // order, because canvas 2D exposes no per-character visual positions. For Latin that is
     // invisible; for a shaping-dependent script the render is wrong, so it is announced rather than
@@ -3694,10 +3701,22 @@ const PreviewLayer = memo(function PreviewLayer({
           // Force visibility so the warp shows even though the (sibling) runs are hidden — but when
           // the layer is GPU-composited (`hideVisual`, scene path), the scene raster already draws the
           // warp; keep this DOM overlay hidden too or it double-renders on top of the GPU warp.
-          <span
+          // Centred on the text box, at the padded size the raster was drawn at, so the bend's
+          // overhang lands where the raster put it rather than being scaled into the box.
+          <img
             aria-hidden="true"
-            style={{ position: "absolute", inset: 0, visibility: hideVisual ? "hidden" : "visible" }}
-            dangerouslySetInnerHTML={{ __html: warpTextSvg }}
+            alt=""
+            src={warpTextImage.url}
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: "50%",
+              width: warpTextImage.width,
+              height: warpTextImage.height,
+              transform: "translate(-50%, -50%)",
+              pointerEvents: "none",
+              visibility: hideVisual ? "hidden" : "visible"
+            }}
           />
         ) : null}
       </button>
@@ -3706,24 +3725,20 @@ const PreviewLayer = memo(function PreviewLayer({
     return (
       <>
         {textMaskWrapper ? <div style={textMaskWrapper as CSSProperties}>{textButton}</div> : textButton}
-        {/* S0 / ADR-023 T-12 (INTERIM — delete with the D9a rework). A SIBLING of the text button, not
-            a child of it, and that is load-bearing rather than stylistic: when the layer is
-            GPU-composited the button carries `opacity: 0` (`hideVisual` — the scene canvas draws the
-            text instead), so a badge nested inside it inherits zero opacity and paints nothing while
+        {/* ADR-023 T-12 RETIRED here (D9a, 2026-08-15). The "Warp unavailable — this script needs
+            shaping" badge that used to sit at this spot is DELETED, not disabled: warp rasterizes
+            with the browser's shaper before it deforms, so there is no shaping gap left to announce.
+            A marker kept past its defect is worse than no marker — it trains people to ignore the
+            vocabulary the two markers below still depend on.
+
+            The SIBLING placement those two use is load-bearing rather than stylistic, and the note
+            is kept here because this is where it was learned: when the layer is GPU-composited the
+            text button carries `opacity: 0` (`hideVisual` — the scene canvas draws the text
+            instead), so a badge nested inside it inherits zero opacity and paints nothing while
             still reporting itself present in the DOM. That is the exact silent-degradation failure
-            this marker exists to announce, and it shipped that way for one gate run. Positioned from
-            the same resolved style, so it tracks the layer. */}
-        {warpSuppressed && interactive ? (
-          <span
-            className="preview-warp-suppressed"
-            data-testid="preview-warp-suppressed"
-            style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
-          >
-            Warp unavailable — this script needs shaping
-          </span>
-        ) : null}
-        {/* S0c / ADR-023 T-13a. Same sibling placement, and for the identical reason (see above). */}
-        {visualOrderUnavailable && !warpSuppressed && interactive ? (
+            these markers exist to announce, and it shipped that way for one gate run (T-16). */}
+        {/* S0c / ADR-023 T-13a. */}
+        {visualOrderUnavailable && interactive ? (
           <span
             className="preview-warp-suppressed"
             data-testid="preview-visual-order-unavailable"
@@ -6517,49 +6532,85 @@ function resolvePosterUrl(asset: SourceAsset | undefined) {
 }
 
 /**
- * Builds the warped-text vector overlay (opentype.js outline + envelope mesh) for a
- * text layer. Async because the font binary may need fetching; returns null while
- * loading or when the font isn't hosted, so the caller falls back to plain text.
+ * ADR-023 D9a — the warped-text overlay for the DOM preview path.
+ *
+ * This used to build an `<svg>` of `opentype.js` outlines pushed through the envelope. That engine
+ * is gone: it did glyph LOOKUP rather than shaping, so it rendered complex scripts wrong and had to
+ * be gated off for them entirely (T-12). Warp is now rasterize-then-deform, and this hook draws
+ * through **exactly the same shared function the scene raster and the export use** —
+ * `drawTextLayer`, which applies the warp itself. There is one warp engine in the product, not a
+ * DOM one and a canvas one that agree by inspection (T-9).
+ *
+ * The result is a PNG data URL rather than a live canvas element deliberately: `PreviewLayer` is
+ * memoized and re-renders on unrelated prop changes, and a `<canvas>` whose contents live outside
+ * React's model would need an imperative redraw on every one of them. A data URL is a value, so it
+ * follows the same rules as every other piece of derived state here.
  */
-function useWarpedTextSvg(layer: TimelineLayer, currentTime: number): string | null {
+function useWarpedTextImage(
+  layer: TimelineLayer,
+  currentTime: number,
+  compWidth: number,
+  compHeight: number
+): { url: string; width: number; height: number } | null {
   const isText = layer.type === "text";
   const warpActive = isText && hasTextWarp(layer.textWarp);
   const style = isText ? getCompositionTextStyle(layer, { currentTimeSeconds: currentTime }) : null;
   const runs = isText ? getVisibleTextRuns(layer, currentTime) : [];
+  // Everything the DEFORMED picture depends on. The style object is keyed whole rather than by named
+  // fields: warped text now carries every style plain text does (shadow stacks, gradient and image
+  // fills, pills), and a hand-listed key would be the copy-list shape T-15 is about — the old key
+  // listed eight fields and would have silently ignored all of the new ones.
   const warpKey = warpActive
     ? JSON.stringify([
         normalizeTextWarp(layer.textWarp),
         runs.map((run) => [run.text, run.color ?? "", run.fontSizeMultiplier ?? 1]),
-        style?.fontSize,
-        style?.fontFamily,
-        style?.fontWeight,
-        style?.color,
-        style?.textAlign,
-        style?.WebkitTextStroke
+        style,
+        compWidth,
+        compHeight
       ])
     : "";
-  const latest = useRef<{ warp: typeof layer.textWarp; runs: typeof runs; style: typeof style }>({
-    warp: layer.textWarp,
-    runs,
-    style
-  });
-  latest.current = { warp: layer.textWarp, runs, style };
-  const [warpSvg, setWarpSvg] = useState<string | null>(null);
+  const latest = useRef<{ layer: TimelineLayer; t: number }>({ layer, t: currentTime });
+  latest.current = { layer, t: currentTime };
+  const [image, setImage] = useState<{ url: string; width: number; height: number } | null>(null);
 
   useEffect(() => {
-    if (!warpActive) {
-      setWarpSvg(null);
+    if (!warpActive || compWidth <= 0 || compHeight <= 0) {
+      setImage(null);
       return;
     }
     let cancelled = false;
-    const { warp, runs: latestRuns, style: latestStyle } = latest.current;
-    void buildWarpedTextPathSvg(warp, latestRuns, latestStyle ?? {}).then((markup) => {
-      if (!cancelled) setWarpSvg(markup ?? null);
-    });
+    const { layer: current, t } = latest.current;
+    void (async () => {
+      try {
+        const probe = document.createElement("canvas").getContext("2d");
+        if (!probe) return;
+        const box = measureOverlayBox(probe, current, t, compWidth, compHeight);
+        if (box.boxW <= 0 || box.boxH <= 0) return;
+        const margin = overlayOverhangMargin(current, t, compWidth, compHeight);
+        const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+        const cssW = box.boxW + 2 * margin;
+        const cssH = box.boxH + 2 * margin;
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.ceil(cssW * dpr));
+        canvas.height = Math.max(1, Math.ceil(cssH * dpr));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        // ADR-023 D3/T-2, and the DEBT-009 lesson one layer up: a mesh computed from the fallback's
+        // metrics is wrong in a way no later repaint can fix, because the deformation was fitted to
+        // the wrong box. The raster path awaits this inside `rasterize`; the DOM path has no
+        // rasterizer to do it for it, so it awaits here, on its own consumption path.
+        await ensureOverlayFonts(current, t);
+        await drawTextLayer(ctx, current, t, compWidth, compHeight, "box", dpr);
+        if (cancelled) return;
+        setImage({ url: canvas.toDataURL("image/png"), width: cssW, height: cssH });
+      } catch {
+        if (!cancelled) setImage(null); // degrade to the plain (unwarped) runs, which stay mounted
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [warpActive, warpKey]);
+  }, [warpActive, warpKey, compWidth, compHeight]);
 
-  return warpActive ? warpSvg : null;
+  return warpActive ? image : null;
 }

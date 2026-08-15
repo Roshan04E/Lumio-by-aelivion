@@ -12,7 +12,7 @@
 ## The shape of it
 
 ```
-S0  interim: disable warp on shaping-dependent scripts   independent, immediate   ~half a day
+S0  interim: disable warp on shaping-dependent scripts   RETIRED 2026-08-15 by S7 half B
 S0b base text direction (RTL)             rides S0's detector; live correctness   ~1 day
 S0c raster honours direction              closes S0b's two measured gaps        ~1-2 days
 S1  paint-order + stroke                  no manifest change, no schema change   ~1 day
@@ -26,8 +26,8 @@ S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both picker
 S5  tier-1 texture + CSS depth            SHIPPED 2026-08-15; variable axes deferred (not OQ2)
 S5b `fillTexture` presetable + an editor   SHIPPED 2026-08-15; decomposed, no new kind
 S6  caption + text preset library         SHIPPED 2026-08-15; OQ8 closed; 18 first-party looks
-S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
-                                                          half only; largest blast radius
+S7  the text matte (tier 2) + matte ops + warp rework   half B (warp) SHIPPED 2026-08-15;
+                                                          half A gated on the OQ1 spike
 S8  SVG: multi-stroke + path text
 S9  per-character + variable-axis animation
 ```
@@ -55,6 +55,14 @@ Ordering rationale, stated because two of these look reorderable and are not:
 ---
 
 ## S0 — Interim: warp detects a shaping-dependent script and disables itself, visibly
+
+> **RETIRED 2026-08-15 by S7 half B (D9a/T-12), exactly as this stage's own scope said it would be.**
+> The gate is DELETED, not disabled: `isTextWarpSuppressed` is gone, the preview badge is gone, and
+> `warp:shaping-gate` is replaced by `warp:deform-gate`, which asserts the opposite property. What
+> SURVIVES is the detector — `detectTextScript` in `text-script.ts` — because the amendment below was
+> right about the second consumer and there is now a third: S9 cannot animate per grapheme cluster on
+> a script whose shaping it would break (T-14). Warp was the consumer that went away, not the
+> question. The stage below is kept as written, for history.
 
 **Win:** warp stops silently rendering wrong. Today, warping Arabic, Devanagari, Thai or any other
 shaping-dependent script text produces incorrect glyphs with no indication anything is wrong — the

@@ -1393,6 +1393,32 @@ function styleOf(layer: CompositionLayerStyleInput | TimelineLayer) {
 }
 
 /**
+ * A layer's warp, read the way every other style field is read — and the fix for a defect worth
+ * naming, found by S7 half B when its brand-new fixture rendered flat (ADR-023 D9a, 2026-08-15).
+ *
+ * **Warp had never rendered in the Remotion export.** Not "rendered differently": not at all. Both
+ * rasterizers reached for `layer.textWarp`, a TOP-LEVEL field, which is where it lives on a
+ * `TimelineLayer` in the editor. The manifest carries it in the STYLE BAG
+ * (`MANIFEST_LAYER_STYLE_KEYS`), so in the export that property was `undefined`, `hasTextWarp`
+ * answered false, and the export shipped flat text while the editor showed a bend. Nothing caught
+ * it because there was no warp pixel fixture until this stage — warp shipped, was reworked twice,
+ * and no gate ever compared its picture to anything.
+ *
+ * That is the T-9 failure mode in its purest form, and the reason the obligation is written as
+ * "both renderers, in the same change" rather than "keep them in sync": these two agreed about
+ * every style they could SEE, and disagreed about where one of them lived.
+ *
+ * Reading it here, through `styleOf`, is what makes the two shapes one question. `getVisibleTextRuns`
+ * and `resolveTextDirection` already work this way; warp was the field that never got the treatment.
+ */
+export function getCompositionTextWarp(layer: CompositionLayerStyleInput | TimelineLayer): TextWarp | undefined {
+  const own = (layer as TimelineLayer).textWarp;
+  if (own) return own;
+  const fromStyle = (styleOf(layer) as { textWarp?: TextWarp | undefined }).textWarp;
+  return fromStyle ?? undefined;
+}
+
+/**
  * Fields of {@link CompositionLayerStyleInput} that the manifest carries somewhere OTHER than the
  * style bag: `RenderManifestLayer` has its own top-level slots for them. Excluded here so the
  * exhaustiveness check below is about the style bag and nothing else.

@@ -1,8 +1,5 @@
 import { catalogueFace, catalogueFamily, LEGACY_WARP_FAMILY_ALIASES } from "./font-catalogue";
-import { detectTextScript } from "./text-script";
-import { hasTextWarp, normalizeTextWarp } from "./text-warp";
-import { warpPathCommands, type PathCommand, type WarpBounds } from "./text-warp-mesh";
-import type { TextRun, TextWarp } from "./types";
+import type { PathCommand } from "./text-warp-mesh";
 
 /**
  * Font-outline service for the vector text-warp engine.
@@ -120,186 +117,20 @@ export function loadWarpFont(family: string, weight?: number): Promise<OpentypeF
   return promise;
 }
 
-/** Resolved style fields the warp builder needs (subset of getCompositionTextStyle). */
-export interface WarpTextStyleInput {
-  fontSize?: number | string | undefined;
-  fontFamily?: string | undefined;
-  fontWeight?: number | string | undefined;
-  color?: string | undefined;
-  textAlign?: string | undefined;
-  padding?: string | number | undefined;
-  WebkitTextStroke?: string | number | undefined;
-}
-
-const markupCache = new Map<string, string>();
-const MARKUP_CACHE_CAP = 200;
-
-function num(value: number | string | undefined, fallback: number): number {
-  const parsed = typeof value === "string" ? parseFloat(value) : value;
-  return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function escapeAttr(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function parseTextStroke(value: string | number | undefined): { width: number; color: string } | undefined {
-  if (!value || typeof value !== "string") return undefined;
-  const match = value.trim().match(/^([\d.]+)px\s+(.+)$/);
-  if (!match) return undefined;
-  const width = parseFloat(match[1] ?? "0");
-  if (!Number.isFinite(width) || width <= 0) return undefined;
-  return { width: width * 2, color: (match[2] ?? "#000000").trim() };
-}
-
-/** One warped run's outline: an SVG path `d` in local box space (x∈[0,width], y∈[0,height]). */
-export interface WarpedTextPath {
-  d: string;
-  /** CSS fill colour. */
-  fill: string;
-  /** Optional stroke (width already resolved by `parseTextStroke`). Painted UNDER the fill. */
-  stroke?: { color: string; width: number };
-}
-
-/** Structured warp outlines + the local box they live in (the SVG viewBox / Path2D source space). */
-export interface WarpedTextPaths {
-  width: number;
-  height: number;
-  paths: WarpedTextPath[];
-}
-
-const pathsCache = new Map<string, WarpedTextPaths>();
-
 /**
- * Builds the warped-text glyph outlines as structured, `Path2D`-ready data (one entry per run colour)
- * in a local box of `width`×`height`. Returns `undefined` when warp is inactive or the font binary
- * isn't available — the caller then renders plain (unwarped) text, so warp degrades gracefully.
+ * ADR-023 D9a (2026-08-15) — the WARP consumer of this module is gone.
  *
- * This is the engine BOTH warp consumers share:
- *  - the DOM preview wraps it in an `<svg>` overlay (`buildWarpedTextPathSvg`);
- *  - the scene compositor + local export draw the paths via `Path2D` (`drawTextLayer` in text-shape.ts),
- *    which works on the main thread AND inside the export Worker — unlike `createImageBitmap(svgBlob)`,
- *    which Chrome can't decode (it throws `InvalidStateError`), so the old raster silently fell back to
- *    plain text in both the scene canvas and local export.
+ * `buildWarpedTextPaths` and `buildWarpedTextPathSvg` lived below. They laid text out with
+ * `opentype.js` `getPath()` and pushed the resulting bezier control points through the envelope.
+ * `getPath()` is glyph LOOKUP, not shaping: no cursive joining, no contextual forms, no reordering,
+ * no mark positioning. Every Arabic, Devanagari, Thai or Khmer warp it produced was wrong, silently,
+ * from the day warp shipped — which is why S0 had to detect those scripts and refuse warp outright
+ * (T-12), and why that gate is now deleted rather than disabled: warp rasterizes with the browser's
+ * shaper first and deforms the raster (`scene/text-warp-deform.ts`), so the gap is closed
+ * structurally rather than guarded.
  *
- * Async because the font binary may need to be fetched/parsed; memoized by content+style.
+ * **`opentype.js` itself stays, and this module with it** — `loadWarpFont` and the parse cache serve
+ * D2's name-table ingest, which reads a font's own idea of its family and style out of the binary.
+ * That is a legitimate use of a font PARSER. Deforming outlines was not, because a parser is not a
+ * shaper and the difference is invisible in Latin.
  */
-export async function buildWarpedTextPaths(
-  warp: TextWarp | undefined,
-  runs: TextRun[],
-  style: WarpTextStyleInput
-): Promise<WarpedTextPaths | undefined> {
-  if (!hasTextWarp(warp)) return undefined;
-  const text = runs.map((run) => run.text).join("");
-  if (!text.trim()) return undefined;
-  // S0 / ADR-023 T-12 (INTERIM — delete with the D9a rework): `getPath()` below is glyph lookup,
-  // not shaping, so a shaping-dependent script would come out with the wrong glyphs. Refuse here,
-  // at the one choke point BOTH renderers share, so the editor and the export suppress warp
-  // identically; the editor surfaces the refusal (`isTextWarpSuppressed`).
-  if (detectTextScript(text).shapingDependent) return undefined;
-
-  const family = primaryFontFamily(style.fontFamily);
-  const fontSize = num(style.fontSize, 48);
-  const fontWeight = num(style.fontWeight, 400);
-  const normalized = normalizeTextWarp(warp);
-  const stroke = parseTextStroke(style.WebkitTextStroke);
-  const baseColor = style.color ?? "#ffffff";
-
-  const cacheKey = JSON.stringify([
-    family,
-    fontWeight,
-    Math.round(fontSize),
-    normalized,
-    baseColor,
-    stroke,
-    runs.map((run) => [run.text, run.color ?? "", run.fontSizeMultiplier ?? 1])
-  ]);
-  const cached = pathsCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  const font = await loadWarpFont(family, fontWeight);
-  if (!font) return undefined;
-
-  const scale = fontSize / font.unitsPerEm;
-  const ascent = font.ascender * scale;
-  const descent = -font.descender * scale;
-  const height = ascent + descent;
-
-  // Pass 1: total advance width (so the envelope box is known before warping).
-  let totalWidth = 0;
-  for (const run of runs) {
-    const runSize = run.fontSizeMultiplier ? fontSize * run.fontSizeMultiplier : fontSize;
-    totalWidth += font.getAdvanceWidth(run.text, runSize);
-  }
-
-  const bounds: WarpBounds = { x0: 0, width: totalWidth, top: 0, height, baseline: ascent };
-
-  // Pass 2: lay out + warp each run, emit one path per run colour.
-  let cursor = 0;
-  const paths: WarpedTextPath[] = [];
-  for (const run of runs) {
-    if (!run.text) continue;
-    const runSize = run.fontSizeMultiplier ? fontSize * run.fontSizeMultiplier : fontSize;
-    const path = font.getPath(run.text, cursor, ascent, runSize);
-    cursor += font.getAdvanceWidth(run.text, runSize);
-    const d = warpPathCommands(path.commands, bounds, normalized, fontSize);
-    if (!d) continue;
-    paths.push({ d, fill: run.color ?? baseColor, ...(stroke ? { stroke } : {}) });
-  }
-  if (!paths.length) return undefined;
-
-  const result: WarpedTextPaths = { width: totalWidth, height, paths };
-  if (pathsCache.size > MARKUP_CACHE_CAP) {
-    const firstKey = pathsCache.keys().next().value;
-    if (firstKey !== undefined) pathsCache.delete(firstKey);
-  }
-  pathsCache.set(cacheKey, result);
-  return result;
-}
-
-/**
- * Builds the warped-text SVG overlay markup (absolutely-positioned `<svg>` with one `<path>` per run)
- * for the DOM preview. Thin wrapper over {@link buildWarpedTextPaths}.
- */
-export async function buildWarpedTextPathSvg(
-  warp: TextWarp | undefined,
-  runs: TextRun[],
-  style: WarpTextStyleInput
-): Promise<string | undefined> {
-  const data = await buildWarpedTextPaths(warp, runs, style);
-  if (!data) return undefined;
-
-  const cacheKey = `svg:${data.width}:${data.height}:${(style.textAlign ?? "center").toLowerCase()}:${data.paths.map((p) => p.d.length).join(",")}:${data.paths.map((p) => p.fill).join(",")}`;
-  const memo = markupCache.get(cacheKey);
-  if (memo !== undefined) return memo;
-
-  const align = (style.textAlign ?? "center").toLowerCase();
-  const anchor = align === "left" || align === "start" ? "left" : align === "right" || align === "end" ? "right" : "center";
-  const horizontal = anchor === "left" ? "left:0;" : anchor === "right" ? "right:0;" : "left:50%;transform:translateX(-50%);";
-  // The nominal box is width x height in local coords; warp overflow is allowed to paint outside via
-  // overflow:visible. Vertically centred on the text content box.
-  const overlayStyle =
-    `position:absolute;top:50%;${horizontal}` +
-    `${anchor === "center" ? "transform:translate(-50%,-50%);" : "transform:translateY(-50%);"}` +
-    `width:${data.width}px;height:${data.height}px;overflow:visible;pointer-events:none;`;
-
-  const pathTags = data.paths
-    .map((p) => {
-      const strokeAttrs = p.stroke ? ` stroke="${escapeAttr(p.stroke.color)}" stroke-width="${p.stroke.width}" paint-order="stroke"` : "";
-      return `<path d="${p.d}" fill="${escapeAttr(p.fill)}"${strokeAttrs}/>`;
-    })
-    .join("");
-
-  // `xmlns` lets the markup also rasterize as a standalone document (an `<img src=blob>`); inline DOM
-  // use infers the namespace, but the standalone path silently fails without it.
-  const markup =
-    `<svg xmlns="http://www.w3.org/2000/svg" class="warp-text-path" aria-hidden="true" focusable="false" ` +
-    `viewBox="0 0 ${data.width} ${data.height}" preserveAspectRatio="none" style="${overlayStyle}">${pathTags}</svg>`;
-
-  if (markupCache.size > MARKUP_CACHE_CAP) {
-    const firstKey = markupCache.keys().next().value;
-    if (firstKey !== undefined) markupCache.delete(firstKey);
-  }
-  markupCache.set(cacheKey, markup);
-  return markup;
-}
