@@ -1,7 +1,9 @@
 # ADR-021 — The frame-provider seam: sources are pulled, not bridged into fake timeline clips
 
 - Status: **Accepted** (normative). The DECISION (§2) and the seam (§4) are accepted and not
-  provisional; the MEASURED LIMITS (§3) are **Provisional until step 2 ships**. See §8.
+  provisional. The MEASURED LIMITS (§3) were "Provisional until step 2 ships"; **step 2 shipped
+  2026-08-15** and they are now **tested at N=12 on real footage in a real tab, untested above it** —
+  the lift is partial and scoped, see **§8.1**, which also records what the gate did NOT license.
 - Date drafted: 2026-08-10
 - Date accepted: 2026-08-10
 - Governed by: `FLAREX_IMPLEMENTATION_GOVERNANCE.md`
@@ -337,6 +339,12 @@ hurts. Win: **the loader ceiling of 3 disappears** — the 4th MediaIn stops bei
 (DEBT-013 clause (a)). Must ship with the I-P6 memory budget, because §3.2(a) says an unbounded
 provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 
+> **SHIPPED 2026-08-15.** Measured 3 → 12 concurrently rendering loaders on one wired comp, 0 denials,
+> 0 evictions, 706 MB peak of a 768 MB budget, with the pool arm exhibiting its own ceiling in the same
+> run. The I-P6 budget is bytes, never a count, as required. Full result and its limits: **§8.1** — in
+> particular, 12 sources acquire but do not stay temporally coherent under playback, which is §7
+> behaving as documented and is not a regression.
+
 **Step 3 — The caches behind the seam. There are TWO, and they are different objects.**
 
 - **3a — the node-output cache**, keyed on the ADR-009 hashes that already exist and already drive
@@ -349,6 +357,36 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 
   Each ships a win alone and 3b does not depend on 3a: a frame cache is keyed on the whole graph's
   hash and needs no per-node reuse.
+
+> **SCOPING FINDING, 2026-08-15 — 3a APPEARS TO BE ALREADY SHIPPED, and this needs a founder ruling
+> rather than an implementer's assumption. Recorded, deliberately NOT acted on.**
+>
+> Scoping 3a after step 2 landed turned up not one but two shipped mechanisms that together look like
+> the whole of its stated win, both predating this ADR and both delivered by the evaluation-engine and
+> kernel work §0 says this ADR does not reopen:
+>
+> 1. **The content-addressed materialization cache** (evaluation engine, Slice 2). `compile-flarex.ts`
+>    stamps `contentHash` — "the pure NodeContentHash" — on cacheable artifacts and deliberately leaves
+>    it unset where a stale hit is possible (unversioned or live-media sources); `scene-compositor.ts`
+>    consumes it; `flarex-node-thumbnails.ts` keys on `(ContractVersion, contentHash)`, which is the
+>    "hashes that already exist and already drive node thumbnails" this step names as its input.
+>    It has its own cross-frame parity gate, `flarex:cache-gate`, which asserts warm-vs-cold pixel
+>    identity AND that a static comp actually registers hits ("a cache that never hits is trivially
+>    parity-clean and completely worthless").
+> 2. **Per-node incremental reuse** (ADR-012 slices S6.4/S6.5/S6.6, `playback/incremental-evaluation.ts`),
+>    live and unconditional in `ScenePreviewCanvas`'s composite path, driven by the same
+>    `dependency-graph.ts` closure §3.2(c) measured, over content/context/time/source axes.
+>
+> **So the risk this note exists to prevent is a THIRD cache.** §6 as written sends the next implementer
+> to build 3a from scratch; on this evidence the work is to *verify 3a's win against the mechanisms
+> already in the tree* and close the step, or to name precisely what they do not cover. What is NOT
+> claimed here: that the shipped keys are the ones I-P7 specifies (they are not — the shipped node reuse
+> keys on `nodeId@time` with axis invalidation, not on `(ContractVersion, ContextVersion,
+> NodeContentHash)`), nor that the 92–95% edit-reuse figure has been re-measured on the live editor.
+> Both are cheap to settle and neither was settled tonight.
+>
+> **3b is unaffected and is genuinely absent** — a search for a composited-output cache finds nothing.
+> It remains the real remaining half of step 3, with I-P9's eviction ruling attached.
 
 > ~~Claimed for editing only; §3.2(c) forbids claiming it for playback.~~ — the blanket form of this
 > is superseded; it holds for 3a and not for 3b. See §3.2(c′).
@@ -401,6 +439,57 @@ and they are not yet product evidence.
 What would revise them: whether a memory-budgeted provider set holds a **real** comp with **real**
 footage inside a browser tab. That is step 2's own gate. If it fails, §3.2(a) and §3.5 change and
 the decision does not.
+
+### 8.1 STEP 2 SHIPPED, 2026-08-15 — what the gate returned, and what it does NOT license
+
+**Status of §3.1–§3.5 is now: tested at N=12 on real footage in a real tab, and NOT tested above it.**
+The blanket "Provisional" is lifted only as far as the evidence reaches, which is a smaller distance
+than "step 2 ships" was originally written to imply. Read each line for its own scope.
+
+Measured by `apps/worker/src/flarex-loader-ceiling-probe.ts`, 12 distinct real project renders bound as
+asset-source `MediaIn`s on ONE comp, wired through a Merge chain so every source is reachable from
+`MediaOut`, real Chrome (`PIXEL_BROWSER_CHANNEL=chrome`), both arms on the identical fixture:
+
+| arm | rendering | admission | budget |
+|---|---|---|---|
+| session pool (BEFORE) | **3** of 12 | `capMisses 29`, 9 loaders → `<video>` | n/a |
+| byte-budgeted seam (AFTER) | **12** of 12 | 0 denials, 0 element fallbacks | peak **706 MB / 768 MB**, **0 evictions** |
+
+**What this DOES establish.** §3.1's claim that the seam removes the session cliff, at N=12: the pool
+arm exhibits its own 3-loader ceiling in the same run, so the comparison is against a measured defect
+rather than a quoted constant. DEBT-013 clause (a)'s namesake defect — a 4th MediaIn denied at mount —
+is gone at this admission authority, and the budget never had to evict to achieve it.
+
+**What this does NOT establish, stated because the numbers invite the stronger reading.**
+
+- **§3.2(a)'s ~25 MB per live source is UNTESTED by this run.** What held is the budget's own
+  *accounting* (`heldBytes` against `budgetBytes`), which is a charge model, not a measurement of the
+  tab. No `chrome.exe` working set was sampled here. The residency ladder in
+  `plans/adr-021-pull-model-feasibility.md` remains the only evidence for the physical figure, and it
+  was taken through the export path.
+- **12 sources ACQUIRE; they do not stay COHERENT under playback.** In the playing arm all 12 present a
+  picture, but only 3 read `state=ok` — the other 9 read `stale`, up to **1728 ms** behind. Paused, all
+  12 are coherent at `staleMs 0`. This is exactly §7's boundary and it is worth restating here because
+  a "12 of 12 rendering" headline reads like a throughput result: **the seam fixes acquisition, and
+  acquisition was not the slow thing.** Twelve concurrent software 1080p decoders do not hold 24 fps on
+  this machine, and nothing in this step claimed they would.
+- **§3.5's decoder-count ceiling between N=50 and N=100 is untouched** — N=12 says nothing about it.
+
+**A defect the step FOUND rather than introduced, and its fix ships here.** Removing the admission
+ceiling exposed a dropped-request path in the consumer that the ceiling had been hiding: when a layer's
+provider is swapped mid-decode (remount, `src` flip to the ingest-proxy variant), `WebglMediaLayer`
+correctly discarded the answer and then **re-asked for nothing**, so the loader waited on a request only
+the playback rAF loop would ever re-issue. Paused, there is no such loop and the loader stayed dark
+permanently. Attributed on a one-line control, paused, single variable:
+
+| | rendering | presented | providerChanged | host substitutions |
+|---|---|---|---|---|
+| without the re-arm | **1** of 12 | 2 | 22 | 1854 |
+| with the re-arm | **12** of 12 | 42 | 18 | 79 |
+
+The path predates this ADR; under the session pool the 9 losing loaders were denied a provider and took
+the `<video>` path, so they never reached the race. Fixed on the CONSUMER's path (a paced re-request),
+not by exempting the provider from the identity check — the repair DEBT-009 rules out.
 
 ---
 
