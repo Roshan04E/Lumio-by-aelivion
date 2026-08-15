@@ -19,6 +19,7 @@
     "textstyle:schema": "tsx src/text-style-schema.test.ts",
     "color:test": "tsx src/color/color.test.ts",
     "idt:test": "tsx src/color/input-transform.test.ts",
+    "textmatte:test": "tsx src/flarex/text-matte.test.ts",
     "flarex:test": "tsx src/flarex/flarex.test.ts",
     "maskShape:test": "tsx src/flarex/animated-mask-shape.test.ts",
     "compproxy:test": "tsx src/scene/comp-proxy.test.ts",

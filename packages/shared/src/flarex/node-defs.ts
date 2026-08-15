@@ -47,6 +47,25 @@ export interface FlarexNodeDefinition {
    * term" without the hasher learning what a mask is (ADR-010 node-blindness).
    */
   trackParams?: readonly string[] | undefined;
+  /**
+   * Params naming a FONT FAMILY, for ADR-023 D11/T-8: the font's identity is an input to the content
+   * hash of any node whose output is rasterized text.
+   *
+   * Without it, a family name that resolves to different BYTES — a user font replaced in the store, a
+   * face installed after the first raster — produces new pixels under an unchanged key, and the
+   * stale hit renders the old font forever. D11 says the font hash is part of the key; T-8 makes it
+   * an obligation.
+   *
+   * **And it is deliberately NOT satisfied by the `document.fonts` listener alone.** That listener is
+   * a LIVENESS signal, and this repo has a named class for correctness resting on one (DEBT-009,
+   * whose fourth instance was a pinned font never reaching the glyphs because a debounced
+   * notification lost a race). The listener may make the picture refresh SOONER; the key is what
+   * makes it refresh AT ALL.
+   *
+   * Declared here and read uniformly, like `trackParams` above, so the hasher never learns what a
+   * text node is (ADR-010 node-blindness).
+   */
+  fontParams?: readonly string[] | undefined;
   /** Phase gating: nodes past the current ship phase stay out of the palette. */
   phase: 1 | 1.5 | 2;
 }
@@ -601,7 +620,13 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     label: "Text+",
     group: "generator",
     inputs: [],
-    outputs: OUT,
+    /**
+     * ADR-023 D9 (S7 half A): Text+ emits a MATTE as well as an image, which is what makes "video
+     * inside text" an ordinary graph rather than a feature. The matte is the glyph coverage, so
+     * `matteControl`, the keyer's garbage/hold-out sockets and every masked node consume it with no
+     * new vocabulary at all — the point D9 makes about widening the VALUE rather than adding nodes.
+     */
+    outputs: [...OUT, { id: "matte", type: "matte", label: "Matte" }],
     params: z.object({
       content: z.string().default("Text"),
       fontFamily: z.string().default("Inter"),
@@ -627,6 +652,8 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     // once per content change (not per frame) by the shared text rasterizer. Stroke/shadow are the same
     // shape of param as fontSize (they change the raster, not the quad), so they stay unkeyframeable too.
     keyframeable: ["x", "y"],
+    // D11/T-8 — the family this node rasterizes with is part of its identity.
+    fontParams: ["fontFamily"],
     phase: 1,
   },
   background: {

@@ -59,7 +59,19 @@ function canonicalValue(value: unknown): string {
  * hash VALUE is identity-free — two structurally identical nodes (same type/params/upstream content)
  * hash equal regardless of their ids.
  */
-export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number): Map<string, string> {
+/**
+ * ADR-023 D11/T-8 — resolve a font FAMILY to the identity of the bytes it will actually rasterize
+ * with (a `fileHash`, or any stable token for "these bytes"). Optional: a caller that supplies none
+ * gets exactly the hashes it got before this parameter existed, because the term is then empty
+ * rather than a placeholder. Absent stays absent (D1a), here as everywhere.
+ */
+export type FlarexFontIdentityResolver = (family: string) => string | undefined;
+
+export function computeFlarexContentHashes(
+  comp: FlarexComp,
+  timeSeconds: number,
+  resolveFontIdentity?: FlarexFontIdentityResolver
+): Map<string, string> {
   const nodes = comp.nodes;
 
   // to-socket → from-node (a socket accepts at most one wire; the healer enforces this).
@@ -119,6 +131,22 @@ export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number
       return typeof raw === "string" && raw !== "" && raw !== "[]";
     });
 
+    /**
+     * D11/T-8: the identity of the BYTES this node will rasterize with, not just the family NAME.
+     *
+     * Node-blind, like `animatedByTrack` above: the params to look at come from the definition, and
+     * this function still contains no per-node-type branch. Empty when no resolver is supplied or the
+     * family is unknown, so every existing caller hashes byte-identically to before.
+     */
+    const fontTokens = (def.fontParams ?? [])
+      .map((key) => {
+        const family = node.params[key];
+        if (typeof family !== "string" || !family) return "";
+        const identity = resolveFontIdentity?.(family);
+        return identity ? `${key}#${identity}` : "";
+      })
+      .filter(Boolean);
+
     // R3: upstream content hashes in the def's fixed socket order (topology + fan-in order).
     const upstreamTokens = def.inputs.map((input) => {
       const from = edgeInto.get(`${nodeId}:${input.id}`);
@@ -135,6 +163,9 @@ export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number
         paramTokens,
         upstreamTokens,
         animatedByTrack ? `t:${timeSeconds.toFixed(6)}` : "",
+        // Spread, not pushed as an array: an empty list contributes nothing at all, so a comp with no
+        // font-bearing node — or a caller with no resolver — hashes exactly as it did before D11.
+        ...fontTokens,
       ]),
     );
     hashes.set(nodeId, digest);
@@ -146,7 +177,7 @@ export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number
       digest,
       // The time term belongs in the LOCAL token too, or the frame report would blame an upstream child
       // for a change that is this node's own animating outline.
-      JSON.stringify([node.type, node.enabled, paramTokens, animatedByTrack ? `t:${timeSeconds.toFixed(6)}` : ""]),
+      JSON.stringify([node.type, node.enabled, paramTokens, animatedByTrack ? `t:${timeSeconds.toFixed(6)}` : "", ...fontTokens]),
     );
     return digest;
   };

@@ -45,6 +45,7 @@ registerBuiltinFragmentEffects();
 import { getCompositionColorPipeline } from "../composition-style";
 import { applyTrackAtTime, flarexMaskTrackOffsetPx, parseTrackingPathPayload, type TrackApplyMode, type TrackingPathArtifactData } from "../masks";
 
+import { makeCanvas2D } from "../scene/canvas-2d";
 import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
@@ -171,12 +172,39 @@ export interface FlarexLowerCtx {
    * whose track was deleted. Omitted → every Tracker passes through (the Phase-1 behaviour).
    */
   resolveTrackingPath?: ((trackingPathId: string) => TrackingPathArtifactData | null) | undefined;
+  /**
+   * ADR-023 D11/T-8 — resolve a font family to the identity of the bytes it rasterizes with, so a
+   * Text+ node's content hash changes when its FONT changes and not merely when its family NAME does.
+   * Omitted → the term is empty and every hash is exactly what it was before D11, which is the same
+   * absent-stays-absent rule the rest of this programme runs on.
+   */
+  resolveFontIdentity?: ((family: string) => string | undefined) | undefined;
 }
 
 type FlarexImageValue = SceneLayerDraw | SceneGroupDraw;
-/** Matte values stay VECTOR (`Mask[]`) until applied to an image, so MatteControl combines
- *  losslessly through the same multi-mask compositing the mask rasterizer already does. */
-type FlarexMatteValue = { masks: Mask[] };
+/**
+ * A matte is EITHER vector or raster (ADR-023 D9, accepted 2026-08-15 once the OQ1 spike cleared it).
+ *
+ * Vector chains stay vector and combine losslessly, exactly as before: MatteControl unions, subtracts
+ * and feathers `Mask[]` in vector space and the rasterizer composites the list once, at the end. That
+ * is T-7 and it is unchanged — a graph built only from shape masks produces byte-identical output to
+ * the day before this union existed.
+ *
+ * The raster arm exists because some coverage has no outline. Text is the first: glyphs are shaped by
+ * the browser and rasterized, and there is no `Mask[]` that describes them (that is the same fact D9a
+ * acted on one stage earlier, from the other side).
+ *
+ * **Why this does not violate T-7, measured rather than assumed.** The OQ1 spike enumerated all eight
+ * `matteInput` call sites: six of them (`color`, `filter`, `merge`, `blur`, keyer `garbage`, keyer
+ * `holdOut`) call `rasterizeMatte` the instant they receive the value. A raster arm cannot make those
+ * rasterize EARLIER, because they are already the point of rasterization. Only `matteControl`
+ * preserves vector, and it degrades to a raster combine only when one of its own inputs is genuinely
+ * a raster — which is "rasterization happens at the point a raster is introduced, and no earlier",
+ * i.e. T-7 stated exactly.
+ */
+type FlarexMatteValue =
+  | { kind: "vector"; masks: Mask[] }
+  | { kind: "raster"; tex: TexImageSource; version: number | undefined };
 /** Exported only because `FlarexLowerCtx.reuseValue` already puts it on the public surface
  *  structurally (S6.6) — a caller that has to RETURN one needs to be able to name it. */
 export type FlarexValue = { kind: "image"; draw: FlarexImageValue } | { kind: "matte"; matte: FlarexMatteValue };
@@ -498,14 +526,14 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   if (!mediaOut) return null;
 
   // to-socket → edge (a socket accepts at most one wire; the healer enforces endpoint validity).
-  const edgeInto = new Map<string, string>();
+  const edgeInto = new Map<string, { nodeId: string; socket: string }>();
   // from-node → number of consumer sockets reading its output (fan-out). The structural half of the
   // evaluator-owned materialize decision (ADR-008): a node feeding 2+ consumers seals ONCE so the
   // content cache (Slice 2, commit 3) can dedupe it, instead of the current clone-per-consumer.
   const fanout = new Map<string, number>();
   frameProfiler.bump("compile.maps", 2); // edgeInto + fanout (profiler-only temp-collection count)
   for (const edge of comp.edges) {
-    edgeInto.set(`${edge.to.nodeId}:${edge.to.socket}`, edge.from.nodeId);
+    edgeInto.set(`${edge.to.nodeId}:${edge.to.socket}`, { nodeId: edge.from.nodeId, socket: edge.from.socket });
     fanout.set(edge.from.nodeId, (fanout.get(edge.from.nodeId) ?? 0) + 1);
   }
 
@@ -539,7 +567,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // NodeContentHash (ADR-009 R1+R3, pure node content — resolution/time NOT folded in), stamped onto
   // sealed groups so the compositor can later key its artifact cache on content, not identity. Unread
   // until commit 3b → output is byte-identical today.
-  const contentHashes = frameProfiler.measure("evaluator.hash", () => computeFlarexContentHashes(comp, ctx.timeSeconds));
+  const contentHashes = frameProfiler.measure("evaluator.hash", () => computeFlarexContentHashes(comp, ctx.timeSeconds, ctx.resolveFontIdentity));
 
   /** Collect the SEMANTIC dependency declarations a built draw subtree reads (ADR-010) — the union of
    *  its fragment passes' declared `def.dependencies`, read as FACTS (never from GLSL; the registry
@@ -792,12 +820,83 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    * where `at` IS `ctx.timeSeconds`.
    */
   const rasterizeMatte = (matte: FlarexMatteValue, key: string, at: number): { tex: TexImageSource; version: number | undefined } | null => {
+    // D9: an already-raster matte IS the answer. This is the whole widening as far as the six
+    // rasterizing consumers are concerned — they asked for a texture, and one arm already has one.
+    if (matte.kind === "raster") return { tex: matte.tex, version: matte.version };
     const mc = ctx.matteCache;
     if (!mc || matte.masks.length === 0) return null;
     const layerLike = { id: key, masks: matte.masks, animations: [] } as unknown as TimelineLayer;
     const tex = mc.get(layerLike, at);
     if (!tex) return null;
     return { tex, version: mc.versionOf(key) };
+  };
+
+  /**
+   * D9 — combine two mattes in RASTER space, for the one case that needs it: MatteControl with a
+   * raster on at least one input.
+   *
+   * The operations are canvas 2D composite modes, chosen to match what the vector rasterizer's
+   * `Mask["mode"]` list means when it composites in order — `add` is a union, `subtract` removes B
+   * from A, `intersect` keeps the overlap, `exclude` is the symmetric difference. Feather is a blur,
+   * which is what feather already IS on the vector path too (`scene-mask-matte.ts:119-131` blurs the
+   * rasterized shape — the OQ1 spike's useful surprise was that there was never anything to port).
+   *
+   * NOT choke/spread. The spike measured the raster equivalent at 40.3 ms per 1080p frame through
+   * `getImageData`, and measured the tempting cheap version — blur then `contrast()` — leaving the
+   * 50% alpha crossing exactly where it started, i.e. not choking at all. Choke belongs in the GPU
+   * fragment-pass vocabulary the compositor already has, and is deliberately not smuggled in here at
+   * a cost nobody measured.
+   */
+  const combineMatteRasters = (
+    a: FlarexMatteValue | null,
+    b: FlarexMatteValue | null,
+    operation: Mask["mode"],
+    feather: number,
+    invert: boolean,
+    key: string,
+    at: number
+  ): FlarexMatteValue | null => {
+    const texA = a ? rasterizeMatte(a, `${key}_a`, at) : null;
+    const texB = b ? rasterizeMatte(b, `${key}_b`, at) : null;
+    if (!texA && !texB) return null;
+    if (!texB) return feather > 0 || invert ? blurAndInvertMatte(texA!, feather, invert) : { kind: "raster", ...texA! };
+    if (!texA) return feather > 0 || invert ? blurAndInvertMatte(texB!, feather, invert) : { kind: "raster", ...texB! };
+
+    const canvas = makeCanvas2D(ctx.compWidth, ctx.compHeight);
+    const c2d = canvas.getContext("2d") as CanvasRenderingContext2D | null;
+    if (!c2d) return { kind: "raster", ...texA };
+    c2d.drawImage(texA.tex as CanvasImageSource, 0, 0, ctx.compWidth, ctx.compHeight);
+    c2d.globalCompositeOperation =
+      operation === "subtract" ? "destination-out" : operation === "intersect" ? "destination-in" : operation === "exclude" ? "xor" : "source-over";
+    c2d.drawImage(texB.tex as CanvasImageSource, 0, 0, ctx.compWidth, ctx.compHeight);
+    c2d.globalCompositeOperation = "source-over";
+    return blurAndInvertMatte({ tex: canvas as unknown as TexImageSource, version: undefined }, feather, invert);
+  };
+
+  /** Feather (a blur) and invert, applied to a raster matte. Both are the raster-space spelling of
+   *  what the vector path does with `mask.feather` and `mask.inverted`. */
+  const blurAndInvertMatte = (
+    input: { tex: TexImageSource; version: number | undefined },
+    feather: number,
+    invert: boolean
+  ): FlarexMatteValue => {
+    if (feather <= 0 && !invert) return { kind: "raster", ...input };
+    const canvas = makeCanvas2D(ctx.compWidth, ctx.compHeight);
+    const c2d = canvas.getContext("2d") as CanvasRenderingContext2D | null;
+    if (!c2d) return { kind: "raster", ...input };
+    if (feather > 0) c2d.filter = `blur(${feather / 2}px)`;
+    c2d.drawImage(input.tex as CanvasImageSource, 0, 0, ctx.compWidth, ctx.compHeight);
+    c2d.filter = "none";
+    if (invert) {
+      c2d.globalCompositeOperation = "xor";
+      c2d.fillStyle = "#fff";
+      c2d.fillRect(0, 0, ctx.compWidth, ctx.compHeight);
+      c2d.globalCompositeOperation = "source-over";
+    }
+    // Version is undefined: this canvas is rebuilt per evaluation, so it must never claim a stable
+    // identity the compositor's texture cache would trust. An honest "I do not know" costs an upload;
+    // a fabricated version costs a stale frame, which is the DEBT-016 class.
+    return { kind: "raster", tex: canvas as unknown as TexImageSource, version: undefined };
   };
 
   const applyMatteToImage = (draw: FlarexImageValue, matte: FlarexMatteValue, key: string, at: number): FlarexImageValue => {
@@ -1195,10 +1294,25 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const inputValue = (node: FlarexNode, socket: string, timeSeconds: number): FlarexValue | null => {
     const from = edgeInto.get(`${node.id}:${socket}`);
     if (!from) return null;
-    const value = evalNode(from, timeSeconds);
+    const value = evalNode(from.nodeId, timeSeconds);
     if (!value) return null;
+    /**
+     * ADR-023 D9 — a node may now offer more than one output, and which SOCKET the wire left from
+     * decides what the consumer receives. `edgeInto` used to discard the from-socket entirely, which
+     * was correct while every node had exactly one output and is the reason this had to change.
+     *
+     * A `matte` output on an image-producing node (Text+) is its COVERAGE: the alpha of the raster it
+     * already built. No second rasterization, no second engine — the glyphs the image path draws and
+     * the glyphs the matte path masks with are the same pixels, which is the only way they can be
+     * guaranteed to agree.
+     */
+    if (from.socket === "matte" && value.kind === "image") {
+      const draw = value.draw;
+      if (isGroup(draw)) return null; // a group's coverage is not a single texture; nothing produces this today
+      return { kind: "matte", matte: { kind: "raster", tex: draw.source as TexImageSource, version: draw.sourceVersion } };
+    }
     // Per-consumer clone: wraps applied downstream must never mutate the shared memoized subtree.
-    return value.kind === "image" ? { kind: "image", draw: cloneImage(value.draw) } : { kind: "matte", matte: { masks: value.matte.masks } };
+    return value.kind === "image" ? { kind: "image", draw: cloneImage(value.draw) } : { kind: "matte", matte: value.matte.kind === "raster" ? value.matte : { kind: "vector", masks: value.matte.masks } };
   };
 
   const imageInput = (node: FlarexNode, socket: string, at: number): FlarexImageValue | null => {
@@ -1686,7 +1800,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         if (!pass) return { kind: "image", draw: input };
 
         const garbage = matteInput(node, "garbage", at);
-        if (garbage && garbage.masks.length > 0) {
+        if (garbage && (garbage.kind === "raster" || garbage.masks.length > 0)) {
           const raster = rasterizeMatte(garbage, `flarex_${comp.id}_${node.id}_garbage`, at);
           if (raster) {
             pass.garbageMatte = raster.tex;
@@ -1695,7 +1809,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         }
 
         const holdOut = matteInput(node, "holdOut", at);
-        if (holdOut && holdOut.masks.length > 0) {
+        if (holdOut && (holdOut.kind === "raster" || holdOut.masks.length > 0)) {
           const raster = rasterizeMatte(holdOut, `flarex_${comp.id}_${node.id}_holdout`, at);
           if (raster) {
             pass.holdOutMatte = raster.tex;
@@ -1739,7 +1853,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         mask.feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * Math.min(w, h) * 0.5;
         mask.inverted = bool(node, "invert");
         if (node.type === "rectMask") mask.cornerRadius = Math.max(0, Math.min(1, num(at, node, "cornerRadius", 0))) * Math.min(halfW, halfH);
-        return { kind: "matte", matte: { masks: [mask] } };
+        return { kind: "matte", matte: { kind: "vector", masks: [mask] } };
       }
 
       case "matteControl": {
@@ -1751,16 +1865,49 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         }
         const operation = str(node, "operation", "add") as Mask["mode"];
         const feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * Math.min(ctx.compWidth, ctx.compHeight) * 0.5;
-        const masks: Mask[] = [
-          ...(a?.masks ?? []),
-          ...(b?.masks ?? []).map((mask) => ({ ...mask, mode: operation })),
-        ].map((mask) => (feather > 0 ? { ...mask, feather: mask.feather + feather } : mask));
-        if (bool(node, "invert")) {
-          // Exact for add-combined mattes: full-frame ∖ union. (FLAREX.md documents the approximation
-          // for mixed-mode chains; the rasterizer composites in list order.)
-          return { kind: "matte", matte: { masks: complementMatte(masks, `flarex_${comp.id}_${node.id}`) } };
+
+        /**
+         * D9 — the ONLY node in the graph where the union costs anything, and the only one T-7 is
+         * actually about. Every other `matteInput` consumer rasterizes on entry (OQ1 spike: six of
+         * eight), so a raster arm changes nothing for them.
+         *
+         * Vector + vector stays VECTOR, byte-for-byte as before: the lists concatenate, the feather
+         * rides each mask, and the rasterizer composites once at the end. That is the lossless
+         * property T-7 protects, and it is protected by being the first branch rather than by a
+         * comment asking someone to preserve it.
+         *
+         * A raster on either input forces the combine into raster space — and that is not "early"
+         * rasterization, it is rasterization at the point a raster genuinely entered the chain, which
+         * is what T-7 says to do. The vector side is rasterized through the same cache it would have
+         * used at the next consumer anyway, so nothing rasterizes that was not going to.
+         */
+        if ((a?.kind ?? "vector") === "vector" && (b?.kind ?? "vector") === "vector") {
+          const masks: Mask[] = [
+            ...(a?.kind === "vector" ? a.masks : []),
+            ...(b?.kind === "vector" ? b.masks : []).map((mask) => ({ ...mask, mode: operation })),
+          ].map((mask) => (feather > 0 ? { ...mask, feather: mask.feather + feather } : mask));
+          if (bool(node, "invert")) {
+            // Exact for add-combined mattes: full-frame ∖ union. (FLAREX.md documents the approximation
+            // for mixed-mode chains; the rasterizer composites in list order.)
+            return { kind: "matte", matte: { kind: "vector", masks: complementMatte(masks, `flarex_${comp.id}_${node.id}`) } };
+          }
+          return { kind: "matte", matte: { kind: "vector", masks } };
         }
-        return { kind: "matte", matte: { masks } };
+
+        const combined = combineMatteRasters(
+          a,
+          b,
+          operation,
+          feather,
+          bool(node, "invert"),
+          `flarex_${comp.id}_${node.id}`,
+          at
+        );
+        if (!combined) {
+          degrade(at, node.id, "input-missing");
+          return null;
+        }
+        return { kind: "matte", matte: combined };
       }
 
       /**
@@ -1809,7 +1956,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         mask.feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * edgeScale;
         mask.expansion = Math.max(-1, Math.min(1, num(at, node, "expansion", 0))) * edgeScale;
         mask.inverted = bool(node, "invert");
-        return { kind: "matte", matte: { masks: [mask] } };
+        return { kind: "matte", matte: { kind: "vector", masks: [mask] } };
       }
 
       // Phase 1.5+ nodes (FLAREX.md): declared in node-defs for the palette/AI surface, but not
