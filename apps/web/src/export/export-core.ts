@@ -416,6 +416,8 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   // bloom/content-transform all render in export, which the retired canvas2D "frame" path never did). It
   // presents into the OffscreenCanvas the encode loop reads via `addVideoFrame(canvas)`.
   const getSrc = (id: string) => sources.get(id);
+  /** ADR-023 S5b: asset id -> render address for a glyph fill (see `buildSourceUrlMap`). */
+  const resolveAssetUrl = (assetId: string) => providerUrlMap[assetId]?.url;
   // Single-context resolved by the caller (main thread) — pass it explicitly so the Worker honors it (it can't
   // read the flag). Undefined falls through to the compositor's own flag read (main-thread direct calls).
   const diagnostics = input.workerSceneDiagnostics;
@@ -427,6 +429,7 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     );
   };
   const sceneOptions = {
+    resolveAssetUrl,
     ...(input.exportSingleContext != null ? { singleContext: input.exportSingleContext } : {}),
     ...(diagnostics?.stageProbes && diagnostics.sampleTimes?.length
       ? {
@@ -624,6 +627,15 @@ export function buildSourceUrlMap(
   }
   for (const track of composition.tracks) {
     for (const layer of track.layers) {
+      // ADR-023 S5b: a text/shape glyph FILL references a project image by id, which is not the layer's
+      // own `assetId`. Keyed by asset id like the Flarex asset-source entries above, for the same
+      // reason: it is an asset the composition names without any layer pointing its media at it. It is
+      // never an entry `activeSourceKeysAt` asks for, so no decoder is built for it — the raster fetches
+      // it through `ensureFillTexture`, and this map is only how the URL reaches the Worker.
+      if (layer.fillTextureAssetId && !map[layer.fillTextureAssetId]) {
+        const fillUrl = urlForAsset(layer.fillTextureAssetId);
+        if (fillUrl) map[layer.fillTextureAssetId] = { url: fillUrl, kind: "image" };
+      }
       if (layer.type === "image" && layer.graphic) {
         // Self-contained vector graphic: bake the recolored SVG data URL (same bake as preview/Remotion).
         // SMIL-animated ones additionally emit one deep-linked frame per cycle index, so the export can

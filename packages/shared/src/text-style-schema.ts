@@ -305,6 +305,61 @@ const fields = [
     presetable: true,
     documentation: { description: "CSS degrees: 0 = up, 90 = right. Absent = 180 (top to bottom)." }
   },
+  /**
+   * ADR-023 S5b — image fill on the glyphs, DECOMPOSED into three existing kinds.
+   *
+   * The stored value used to be a composite `{ assetId?, url, fit, scale }`, which the frozen ADR-003
+   * taxonomy cannot describe without a new kind or the `custom` hatch. ADR-003's own precedent settles
+   * it: *lut* is deliberately not a kind, it is `reference` + `number` (line 38). So the image is a
+   * `reference`/asset, the fit is an `enum`, the scale is a `number`.
+   *
+   * **This is why the field had no editor for four months and now has one for free.** S4b made
+   * `reference` a kind `PropertyFieldList` builds; before that, an asset picker meant a bespoke widget
+   * behind an escape hatch, which is exactly what the taxonomy exists to prevent accumulating.
+   *
+   * The `url` is not here and must not be: a reference serializes as an id, and a URL is that id
+   * resolved for one machine. `resolveFillTexture` does the resolving, once, in shared.
+   */
+  {
+    key: "fillTextureAssetId",
+    kind: "reference",
+    refType: "asset",
+    group: "fill",
+    label: "Image fill",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "A project image painted into the glyphs instead of the solid fill. Wins over a gradient.",
+      aiSynonyms: ["texture", "image fill", "pattern", "photo fill"]
+    }
+  },
+  {
+    key: "fillTextureFit",
+    kind: "enum",
+    group: "fill",
+    label: "Image fit",
+    options: [
+      { value: "cover", label: "Cover" },
+      { value: "tile", label: "Tile" }
+    ],
+    // Absent renders as `cover`, and carries no default for the D1a reason the S5 fields carry none:
+    // nothing may write it in, because the whole texture is absent-means-legacy.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: { description: "`cover` fills the element box; `tile` repeats at natural size." }
+  },
+  {
+    key: "fillTextureScale",
+    kind: "number",
+    min: 0.05,
+    max: 20,
+    step: 0.05,
+    group: "fill",
+    label: "Image scale",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: { description: "Zoom on top of the fit. Absent = 1." }
+  },
 
   // --- Background ----------------------------------------------------------------------------
   {

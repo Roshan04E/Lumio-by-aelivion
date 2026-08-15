@@ -240,6 +240,17 @@ export interface TextStyleFields {
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
   fillGradientAngle?: number | undefined;
+  /**
+   * ADR-023 S5b. Image fill on the glyphs — see {@link TimelineLayer.fillTextureAssetId}.
+   *
+   * It joins the look here because it always WAS one; it had simply never joined this interface, so
+   * S4's two-way constraint could not see it and Save Style dropped it silently (T-15 addendum 2).
+   * The constraint was never wrong — it proved the presetable set equals `TextStyleFields`, and this
+   * was not in `TextStyleFields`. That is the half a reader has to check separately, every time.
+   */
+  fillTextureAssetId?: string | undefined;
+  fillTextureFit?: "cover" | "tile" | undefined;
+  fillTextureScale?: number | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
@@ -994,12 +1005,32 @@ export interface TimelineLayer {
   trackMatte?: { mode: "alpha" | "luma"; invert?: boolean | undefined } | undefined;
   /**
    * Texture fill (D2, text + shape layers): the glyphs / shape body paint with an IMAGE instead of the
-   * solid color. `url` must be fetch-decodable in every renderer (durable http(s)/data: for cloud
-   * renders — same caveat as matte uris); `assetId` records provenance for the editor. `cover` scales
-   * the image to fill the element box (`scale` zooms it further); `tile` repeats it at natural size ×
-   * `scale`. Applied as a canvas pattern inside the shared rasterizer, so all renderers agree.
+   * solid colour. Applied as a canvas pattern inside the shared rasterizer, so all renderers agree.
+   *
+   * **DECOMPOSED in ADR-023 S5b, from `{ assetId?, url, fit, scale }`.** The composite could not be
+   * described by the frozen ADR-003 taxonomy without either a new kind or the `custom` hatch, and
+   * ADR-003's own precedent says not to reach for either: *lut* is deliberately not a kind, it is
+   * `reference` + `number` (ADR-003 line 38). So the image is a `reference`/asset, the fit is an
+   * `enum` and the scale is a `number` — three fields the renderer already builds, which is what makes
+   * this a picker rather than a bespoke widget (S4b, `279a616`).
+   *
+   * **The `url` did not survive, and that is the decomposition working rather than losing something.**
+   * A reference serializes as an id (ADR-003); a URL is a machine- and account-specific *resolution* of
+   * that id, which is exactly what must NOT be baked into project data a preset will carry to another
+   * machine. The render address is resolved once, in shared, by
+   * `CompositionStyleOptions.resolveAssetUrl` — the same "resolve once and hand both paths the same
+   * concrete answer" shape T-13 was corrected into. What is genuinely narrowed: a fill must now be a
+   * project asset rather than an arbitrary URL. Nothing could author an arbitrary URL (there was no
+   * editor at all), so no capability a user had is gone, and fills now inherit the local-first asset
+   * doctrine for free.
+   *
+   * **ABSENT MEANS NO TEXTURE, permanently and without migration** — the D1a shape. There is no legacy
+   * data to migrate: nothing ever wrote the composite.
    */
-  fillTexture?: { assetId?: string | undefined; url: string; fit: "cover" | "tile"; scale?: number | undefined } | undefined;
+  fillTextureAssetId?: string | undefined;
+  /** `cover` scales the image to fill the element box (× `scale`); `tile` repeats it at natural size × `scale`. */
+  fillTextureFit?: "cover" | "tile" | undefined;
+  fillTextureScale?: number | undefined;
   /**
    * Clip markers (Premiere-style): `timeSeconds` is CLIP-LOCAL (0 = clip head), so markers travel
    * with the clip on move and stay glued to content. Editor-only — no render effect. The `M` key

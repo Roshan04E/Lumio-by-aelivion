@@ -31,6 +31,7 @@ import {
   ArrowLeftRight,
   Blend,
   CaseSensitive,
+  Image as ImageIcon,
   Eye,
   Layers,
   Maximize2,
@@ -42,7 +43,8 @@ import {
   RotateCw,
   Rows3,
   Sparkles,
-  Square
+  Square,
+  ZoomIn
 } from "lucide-react";
 import { textStyleSchema, type TextStyleSchemaKey, type TimelineLayer } from "@orreris/shared";
 import { buildBackgroundColor, parseBackgroundColor } from "../../lib/colorBackground";
@@ -99,6 +101,20 @@ export interface TextStyleFontReference {
   onReset: () => void;
 }
 
+/**
+ * S5b — the image fill's domain values and writes. The adapter shapes them into a `reference` field;
+ * the renderer picks the editor from `refType`. Same division as the font row since S4b.
+ */
+export interface TextStyleFillTextureReference {
+  assetId: string | undefined;
+  /** The media pool, for resolution — the same list the bin shows, never a copy that can go stale. */
+  assets: Array<{ id: string; fileName: string; thumbnailUrl?: string | undefined }>;
+  /** `undefined` clears the whole fill (image, fit and scale together). */
+  onPick: (assetId: string | undefined) => void;
+  /** Opens the pool in pick-one mode. Absent → the trigger is inert, exactly as the kind documents. */
+  onBrowse?: (() => void) | undefined;
+}
+
 export interface TextStyleAdapterContext {
   layer: TimelineLayer;
   palette: string[];
@@ -109,6 +125,11 @@ export interface TextStyleAdapterContext {
   setShadowEnabled: (layer: TimelineLayer, enabled: boolean) => TimelineLayer;
   /** Absent → no font row, exactly as an absent slot means no row. */
   font?: TextStyleFontReference | undefined;
+  /**
+   * S5b — the image-fill reference: the media pool to resolve against, and how to write a pick.
+   * Absent → no fill rows, the same "an absent slot means no row" rule the font follows.
+   */
+  fillTexture?: TextStyleFillTextureReference | undefined;
   slots: Partial<Record<TextStyleSlotKey, ReactNode>>;
 }
 
@@ -341,6 +362,62 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
       ...boundsOf("fillGradientAngle", { min: 0, max: 360, step: 1 }),
       onReset: () => onChange((item) => ({ ...item, fillGradientAngle: undefined })),
       onChange: (value) => onChange((item) => ({ ...item, fillGradientAngle: value }))
+    };
+  }
+
+  /**
+   * S5b / ADR-023 — image fill on the glyphs, as `reference`/asset + `enum` + `number`.
+   *
+   * **The picker is not written here, and that is the whole point of the stage's cost.** S4b made
+   * `reference` a kind `PropertyFieldList` builds, so the adapter says what the id points at and the
+   * renderer supplies the editor. Before S4b this row was a bespoke widget behind an escape hatch,
+   * which is the reason `fillTexture` shipped in July with a renderer and no way to author it.
+   *
+   * The resolver reads the SAME media pool the bin shows, so a fill and the bin can never disagree
+   * about which image an id names, and an id the pool no longer holds resolves to the kind's shared
+   * `missing` state rather than to silence.
+   */
+  if (ctx.fillTexture) {
+    const { assetId, assets, onPick, onBrowse } = ctx.fillTexture;
+    fields.fillTextureAssetId = {
+      kind: "reference",
+      refType: "asset",
+      key: "fillTextureAssetId",
+      label: labelOf("fillTextureAssetId", "Image fill"),
+      icon: <ImageIcon size={14} />,
+      refId: assetId ?? "",
+      emptyLabel: "None",
+      resolve: (refId) => {
+        const asset = assets.find((entry) => entry.id === refId);
+        if (!asset) return null;
+        return { label: asset.fileName, missing: false, ...(asset.thumbnailUrl ? { thumbnailUrl: asset.thumbnailUrl } : {}) };
+      },
+      ...(onBrowse ? { onBrowse } : {}),
+      // Clearing drops the whole fill, fit and scale included: a fit with no image is an invisible
+      // half-value in saved data, and the same rule the gradient's Reset follows.
+      onClear: () => onPick(undefined)
+    };
+    fields.fillTextureFit = {
+      kind: "enum",
+      key: "fillTextureFit",
+      label: labelOf("fillTextureFit", "Image fit"),
+      icon: <Maximize2 size={14} />,
+      value: layer.fillTextureFit ?? "cover",
+      options: [
+        { value: "cover", label: "Cover" },
+        { value: "tile", label: "Tile" }
+      ],
+      onChange: (value) => onChange((item) => ({ ...item, fillTextureFit: value === "tile" ? "tile" : undefined }))
+    };
+    fields.fillTextureScale = {
+      kind: "number",
+      key: "fillTextureScale",
+      label: labelOf("fillTextureScale", "Image scale"),
+      icon: <ZoomIn size={14} />,
+      value: layer.fillTextureScale ?? 1,
+      ...boundsOf("fillTextureScale", { min: 0.05, max: 20, step: 0.05 }),
+      onReset: () => onChange((item) => ({ ...item, fillTextureScale: undefined })),
+      onChange: (value) => onChange((item) => ({ ...item, fillTextureScale: value === 1 ? undefined : value }))
     };
   }
 

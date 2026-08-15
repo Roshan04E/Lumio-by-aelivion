@@ -231,11 +231,15 @@ class SceneController {
     private readonly nestedGroups?: ReadonlyMap<string, NestedGroupSpec>,
     // Flarex node comps (FLAREX.md), carried verbatim on the manifest — `buildSceneDraws` lowers a
     // `flarexCompId` clip's draw through the shared compiler, same as preview/local export.
-    private readonly flarexComps?: Record<string, FlarexComp>
+    private readonly flarexComps?: Record<string, FlarexComp>,
+    // ADR-023 S5b: asset id -> render address, for a text/shape glyph fill. `manifest.assets` already
+    // carries every referenced asset's `fileUrl` (`buildRenderManifest` now collects the fill's id
+    // alongside each layer's own), so this is a lookup, not a fetch.
+    private readonly resolveAssetUrl?: (assetId: string) => string | undefined
   ) {
     this.compositor = new SceneCompositor(canvas, width, height);
     this.matteCache = new SceneMaskMatteCache(width, height);
-    this.rasterizer = new SceneTextRasterizer();
+    this.rasterizer = new SceneTextRasterizer(undefined, { resolveAssetUrl: this.resolveAssetUrl });
   }
 
   private mediaRendererFor(id: string): MediaWebGLRenderer {
@@ -661,6 +665,12 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     }));
   }, [sorted, manifest.flarexComps, manifest.assets]);
 
+  /** ADR-023 S5b: asset id -> `fileUrl`, for a text/shape glyph fill's `reference`. */
+  const assetUrlById = useMemo(() => {
+    const byId = new Map(manifest.assets.map((asset) => [asset.id, asset.fileUrl]));
+    return (assetId: string) => byId.get(assetId);
+  }, [manifest.assets]);
+
   const adjustments = useMemo(() => sorted.filter((l) => l.type === "adjustment"), [sorted]);
   const audioLayers = useMemo(() => sorted.filter((l) => l.type === "audio" && l.assetUrl), [sorted]);
   // Media layers carry their own Sequence (with post-roll) so OffthreadVideo gets the correct source time and
@@ -709,7 +719,8 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
         manifest.regionPassModel ?? false,
         normalizeProjectColorSettings(manifest.output.color).effectLight,
         nestedGroups,
-        manifest.flarexComps
+        manifest.flarexComps,
+        assetUrlById
       );
     } catch (error) {
       console.error("SceneStage: SceneCompositor init failed", error);

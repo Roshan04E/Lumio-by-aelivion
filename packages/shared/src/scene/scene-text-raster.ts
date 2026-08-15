@@ -25,12 +25,14 @@ import {
   ensureFillTexture,
   measureOverlayBox,
   overlayOverhangMargin,
+  type OverlayStyleOptions,
 } from "./text-shape";
 import {
   getCompositionShapeStyle,
   getCompositionTextStyle,
   getCompositionTransform,
   getVisibleTextRuns,
+  parseFillTexture,
 } from "../composition-style";
 import type { TimelineLayer } from "../types";
 import { makeCanvas2D, type AnyCanvas2D, type Ctx2D } from "./canvas-2d";
@@ -107,8 +109,18 @@ export class SceneTextRasterizer {
     }, 150);
   };
 
-  /** @param onReady called when an async raster lands, so the caller can re-arm its draw loop. */
-  constructor(private readonly onReady?: () => void) {
+  /**
+   * @param onReady called when an async raster lands, so the caller can re-arm its draw loop.
+   * @param styleOptions ADR-023 S5b — app-supplied style resolution, today the asset id → URL step an
+   *   image fill needs. `packages/shared` cannot look a project asset up for itself, and the alternative
+   *   to being handed a resolver is a module-level registry, which is the shape ADR-023 §1 records as
+   *   having shipped EMPTY and silently rendered every warped layer in the wrong font. A caller that
+   *   omits it simply has no image fills, which is the same picture as a layer with none.
+   */
+  constructor(
+    private readonly onReady?: () => void,
+    private readonly styleOptions: OverlayStyleOptions = {}
+  ) {
     if (typeof document !== "undefined" && (document as Document).fonts) {
       const fonts = (document as Document).fonts;
       fonts.ready.then(this.onFonts).catch(() => undefined);
@@ -134,16 +146,19 @@ export class SceneTextRasterizer {
       // EVERY run field that changes drawn pixels must key the cache (bold/italic/highlight/font
       // were missing — a rich-text edit or a source-text keyframe crossing wouldn't re-raster).
       const runs = getVisibleTextRuns(layer, t).map((r) => [r.text, r.color, r.backgroundColor, r.bold, r.italic, r.fontFamily, r.fontSizeMultiplier]);
-      const style = contentStyleForKey(getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>);
+      const style = contentStyleForKey(getCompositionTextStyle(layer, { currentTimeSeconds: t, ...this.styleOptions }) as Record<string, unknown>);
       // textWarp is NOT part of getCompositionTextStyle (it's a vector overlay, not a CSS style), so it
       // MUST be in the key explicitly — otherwise applying/changing warp doesn't invalidate the cached
       // raster and the stale plain text persists (drawTextLayer renders warp, returns early — no double).
-      // fillTexture (D2) is a top-level layer field (not in the style bag) — key it explicitly, like
-      // textWarp, or changing/removing the texture would keep serving the stale raster.
-      return JSON.stringify(["text", width, height, bucket, boxMode, this.fontsVersion, runs, style, layer.textWarp ?? null, layer.fillTexture ?? null]);
+      //
+      // ADR-023 S5b: `fillTexture` used to need the same explicit treatment and no longer does. It is
+      // EMITTED into the style now (resolved id → url), so it is keyed because everything emitted is
+      // keyed — one less hand-written list of "things that also change the picture", which is the class
+      // of list T-15 is about. `textWarp` remains the last one.
+      return JSON.stringify(["text", width, height, bucket, boxMode, this.fontsVersion, runs, style, layer.textWarp ?? null]);
     }
-    const style = contentStyleForKey(getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>);
-    return JSON.stringify(["shape", width, height, bucket, boxMode, this.fontsVersion, style, layer.fillTexture ?? null]);
+    const style = contentStyleForKey(getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...this.styleOptions }) as Record<string, unknown>);
+    return JSON.stringify(["shape", width, height, bucket, boxMode, this.fontsVersion, style]);
   }
 
   /** Power-of-two bucket of the layer's displayed scale at `t` (the resolution-aware re-raster step). */
@@ -254,15 +269,21 @@ export class SceneTextRasterizer {
     // decode is awaited here — same pattern as fonts. The await resolves only after the decode ATTEMPT
     // finishes, so the raster always reflects the final state: decoded image, or the solid-color
     // fallback for an undecodable url (never a transient "not decoded yet" raster stuck in the cache).
-    if (layer.fillTexture?.url) await ensureFillTexture(layer.fillTexture.url);
+    // ADR-023 S5b: the URL comes from the RESOLVED style, so this awaits exactly the image the draw
+    // will look for in the cache — the two cannot name different files.
+    const styleForFill = (layer.type === "text"
+      ? getCompositionTextStyle(layer, { currentTimeSeconds: t, ...this.styleOptions })
+      : getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...this.styleOptions })) as Record<string, unknown>;
+    const fill = typeof styleForFill.fillTexture === "string" ? parseFillTexture(styleForFill.fillTexture) : undefined;
+    if (fill?.url) await ensureFillTexture(fill.url);
     if (!boxMode) {
       // Comp mode (blur/glow path): comp-sized canvas, content-centered, transform-independent (4.1b).
       // The composite quad uses the comp box, so no box half-extents are returned.
       const { canvas, ctx } = this.poolCanvas(layer.id, width, height);
       const box =
         layer.type === "text"
-          ? await drawTextLayer(ctx, layer, t, width, height, "content")
-          : drawShapeLayer(ctx, layer, t, width, height, "content");
+          ? await drawTextLayer(ctx, layer, t, width, height, "content", 1, this.styleOptions)
+          : drawShapeLayer(ctx, layer, t, width, height, "content", 1, this.styleOptions);
       if (box.boxW <= 0 || box.boxH <= 0) return null; // empty (e.g. no visible text yet)
       return { canvas };
     }
@@ -270,9 +291,9 @@ export class SceneTextRasterizer {
     // Box mode (resolution-aware): measure the tight element box, size the canvas to
     // (box+margin)*rasterScale, then draw at that scale so magnified text stays crisp. The composite
     // quad's element box = the padded canvas back in comp px (the content is centered within it).
-    const content = measureOverlayBox(this.measureCtx(), layer, t, width, height);
+    const content = measureOverlayBox(this.measureCtx(), layer, t, width, height, this.styleOptions);
     if (content.boxW <= 0 || content.boxH <= 0) return null;
-    const m = overlayOverhangMargin(layer, t, width, height); // headroom so shadow/stroke/border/pen-bulge don't clip the tight box
+    const m = overlayOverhangMargin(layer, t, width, height, this.styleOptions); // headroom so shadow/stroke/border/pen-bulge don't clip the tight box
     const paddedW = content.boxW + 2 * m;
     const paddedH = content.boxH + 2 * m;
     // Cap so the canvas can't exceed MAX_RASTER_DIM (VRAM + GPU max-texture bound); extreme zoom is then
@@ -283,8 +304,8 @@ export class SceneTextRasterizer {
     const { canvas, ctx } = this.poolCanvas(layer.id, cw, ch);
     const drawn =
       layer.type === "text"
-        ? await drawTextLayer(ctx, layer, t, width, height, "box", rasterScale)
-        : drawShapeLayer(ctx, layer, t, width, height, "box", rasterScale);
+        ? await drawTextLayer(ctx, layer, t, width, height, "box", rasterScale, this.styleOptions)
+        : drawShapeLayer(ctx, layer, t, width, height, "box", rasterScale, this.styleOptions);
     if (drawn.boxW <= 0 || drawn.boxH <= 0) return null;
     return { canvas, boxHalfW: cw / (2 * rasterScale), boxHalfH: ch / (2 * rasterScale) };
   }

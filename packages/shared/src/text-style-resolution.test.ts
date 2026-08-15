@@ -48,6 +48,13 @@ function textLayer(over: Record<string, unknown>): TimelineLayer {
   } as unknown as TimelineLayer;
 }
 
+/**
+ * S5b: the app-supplied asset id → render address step. Pinned in the goldens because it is part of
+ * the emitted style now: a change to how a fill is ADDRESSED is a change to what the raster caches on.
+ */
+const GOLDEN_ASSET_ID = "golden_asset";
+const fillTextureOptions = { resolveAssetUrl: (id: string) => (id === GOLDEN_ASSET_ID ? "https://cdn.test/checker.png" : undefined) };
+
 const shadowEffect = { id: "e1", type: "shadow", enabled: true, params: {} };
 const blurEffect = { id: "e2", type: "blur", enabled: true, params: { amount: 6 } };
 
@@ -136,6 +143,28 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
     layer: textLayer({ fillGradientFrom: "rgba(255, 0, 0, 0.5)", fillGradientTo: "rgba(0, 0, 255, 0.25)" })
   },
   { name: "text/gradient-in-style-bag", layer: textLayer({ style: { fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" } }) },
+
+  // --- S5b: image fill — the id → URL resolution, and every way it can decline -------------------
+  { name: "text/fill-texture-absent", layer: textLayer({ color: "#ff0000" }), options: fillTextureOptions },
+  { name: "text/fill-texture-no-resolver", layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID }) },
+  { name: "text/fill-texture-unresolvable-id", layer: textLayer({ fillTextureAssetId: "gone" }), options: fillTextureOptions },
+  { name: "text/fill-texture-defaults", layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID }), options: fillTextureOptions },
+  {
+    name: "text/fill-texture-tiled",
+    layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID, fillTextureFit: "tile", fillTextureScale: 40 }),
+    options: fillTextureOptions
+  },
+  {
+    name: "text/fill-texture-in-style-bag",
+    layer: textLayer({ style: { fillTextureAssetId: GOLDEN_ASSET_ID, fillTextureFit: "tile" } }),
+    options: fillTextureOptions
+  },
+  {
+    name: "text/fill-texture-over-gradient",
+    layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID, fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" }),
+    options: fillTextureOptions
+  },
+  { name: "shape/fill-texture", layer: textLayer({ type: "shape", fillTextureAssetId: GOLDEN_ASSET_ID }), options: fillTextureOptions },
 
   // --- S5: per-line pill — the no-op case first, because that is the legacy claim ---------------
   { name: "text/per-line-pill-over-transparent", layer: textLayer({ backgroundPerLine: true }) },

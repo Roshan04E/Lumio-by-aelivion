@@ -20,6 +20,7 @@
 import {
   compositionTextDefaults,
   getCompositionTextLinePillStyle,
+  getCompositionShapeStyle,
   getCompositionTextRunStyle,
   getCompositionTextStyle
 } from "./composition-style";
@@ -70,6 +71,11 @@ function textLayer(over: Partial<TimelineLayer>): TimelineLayer {
     ...over
   } as TimelineLayer;
 }
+
+/** S5b: the project image a glyph fill references, and the app-side resolution the renderer is given. */
+const FIXTURE_ASSET_ID = "asset_checker";
+const FIXTURE_ASSET_URL = "data:image/png;base64,AAAA";
+const resolveFixtureAsset = (assetId: string) => (assetId === FIXTURE_ASSET_ID ? FIXTURE_ASSET_URL : undefined);
 
 const pinnedInter: FontRef = {
   source: "catalogue",
@@ -302,7 +308,12 @@ const pinnedLora: FontRef = {
     fillGradientTo: "#0088ff",
     fillGradientAngle: 45,
     backgroundPerLine: true,
-    shadowLayers: 6
+    shadowLayers: 6,
+    // S5b (ADR-023). The fill only emits when a resolver can answer for the id — see `styleOptions`
+    // below, which is that co-requisite rather than a second kind of one.
+    fillTextureAssetId: FIXTURE_ASSET_ID,
+    fillTextureFit: "tile",
+    fillTextureScale: 4
   };
   /**
    * Some fields are CONDITIONALLY emitted and provably cannot move anything alone: `WebkitTextStroke`
@@ -326,7 +337,23 @@ const pinnedLora: FontRef = {
     fillGradientTo: { fillGradientFrom: "#000000" },
     fillGradientAngle: { fillGradientFrom: "#000000", fillGradientTo: "#ffffff" },
     backgroundPerLine: { backgroundColor: "#101010" },
-    shadowLayers: { shadowBlur: 8, shadowOffsetY: 6 }
+    shadowLayers: { shadowBlur: 8, shadowOffsetY: 6 },
+    // S5b: fit and scale describe an image, so they need one to describe.
+    fillTextureFit: { fillTextureAssetId: FIXTURE_ASSET_ID },
+    fillTextureScale: { fillTextureAssetId: FIXTURE_ASSET_ID }
+  };
+  /**
+   * S5b — fields whose emission needs a style OPTION, not another layer field.
+   *
+   * `fillTexture*` resolves an asset id to a render address through `resolveAssetUrl`, which the app
+   * supplies. Without it the emitted style says "no texture" for a layer that names one, and the sweep
+   * would report these three as changing nothing — a report that would be true, and would be about the
+   * gate rather than about the field.
+   */
+  const styleOptions: Partial<Record<string, { resolveAssetUrl: (id: string) => string | undefined }>> = {
+    fillTextureAssetId: { resolveAssetUrl: resolveFixtureAsset },
+    fillTextureFit: { resolveAssetUrl: resolveFixtureAsset },
+    fillTextureScale: { resolveAssetUrl: resolveFixtureAsset }
   };
 
   for (const key of TEXT_STYLE_FIELD_KEYS) {
@@ -337,11 +364,85 @@ const pinnedLora: FontRef = {
       continue;
     }
     const extra = corequisite[key] ?? {};
-    const bare = JSON.stringify(getCompositionTextStyle(textLayer({ ...extra })));
+    const opts = styleOptions[key] ?? {};
+    const bare = JSON.stringify(getCompositionTextStyle(textLayer({ ...extra }), opts));
     const source = textLayer({ ...extra, [key]: value } as Partial<TimelineLayer>);
     const applied = applyTextStyle(textLayer({ id: "t2", ...extra }), captureTextStyle(source));
-    check(`T-15 sweep: "${key}" changes the emitted style`, JSON.stringify(getCompositionTextStyle(applied)) !== bare);
+    check(`T-15 sweep: "${key}" changes the emitted style`, JSON.stringify(getCompositionTextStyle(applied, opts)) !== bare);
   }
+}
+
+// --- S5b: THE assertion the stage exists for -----------------------------------------------------
+//
+// Save Style, apply to a fresh layer, and the image fill round-trips. This is what was broken:
+// `fillTexture` rendered correctly and was absent from `TextStyleFields`, so capture dropped it and a
+// saved look re-applied without its fill — with no error, no marker, and no gate able to see it,
+// because a field that never reaches the data is a field both renderers agree about perfectly.
+{
+  const opts = { resolveAssetUrl: resolveFixtureAsset };
+  const source = textLayer({ fillTextureAssetId: FIXTURE_ASSET_ID, fillTextureFit: "tile", fillTextureScale: 4 });
+  const saved = captureTextStyle(source);
+  check(
+    "S5b round-trip: Save Style CAPTURES all three fill fields",
+    saved.fillTextureAssetId === FIXTURE_ASSET_ID && saved.fillTextureFit === "tile" && saved.fillTextureScale === 4
+  );
+
+  const fresh = textLayer({ id: "t2", text: "Different words" });
+  const applied = applyTextStyle(fresh, saved);
+  check("S5b round-trip: applying it puts the fill on the fresh layer", applied.fillTextureAssetId === FIXTURE_ASSET_ID);
+  // The values landing is necessary and not sufficient — the picture is what matters, and the picture
+  // is the emitted style every renderer reads.
+  check(
+    "S5b round-trip: and the fresh layer EMITS the same fill the source does",
+    getCompositionTextStyle(applied, opts).fillTexture === getCompositionTextStyle(source, opts).fillTexture
+  );
+  check(
+    "S5b round-trip: which is the resolved image, fit and scale",
+    getCompositionTextStyle(applied, opts).fillTexture === `tile 4 ${FIXTURE_ASSET_URL}`
+  );
+  // The same envelope the clipboard and S6's presets use — the round-trip has to survive JSON, or
+  // "Copy Look" is a different feature from "Save Style" (T-10 says it must not be).
+  const envelope = JSON.parse(JSON.stringify(captureTextStylePreset(source)));
+  const read = readTextStylePreset(envelope);
+  check(
+    "S5b round-trip: survives the envelope and JSON",
+    read.ok && getCompositionTextStyle(applyTextStyle(fresh, read.values), opts).fillTexture === `tile 4 ${FIXTURE_ASSET_URL}`
+  );
+}
+
+{
+  // The DECOMPOSITION's own claims, each of which would otherwise be prose.
+  const opts = { resolveAssetUrl: resolveFixtureAsset };
+  check("S5b: absent emits no fill", getCompositionTextStyle(textLayer({}), opts).fillTexture === undefined);
+  check(
+    "S5b: an id with NO resolver emits no fill — shared cannot invent a URL",
+    getCompositionTextStyle(textLayer({ fillTextureAssetId: FIXTURE_ASSET_ID })).fillTexture === undefined
+  );
+  check(
+    "S5b: an UNRESOLVABLE id emits no fill (paints the solid colour, does not guess)",
+    getCompositionTextStyle(textLayer({ fillTextureAssetId: "gone" }), opts).fillTexture === undefined
+  );
+  check(
+    "S5b: fit and scale default to cover/1 without being written in",
+    getCompositionTextStyle(textLayer({ fillTextureAssetId: FIXTURE_ASSET_ID }), opts).fillTexture === `cover 1 ${FIXTURE_ASSET_URL}`
+  );
+  // The three fields are one look, so the schema has to describe them in the three kinds ADR-003
+  // already has — no composite kind, no escape hatch. Asserted, because it is the stage's whole
+  // premise and a future edit could quietly reach for `custom` and still pass everything else.
+  const fieldOf = (key: string) => textStyleSchema.fields.find((field) => field.key === key);
+  check("S5b: the image is a reference/asset", fieldOf("fillTextureAssetId")?.kind === "reference" && fieldOf("fillTextureAssetId")?.refType === "asset");
+  check("S5b: the fit is an enum", fieldOf("fillTextureFit")?.kind === "enum");
+  check("S5b: the scale is a number", fieldOf("fillTextureScale")?.kind === "number");
+  check(
+    "S5b: all three are absent-means-legacy",
+    ["fillTextureAssetId", "fillTextureFit", "fillTextureScale"].every((key) => fieldOf(key)?.absenceIsMeaningful === true)
+  );
+  // Shapes paint the same texture through the same resolver — one rule, two draw paths.
+  check(
+    "S5b: a SHAPE resolves the same fill",
+    (getCompositionShapeStyle(textLayer({ type: "shape", fillTextureAssetId: FIXTURE_ASSET_ID }), opts) as Record<string, unknown>).fillTexture ===
+      `cover 1 ${FIXTURE_ASSET_URL}`
+  );
 }
 
 // --- the envelope (T-10) -------------------------------------------------------------------------

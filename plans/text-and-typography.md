@@ -24,7 +24,7 @@ S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unblocks S6
 S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both pickers moved
 S5  tier-1 texture + CSS depth            SHIPPED 2026-08-15; variable axes deferred (not OQ2)
-S5b `fillTexture` presetable + an editor   decomposed into existing kinds; gates S6
+S5b `fillTexture` presetable + an editor   SHIPPED 2026-08-15; decomposed, no new kind
 S6  caption + text preset library         rides S4; highest product value
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
                                                           half only; largest blast radius
@@ -666,6 +666,57 @@ now and would have meant a bespoke picker three stages ago.
 - `render:baseline` at zero tolerance: no existing project has a `fillTexture`, so nothing may move.
 
 **Risk:** low. The renderer already paints it; this is authoring plus schema membership.
+
+**SHIPPED 2026-08-15.**
+
+Three fields, three existing kinds, no composite kind and no escape hatch: `fillTextureAssetId`
+(`reference`/asset), `fillTextureFit` (`enum`), `fillTextureScale` (`number`). All three
+`absenceIsMeaningful`, all three presetable, and the picker is the shared `reference` editor S4b built
+— **this stage adds no widget**, which is the whole reason it was cheap now and would not have been in
+July.
+
+**The `url` did not survive the decomposition, and that is the decomposition working.** A reference
+serializes as an id (ADR-003); a URL is a machine- and account-specific *resolution* of that id, and
+baking one into project data is precisely what would break the preset this stage exists to enable.
+Resolution moved to `CompositionStyleOptions.resolveAssetUrl`, resolved once in shared and emitted into
+the style object — the "resolve once, hand both paths the same concrete answer" shape T-13 was
+corrected into. The app supplies it (editor from the media pool, Remotion from `manifest.assets`, local
+export from the source-URL map) rather than a module-level registry, because the registry shape is the
+one ADR-023 §1 records as having shipped EMPTY and silently rendered every warped layer in Roboto.
+
+**What is genuinely narrowed:** a fill must now be a project asset rather than an arbitrary URL.
+Nothing could author an arbitrary URL — there was no editor — so no capability a user had is gone, and
+fills now inherit the local-first asset doctrine. **This was checked before proceeding, because it is
+the one finding that would have reopened the kind decision.** It did not.
+
+Two copy lists died on the way. The manifest's hand-written top-level `fillTexture` (two sites) became
+three entries in the derived style bag, so the exhaustiveness constraint owns them; and
+`scene-text-raster`'s `layer.fillTexture ?? null` cache-key special case is gone, because a fill is
+keyed now for the same reason everything else is — it is emitted. `textWarp` is the last such
+special case left.
+
+**Evidence:** `render:baseline` **81/81 unchanged at zero tolerance** versus `71457b8`, including
+`texture-fill` — whose fill is now addressed completely differently and paints exactly the same pixels.
+`textstyle:schema` sweeps 28 presetable fields and carries the assertion this stage is for: **Save
+Style → apply to a fresh layer → the fill round-trips**, through the envelope and through JSON, ending
+in the same emitted style. `textstyle:golden` 85/85, with the 77 pre-existing cases differing by exactly
+one appended `fillTexture:<undefined>` key and nothing else. `text:s5-falsifier` gains four arms,
+including the one that matters here: an **unresolvable id must render byte-identically to no fill** —
+the intended degradation, and otherwise indistinguishable from the feature being dead.
+
+**The gate that had to exist, and the one the other gates cannot be:** every instrument above answers
+"does the fill reach the renderer", and the defect was "you cannot author it". So
+`apps/worker/tmp/s5b-editor-probe.mjs` drives the real editor and asserts the row is on screen and its
+trigger arms the media pool. Its first run reported "no Image fill row" against an inspector it had
+never opened — the instrument answering about itself, which is the same shape as S5's OQ2 probe reading
+back its own expando. Falsified, then believed.
+
+**Looked at, not just hashed** (S5's lesson): the `texture-fill` still shows the checkerboard genuinely
+painting the glyphs, and `cover` vs `tile` vs scale each change it visibly. One incidental finding while
+looking — the fixture's comment claims "the squares are huge and unambiguous", and they are not: a 2×2
+image scaled 40× through a canvas pattern is bilinearly smoothed into a soft ramp. The fixture still
+discriminates (an orange-yellow ramp is nothing like a solid white fill), so this is a wrong comment
+rather than a vacuous gate — recorded because the next reader will otherwise trust the comment.
 
 ---
 

@@ -629,6 +629,25 @@ presetable set equals `TextStyleFields` and says nothing about a look field that
 interface. Half a constraint reads exactly like a whole one, one level up. Unreachable today (no
 editor UI writes it), and **S6 may not ship presets over it**.
 
+**T-15 addendum 2 — CLOSED 2026-08-15 (S5b).** `fillTexture` joined `TextStyleFields`, so the S4
+constraint now covers it and Save Style carries the fill. **The composite value was DECOMPOSED rather
+than given a kind** — `reference`/asset + `enum` + `number`, which is ADR-003's own *lut* precedent
+(line 38) applied unchanged, and which cost no widget because S4b had already made `reference`
+buildable. Two findings worth carrying:
+
+- **A reference serializes as an id, so the `url` had to go, and the resolution step had to become
+  explicit.** `CompositionStyleOptions.resolveAssetUrl` is supplied by the app and resolved once in
+  shared. The rejected alternative is the module-level registry `configureFontResolver` uses — the
+  shape §1 of this document records as having shipped EMPTY and rendered every warped layer in Roboto.
+  A capability was narrowed (a fill must be a project asset, not an arbitrary URL) and it was checked
+  against the decomposition's brief before proceeding: nothing could author an arbitrary URL, so no
+  user capability was lost.
+- **Decomposing removed two copy lists.** The manifest's hand-written top-level `fillTexture` (two
+  sites) became derived style-bag entries, and `scene-text-raster`'s `layer.fillTexture ?? null`
+  cache-key special case disappeared, because an EMITTED field is keyed by construction. That is the
+  general shape: fields that travel in the emitted style need no list; fields that travel beside it
+  need one, and every such list is a T-15 defect waiting. `textWarp` is now the only one left.
+
 **T-16 — A "visible degraded state" is proven by pixels, never by computed style.** (D3, T-12; S0,
 2026-08-13.) D3's font-substitution surface and T-12's warp marker both exist to announce a silent
 degradation, which makes a marker that silently fails to paint the purest form of the bug it guards

@@ -471,6 +471,14 @@ export interface ScenePreviewCanvasProps {
   singleCtxMedia?: boolean | undefined;
   /** Single-ctx: live map of each media layer's raw frame-source descriptor (see `singleCtxMedia`). */
   mediaSourcesRef?: React.MutableRefObject<Record<string, ScenePreviewMediaSource | null>> | undefined;
+  /**
+   * ADR-023 S5b — asset id → render address for a text/shape glyph fill.
+   *
+   * Passed IN for the same reason `precision` and `regionPassModel` are: `packages/shared` never
+   * reaches for app state, so the app owns the lookup and the shared rasterizer is handed the answer.
+   * Omitted → no image fills, which paints the layer's own colour.
+   */
+  resolveAssetUrl?: ((assetId: string) => string | undefined) | undefined;
   /** Called if the GPU compositor can't init/draw — the caller falls back to the DOM path. */
   onFailure?: () => void;
   /**
@@ -548,6 +556,7 @@ export function ScenePreviewCanvas({
   currentTime,
   isPlaying,
   gradedRef,
+  resolveAssetUrl,
   onFailure,
   redrawRef,
   renderScale = 1,
@@ -1008,7 +1017,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       });
       matteCacheRef.current = new SceneMaskMatteCache(width, height);
       // A late async raster (text/font) re-arms the settle window so it lands on screen even when idle.
-      rasterizerRef.current = new SceneTextRasterizer(requestDraw);
+      rasterizerRef.current = new SceneTextRasterizer(requestDraw, { resolveAssetUrl });
       // Repaint the current frame after a (re)build — including a recovery rebuild (recoveryTick), so a paused
       // preview immediately shows the restored GPU scene instead of a blank canvas until the next input change.
       requestDraw();

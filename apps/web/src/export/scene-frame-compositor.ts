@@ -179,6 +179,12 @@ export class SceneFrameCompositor {
        * asset-source MediaIn soft-degrades to the host clip (user report 2026-07-27).
        */
       flarexVirtualLayers?: readonly TimelineLayer[];
+      /**
+       * ADR-023 S5b: asset id -> render address for a text/shape glyph fill. Supplied by `export-core`
+       * from the same asset list it resolves media from, so the export and the preview name the same
+       * image for the same id. Omitted -> no image fills, i.e. the layer's own colour.
+       */
+      resolveAssetUrl?: (assetId: string) => string | undefined;
     }
   ) {
     this.width = composition.width;
@@ -192,7 +198,7 @@ export class SceneFrameCompositor {
     this.matteCache = new SceneMaskMatteCache(this.width, this.height);
     // No `onReady` callback: the export AWAITS `rasterizer.ensure()` per frame, so there's no draw loop to
     // re-arm (unlike the editor's fire-and-forget `get()`).
-    this.rasterizer = new SceneTextRasterizer();
+    this.rasterizer = new SceneTextRasterizer(undefined, { resolveAssetUrl: options?.resolveAssetUrl });
     this.nestedGroups = options?.nestedGroups;
     this.rawJunctionLayers = options?.rawJunctionLayers ?? [];
     this.flarexComps = options?.flarexComps;

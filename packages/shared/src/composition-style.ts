@@ -64,6 +64,9 @@ export interface CompositionLayerStyleInput {
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
   fillGradientAngle?: number | undefined;
+  fillTextureAssetId?: string | undefined;
+  fillTextureFit?: "cover" | "tile" | undefined;
+  fillTextureScale?: number | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
@@ -97,6 +100,22 @@ export interface CompositionStyleOptions {
    * effect stage's light.
    */
   colorSettings?: ProjectColorSettings | undefined;
+  /**
+   * ADR-023 S5b — asset id → render address, supplied by the APP.
+   *
+   * A `reference` serializes as an id (ADR-003) and a renderer needs a URL, so something has to close
+   * that gap. It is passed IN rather than read from a module-level registry for the reason
+   * `ScenePreviewCanvas` already states about `precision` and `regionPassModel`: `packages/shared`
+   * never reaches for app state, and a caller that forgets gets a visible missing texture rather than
+   * whatever a global happened to be holding. The alternative — the `configureFontResolver` shape — is
+   * the one this ADR's own §1 holds up as its cautionary tale: that catalogue shipped EMPTY and every
+   * warped layer silently rendered as Roboto.
+   *
+   * Absent (or returning `undefined`) means "no texture", which paints the solid fill. That is the
+   * SAME picture a layer with no texture gets, so an unresolved asset degrades to the layer's own
+   * colour instead of to nothing — and the editor, which holds the pool, is what says so (D3).
+   */
+  resolveAssetUrl?: ((assetId: string) => string | undefined) | undefined;
 }
 
 export const compositionTextDefaults = {
@@ -759,6 +778,12 @@ export interface ResolvedTextStyle {
    * must not each decide it.
    */
   fillGradient: { from: string; to: string; angleDeg: number } | undefined;
+  /**
+   * ADR-023 S5b. The image fill with its asset id already RESOLVED to a render address, or absent —
+   * and absent covers both "no texture asked for" and "asked for one this caller cannot resolve",
+   * because both paint the solid fill and neither renderer should be deciding between them.
+   */
+  fillTexture: { url: string; fit: "cover" | "tile"; scale: number } | undefined;
   backgroundColor: string;
   backgroundPaddingEm: number;
   backgroundRadiusEm: number;
@@ -819,6 +844,8 @@ export function resolveTextStyle(
     // "is there a gradient" differently, and so a half-authored one falls back to the solid fill
     // rather than emitting a one-colour gradient that reads as a bug.
     fillGradient: resolveFillGradient(layer, style),
+    // ADR-023 S5b. The id → URL step, once, here — not in each renderer, and not baked into the layer.
+    fillTexture: resolveFillTexture(layer, style, options),
     backgroundColor: stringOr(layer.backgroundColor ?? style.backgroundColor, compositionTextDefaults.backgroundColor),
     backgroundPaddingEm: animStyleNumber(
       layer,
@@ -867,6 +894,35 @@ function resolveFillGradient(
   const angle = layer.fillGradientAngle ?? (style.fillGradientAngle as number | undefined);
   // 180deg — CSS `linear-gradient`'s own default direction (top → bottom).
   return { from, to, angleDeg: typeof angle === "number" && Number.isFinite(angle) ? angle : 180 };
+}
+
+/**
+ * ADR-023 S5b — the image fill, with the asset id resolved to a render address.
+ *
+ * `undefined` unless there is an id AND a resolver AND the resolver knows the id. Those three failures
+ * deliberately collapse into one answer: a texture that cannot be painted is the layer's solid fill,
+ * which is the same picture as no texture at all. Distinguishing them at PAINT time would be a
+ * renderer deciding policy; the editor holds the media pool and is where a dangling reference is
+ * named (the `reference` kind's `missing` state, D3).
+ *
+ * The defaults are the composite's own: `cover`, and scale 1.
+ */
+function resolveFillTexture(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  style: Record<string, unknown>,
+  options: CompositionStyleOptions
+): { url: string; fit: "cover" | "tile"; scale: number } | undefined {
+  const assetId = layer.fillTextureAssetId ?? (style.fillTextureAssetId as string | undefined);
+  if (typeof assetId !== "string" || !assetId) return undefined;
+  const url = options.resolveAssetUrl?.(assetId);
+  if (typeof url !== "string" || !url) return undefined;
+  const fit = layer.fillTextureFit ?? (style.fillTextureFit as "cover" | "tile" | undefined);
+  const scale = layer.fillTextureScale ?? (style.fillTextureScale as number | undefined);
+  return {
+    url,
+    fit: fit === "tile" ? "tile" : "cover",
+    scale: typeof scale === "number" && Number.isFinite(scale) && scale > 0 ? scale : 1
+  };
 }
 
 /** Stacked-shadow copies. Anything unreadable, fractional or below 1 is one shadow — today's look. */
@@ -952,8 +1008,35 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     textFillGradient: resolved.fillGradient
       ? `linear-gradient(${resolved.fillGradient.angleDeg}deg, ${resolved.fillGradient.from}, ${resolved.fillGradient.to})`
       : undefined,
-    textLinePill: linePill
+    textLinePill: linePill,
+    /**
+     * ADR-023 S5b — the image fill, resolved. A third non-CSS key, for the third time for the same
+     * reason: this object is what every renderer reads and what `scene-text-raster` keys its cache on.
+     *
+     * Being IN the style object is a fix, not just a convention: `fillTexture` used to be keyed into
+     * that cache by a hand-written special case (`layer.fillTexture ?? null`, alongside `textWarp`),
+     * which is one more copy list of exactly the kind T-15 is about. It is now keyed because it is
+     * emitted, like every other look.
+     */
+    fillTexture: fillTextureCss(resolved.fillTexture)
   };
+}
+
+/**
+ * `"<fit> <scale> <url>"` — the URL LAST, the same idiom as `textShadow`'s colour-last and
+ * `textLinePill`'s, so the variable-length part cannot be confused with a field separator.
+ */
+function fillTextureCss(value: ResolvedTextStyle["fillTexture"]): string | undefined {
+  return value ? `${value.fit} ${value.scale} ${value.url}` : undefined;
+}
+
+/** Read back `"<fit> <scale> <url>"`. One parser, exported, so no renderer writes a second one. */
+export function parseFillTexture(
+  value: string
+): { fit: "cover" | "tile"; scale: number; url: string } | undefined {
+  const match = value.match(/^(cover|tile)\s+([\d.]+)\s+(.+)$/s);
+  if (!match) return undefined;
+  return { fit: match[1] as "cover" | "tile", scale: Number(match[2]), url: match[3]!.trim() };
 }
 
 /**
@@ -1189,7 +1272,11 @@ export function getCompositionShapeStyle(layer: CompositionLayerStyleInput | Tim
     opacity: transform.opacity / 100,
     mixBlendMode: cssBlendMode(getCompositionBlendMode(layer)),
     transform: compositionTransformCss(transform),
-    transformOrigin: compositionTransformOriginCss(transform)
+    transformOrigin: compositionTransformOriginCss(transform),
+    // ADR-023 S5b. Shapes paint the same texture through the same `fillTexturePaint`, so they resolve
+    // it the same way — one resolver, one emitted string, two draw paths. Appended last, so a shape
+    // with no texture emits exactly the object it emitted before.
+    fillTexture: fillTextureCss(resolveFillTexture(layer, style, options))
   };
 }
 
@@ -1372,6 +1459,12 @@ export const MANIFEST_LAYER_STYLE_KEYS = [
   "fillGradientFrom",
   "fillGradientTo",
   "fillGradientAngle",
+  // ADR-023 S5b. These arrive here from the manifest layer's TOP level, where `fillTexture` used to be
+  // copied by hand at two sites — the same shape of copy list this bag exists to delete. Now that the
+  // fields are read through `CompositionLayerStyleInput`, the exhaustiveness constraint below owns them.
+  "fillTextureAssetId",
+  "fillTextureFit",
+  "fillTextureScale",
   "backgroundColor",
   "backgroundPaddingEm",
   "backgroundRadiusEm",

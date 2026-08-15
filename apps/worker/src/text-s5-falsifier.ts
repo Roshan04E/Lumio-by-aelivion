@@ -136,6 +136,23 @@ async function main(): Promise<void> {
   const stackOne = await renderWith("shadow-stack", "stack-one", { shadowLayers: 1 });
   process.stdout.write(`stack      on=${short(stackOn)}  absent=${short(stackOff)}  layers1=${short(stackOne)}\n\n`);
 
+  // --- S5b: the image fill, now an asset REFERENCE ---------------------------------------------
+  //
+  // The arm that matters most is `unresolvable`. S5b moved the fill from a URL on the layer to an id
+  // the renderer resolves, so the new way for this feature to break is a resolution step that quietly
+  // answers nothing — and a fill that resolves to nothing paints the solid colour, which is the same
+  // picture as no fill at all. That is the intended degradation (D3: the EDITOR names it, the renderer
+  // does not guess), and it is also indistinguishable from the feature being dead. So it is asserted
+  // in both directions: a resolvable id must differ from no fill, and an unresolvable one must not.
+  const fillOn = await renderWith("texture-fill", "fill-on", {});
+  const fillOff = await renderWith("texture-fill", "fill-off", { fillTextureAssetId: undefined });
+  const fillUnresolvable = await renderWith("texture-fill", "fill-unresolvable", { fillTextureAssetId: "no_such_asset" });
+  const fillCover = await renderWith("texture-fill", "fill-cover", { fillTextureFit: "cover" });
+  const fillScaled = await renderWith("texture-fill", "fill-scale-4", { fillTextureScale: 4 });
+  process.stdout.write(
+    `fill       on=${short(fillOn)}  off=${short(fillOff)}  unresolvable=${short(fillUnresolvable)}  cover=${short(fillCover)}  scale4=${short(fillScaled)}\n\n`
+  );
+
   // --- the assertions --------------------------------------------------------------------------
   assert.notEqual(
     gradientOn,
@@ -189,7 +206,35 @@ async function main(): Promise<void> {
       "every existing project carrying a shadow has moved."
   );
 
+  assert.notEqual(
+    fillOn,
+    fillOff,
+    "FALSIFIER FAILED — removing `fillTextureAssetId` produced a BYTE-IDENTICAL render. The image fill " +
+      "is not reaching the renderer: check that MANIFEST_LAYER_STYLE_KEYS carries the three fields, that " +
+      "`buildRenderManifest` adds the fill's asset id to `referencedAssetIds` (it is NOT the layer's own " +
+      "`assetId`, so the manifest would otherwise ship a reference to an asset it does not carry), and " +
+      "that SceneStage hands `resolveAssetUrl` to the rasterizer."
+  );
+  assert.equal(
+    fillUnresolvable,
+    fillOff,
+    "CONTROL FAILED — an UNRESOLVABLE asset id rendered differently from no fill at all. A fill that " +
+      "cannot be resolved must paint the layer's own colour and nothing else; anything else means the " +
+      "renderer is inventing a picture for a reference it could not answer."
+  );
+  assert.notEqual(
+    fillCover,
+    fillOn,
+    "FALSIFIER FAILED — `fillTextureFit` changed nothing. The enum is not reaching `fillTexturePaint`."
+  );
+  assert.notEqual(
+    fillScaled,
+    fillOn,
+    "FALSIFIER FAILED — `fillTextureScale` changed nothing. The number is not reaching `fillTexturePaint`."
+  );
+
   process.stdout.write("PASS — all three S5 fields change the render, and all three no-op arms are byte-identical.\n");
+  process.stdout.write("PASS — the S5b image fill resolves, its fit and scale move, and an unresolvable id degrades to the solid colour.\n");
   process.stdout.write(`stills: ${outDir}\n`);
 }
 

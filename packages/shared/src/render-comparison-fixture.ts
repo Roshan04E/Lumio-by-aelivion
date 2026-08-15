@@ -1403,6 +1403,8 @@ function buildFlarexMultiInComp(): FlarexComp {
 // entirely (an asset-source MediaIn is self-contained, not a read of the host clip) — the comp's
 // entire output is this one MediaIn.
 const FLAREX_MISMATCHED_ASSET_ID = "fixture_mismatched_aspect_asset";
+/** ADR-023 S5b: the checkerboard a glyph fill REFERENCES, now that a fill is an asset id not a URL. */
+const FILL_TEXTURE_ASSET_ID = "fixture_fill_texture_asset";
 function buildFlarexMismatchedAspectComp(): FlarexComp {
   const comp = createFlarexComp("fixture_flarex_mismatched_aspect_comp", "Flarex mismatched-aspect source fixture");
   const srcIn = createFlarexNode("mediaIn", "fixture_flarex_mismatched_aspect_srcin");
@@ -1502,8 +1504,14 @@ interface FixtureVariant {
   /** Block 6 tail: TRIMMED compound incoming, sampled in the PRE-cut window segment — the group side
    *  must mix real pre-roll nest material (head handle), not hard-cut until its start. */
   nestedJunctionPreroll?: boolean;
-  /** Texture fill (D2): image paint on the TEXT fixture's glyphs. */
-  textFillTexture?: TimelineLayer["fillTexture"];
+  /**
+   * Texture fill (D2): image paint on the TEXT fixture's glyphs.
+   *
+   * ADR-023 S5b DECOMPOSED the stored value, so this now names the checkerboard ASSET rather than
+   * carrying a raw URL. The picture is identical — same image, same fit, same scale — which is the
+   * point: the change is in how the fill is ADDRESSED, and `render:baseline` says so by not moving.
+   */
+  textFillTexture?: { fit: "cover" | "tile"; scale: number };
   /**
    * S1 (ADR-023 D7): stroke paint order + a stroke heavy enough for the order to be legible. Both are
    * left UNDEFINED by every other variant, so `textFixtureLayer` omits the keys entirely and every
@@ -1949,20 +1957,13 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         }
       };
     case "texture-fill":
-      // Texture fill (D2): the big scaled "HI" glyphs paint with a 2×2 checkerboard PNG (data URL —
-      // decodable via fetch+createImageBitmap in every renderer), tiled at 40× so the squares are
-      // huge and unambiguous. Trips if any renderer's rasterizer skips the decode await (solid white
-      // glyphs), mis-anchors the pattern, or the manifest drops `fillTexture`.
-      return {
-        effects: [],
-        fit: "cover",
-        textScale: 5,
-        textFillTexture: {
-          url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42mO4ZCPy/9cJjf8MIALEAQBa+AoViENR1AAAAABJRU5ErkJggg==",
-          fit: "tile",
-          scale: 40
-        }
-      };
+      // Texture fill (D2): the big scaled "HI" glyphs paint with a 2×2 checkerboard PNG, tiled at 40×
+      // so the squares are huge and unambiguous. Trips if any renderer's rasterizer skips the decode
+      // await (solid white glyphs), mis-anchors the pattern, or the manifest drops the fill.
+      //
+      // ADR-023 S5b: the image is now the `FILL_TEXTURE_ASSET_ID` asset rather than an inline data URL
+      // on the layer, so this fixture also covers the id → URL resolution both renderers now do.
+      return { effects: [], fit: "cover", textScale: 5, textFillTexture: { fit: "tile", scale: 40 } };
     case "nested-transition":
       // D4 (R2 step 3): the SAME two-clip crossDissolve as the `transition` fixture, but inside a
       // nested composition referenced by a compound clip — sampled MID-transition. Trips if the
@@ -2051,6 +2052,23 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     durationSeconds: 12,
     width: 1080,
     height: 1920,
+    status: "ready",
+    createdAt: new Date(0).toISOString()
+  };
+
+  // ADR-023 S5b: the image an asset-referenced glyph fill resolves to. A 2x2 checkerboard PNG, kept
+  // byte-for-byte as the data URL the pre-S5b fixture inlined on the layer — the fill is addressed
+  // differently now, and must still paint exactly the same pixels.
+  const fillTextureAsset: SourceAsset = {
+    id: FILL_TEXTURE_ASSET_ID,
+    userId: "fixture_user",
+    fileName: "fixture-checkerboard.png",
+    fileType: "image/png",
+    fileUrl:
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42mO4ZCPy/9cJjf8MIALEAQBa+AoViENR1AAAAABJRU5ErkJggg==",
+    durationSeconds: 12,
+    width: 2,
+    height: 2,
     status: "ready",
     createdAt: new Date(0).toISOString()
   };
@@ -2191,7 +2209,13 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     },
     effects: variant.textEffects ?? [],
     ...(variant.textMasks ? { masks: variant.textMasks } : {}),
-    ...(variant.textFillTexture ? { fillTexture: variant.textFillTexture } : {}),
+    ...(variant.textFillTexture
+      ? {
+          fillTextureAssetId: FILL_TEXTURE_ASSET_ID,
+          fillTextureFit: variant.textFillTexture.fit,
+          fillTextureScale: variant.textFillTexture.scale
+        }
+      : {}),
     // S5 (ADR-023 D7). Spread conditionally, like every text field before them, so a variant that does
     // not ask for the look carries no key at all rather than an explicit "off" — absent and off render
     // the same today, and only absent is guaranteed to keep doing so (D1a).
@@ -2496,7 +2520,7 @@ Save this style now`);
       ...graph,
       composition: compositionWithCaptions
     },
-    assets: [imageAsset, mismatchedAspectAsset, hostTransformMediaAsset],
+    assets: [imageAsset, mismatchedAspectAsset, hostTransformMediaAsset, fillTextureAsset],
     currentTime: renderComparisonFrameSeconds
   };
 }

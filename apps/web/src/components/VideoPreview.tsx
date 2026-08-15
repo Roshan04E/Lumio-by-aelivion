@@ -909,6 +909,18 @@ function VideoPreviewImpl({
 
     return [sourceAsset, ...assets];
   }, [assets, sourceAsset]);
+
+  /**
+   * ADR-023 S5b — asset id → render address for a text/shape glyph fill.
+   *
+   * The editor's half of the resolution the shared style resolver cannot do for itself. Reads the SAME
+   * pool the timeline draws from, so a fill and the media bin can never disagree about which image an
+   * id names; an id the pool does not hold returns `undefined`, which paints the layer's own colour.
+   */
+  const resolveFillAssetUrl = useCallback(
+    (assetId: string) => resolvedAssets.find((asset) => asset.id === assetId)?.fileUrl,
+    [resolvedAssets]
+  );
   // Nested sequences (NESTING.md Phase C — imported prproj nests today, native compounds later) expand
   // FIRST: each `nestedCompositionId` clip becomes derived child layers in parent coordinates (namespaced
   // `__nest_` ids), with the compound clip itself REMOVED from its track — region-mask expansion then runs
@@ -2114,6 +2126,7 @@ function VideoPreviewImpl({
                   currentTime={currentTime}
                   isPlaying={isPlaying}
                   gradedRef={gradedCanvasesRef}
+                  resolveAssetUrl={resolveFillAssetUrl}
                   onFailure={() => setSceneFailed(true)}
                   redrawRef={sceneRedrawRef}
                   renderScale={playbackRenderScale}

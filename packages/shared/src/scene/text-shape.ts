@@ -9,6 +9,7 @@
  */
 
 import { buildWarpedTextPaths } from "../font-outlines";
+import type { CompositionStyleOptions } from "../composition-style";
 import {
   compositionTextDefaults,
   getCompositionShapeStyle,
@@ -16,6 +17,7 @@ import {
   getCompositionTextStyle,
   getCompositionTransform,
   getVisibleTextRuns,
+  parseFillTexture,
   parseTextLinePill,
 } from "../composition-style";
 import { hasTextWarp } from "../text-warp";
@@ -23,6 +25,16 @@ import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
 
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
 type Ctx = (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) & { letterSpacing?: string };
+
+/**
+ * App-supplied style resolution the rasterizer has to pass through (ADR-023 S5b).
+ *
+ * Deliberately a SUBSET of `CompositionStyleOptions` rather than the whole thing: `currentTimeSeconds`
+ * is the draw's own argument and must not be overridable from here, or a caller could hand the layout
+ * one moment and the paint another. Today it carries `resolveAssetUrl` — the asset id → render address
+ * step, which `packages/shared` cannot do for itself and must therefore be given.
+ */
+export type OverlayStyleOptions = Pick<CompositionStyleOptions, "resolveAssetUrl">;
 
 // ─── Texture fill (D2) ───────────────────────────────────────────────────────────────────────────
 // Decoded-image cache for `layer.fillTexture`. The decode is ASYNC (fetch + createImageBitmap); the
@@ -83,14 +95,17 @@ export function ensureFillTexture(url: string): Promise<void> {
  * yet / failed — caller keeps the solid color. `cover` scales the image to fill the box (× `scale`);
  * `tile` repeats it at natural size × `scale`, anchored at the box's top-left.
  */
-function fillTexturePaint(ctx: Ctx, layer: TimelineLayer, boxW: number, boxH: number): CanvasPattern | null {
-  const ft = layer.fillTexture;
+function fillTexturePaint(ctx: Ctx, style: Record<string, unknown>, boxW: number, boxH: number): CanvasPattern | null {
+  // ADR-023 S5b: read from the EMITTED STYLE, not the layer. The layer carries an asset id; a URL is
+  // that id resolved, and resolution happens once in `resolveFillTexture` so the raster and any other
+  // consumer cannot answer "which image" differently. Same discipline as `paintOrder` and `direction`.
+  const ft = typeof style.fillTexture === "string" ? parseFillTexture(style.fillTexture) : undefined;
   if (!ft?.url || boxW <= 0 || boxH <= 0) return null;
   const image = fillTextureCache.get(ft.url)?.image;
   if (!image || image.width <= 0 || image.height <= 0) return null;
   const pattern = ctx.createPattern(image as CanvasImageSource, "repeat");
   if (!pattern) return null;
-  const zoom = typeof ft.scale === "number" && ft.scale > 0 ? ft.scale : 1;
+  const zoom = ft.scale > 0 ? ft.scale : 1;
   if (ft.fit === "tile") {
     pattern.setTransform?.({ a: zoom, b: 0, c: 0, d: zoom, e: -boxW / 2, f: -boxH / 2 });
   } else {
@@ -390,11 +405,11 @@ interface TextLayout {
 
 /** Run word-wrap + box math for a text layer (no drawing). `null` = no visible text. Needs the comp
  *  width `W` because the wrap width is `maxWidthFraction*W − 2*padX`. */
-function measureTextLayout(ctx: Ctx, layer: TimelineLayer, t: number, W: number): TextLayout | null {
+function measureTextLayout(ctx: Ctx, layer: TimelineLayer, t: number, W: number, styleOptions: OverlayStyleOptions = {}): TextLayout | null {
   // #4: slice visible chars via textRevealProgress (typewriter animation), matching preview/cloud.
   const runs = getVisibleTextRuns(layer, t);
   if (!runs.some((r) => r.text)) return null;
-  const style = getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+  const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
 
   const fontSize = num(style.fontSize, 72);
   const lineHeight = num(style.lineHeight, 1.2);
@@ -434,12 +449,12 @@ function measureTextLayout(ctx: Ctx, layer: TimelineLayer, t: number, W: number)
 
 /** Content-box size (comp px) of a text/shape layer, with no drawing — used to size a "box"-mode raster
  *  canvas before the draw pass. Returns {0,0} for an empty layer (no visible text / zero-size shape). */
-export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: number, H: number): OverlayBox {
+export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: number, H: number, styleOptions: OverlayStyleOptions = {}): OverlayBox {
   if (layer.type === "text") {
-    const layout = measureTextLayout(ctx, layer, t, W);
+    const layout = measureTextLayout(ctx, layer, t, W, styleOptions);
     return layout ? { boxW: layout.boxW, boxH: layout.boxH } : { boxW: 0, boxH: 0 };
   }
-  const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+  const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
   return { boxW: Math.max(0, (num(style.width) / 100) * W), boxH: Math.max(0, (num(style.height) / 100) * H) };
 }
 
@@ -447,7 +462,7 @@ export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: 
  *  and a pen path's curve bulges — don't clip against the tight element box (the comp-sized raster
  *  never clipped; a tight box would). Parsed from the same resolved style the draw uses, so it
  *  tracks the actual overhang. `W`/`H` (comp px) size percent-of-box overhangs (pen paths). */
-export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number, H: number): number {
+export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number, H: number, styleOptions: OverlayStyleOptions = {}): number {
   let m = 2; // base anti-aliasing pad
   /**
    * ADR-023 S5: `text-shadow` is a LIST once `shadowLayers` stacks copies, and the FARTHEST copy is the
@@ -464,7 +479,7 @@ export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number
       })
     );
   if (layer.type === "text") {
-    const style = getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+    const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
     if (style.textShadow) m = Math.max(m, shadowExtent(String(style.textShadow)));
     if (style.WebkitTextStroke) m = Math.max(m, num(String(style.WebkitTextStroke)) + 2);
     // ADR-023 S5: a per-line pill is drawn around each line's INK box (ascent+descent+2·padY), and the
@@ -479,7 +494,7 @@ export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number
       m = Math.max(m, Math.max(0, (1.5 * fontSize - num(style.lineHeight, 1.2) * fontSize) / 2) + padY + 2);
     }
   } else if (layer.type === "shape") {
-    const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+    const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
     if (style.boxShadow) m = Math.max(m, shadowExtent(String(style.boxShadow)));
     if (style.border) m = Math.max(m, num(String(style.border)) / 2 + 2); // border straddles the edge
     // Pen paths: anchors are normalized to the box at commit, but bezier TANGENT control points —
@@ -515,9 +530,10 @@ export async function drawTextLayer(
   W: number,
   H: number,
   mode: OverlayTransformMode = "full",
-  rasterScale = 1
+  rasterScale = 1,
+  styleOptions: OverlayStyleOptions = {}
 ): Promise<OverlayBox> {
-  const layout = measureTextLayout(ctx, layer, t, W);
+  const layout = measureTextLayout(ctx, layer, t, W, styleOptions);
   if (!layout) return { boxW: 0, boxH: 0 };
   const { runs, style, fontSize, letterSpacing, padX, padY, radius, background, textAlign, lines, lineHeights, boxW, boxH } = layout;
   const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
@@ -600,7 +616,7 @@ export async function drawTextLayer(
   // ADR-023 D7 (S5): a gradient fill is the same kind of whole-layer glyph paint, and `fillTexture`
   // wins when both are set — it is the more specific paint and it shipped first (see
   // TimelineLayer.fillGradientFrom). Resolved once per raster, against the same box.
-  const glyphPaint = fillTexturePaint(ctx, layer, boxW, boxH) ?? fillGradientPaint(ctx, style, boxW, boxH);
+  const glyphPaint = fillTexturePaint(ctx, style, boxW, boxH) ?? fillGradientPaint(ctx, style, boxW, boxH);
   // ADR-023 D7 (S5): the per-line pill, read from the SAME emitted string the DOM path consumes so the
   // two cannot disagree about the look — the discipline `paintOrder` and `direction` already follow.
   // The block background above has already been emitted as `transparent` whenever this is present, so
@@ -882,9 +898,10 @@ export function drawShapeLayer(
   W: number,
   H: number,
   mode: OverlayTransformMode = "full",
-  rasterScale = 1
+  rasterScale = 1,
+  styleOptions: OverlayStyleOptions = {}
 ): OverlayBox {
-  const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+  const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
   const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
   const w = (num(style.width) / 100) * W;
   const h = (num(style.height) / 100) * H;
@@ -922,7 +939,7 @@ export function drawShapeLayer(
   if (boxShadow) applyShadow(ctx, boxShadow);
 
   // Texture fill (D2): the pattern paints the shape body instead of the solid color when decoded.
-  ctx.fillStyle = fillTexturePaint(ctx, layer, w, h) ?? background;
+  ctx.fillStyle = fillTexturePaint(ctx, style, w, h) ?? background;
   buildShapePath(ctx, shapeKind, -w / 2, -h / 2, w, h, radius, shapePath);
   ctx.fill();
   ctx.shadowColor = "transparent";

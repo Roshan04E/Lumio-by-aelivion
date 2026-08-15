@@ -933,6 +933,9 @@ export function EditorPage() {
   // when set, the media pool is in "pick one" mode and a tile click routes to the Flarex comp node
   // instead of the timeline. Reuses the SAME media pool UI the user knows from "Replace asset".
   const [flarexSourcePick, setFlarexSourcePick] = useState<{ compId: string; nodeId: string } | null>(null);
+  /** ADR-023 S5b: media-pool pick mode for a TEXT/SHAPE layer's image fill — the third consumer of the
+   *  same "Replace asset" flow, and the reason it is a mode rather than an embedded list. */
+  const [fillTexturePickLayerId, setFillTexturePickLayerId] = useState<string | null>(null);
   // Which Flarex mask node the viewer's on-canvas editor is pointed at. REPORTED by FlarexWorkspace
   // (it owns node selection); this only mirrors it so the bridge can be built here, where the viewer's
   // props are assembled.
@@ -1692,6 +1695,7 @@ export function EditorPage() {
   const stableCancelReplace = useStableHandler(() => {
     setAssetPickerForLayerId(null);
     setFlarexSourcePick(null);
+    setFillTexturePickLayerId(null);
   });
   const stableDeleteAsset = useStableHandler(handleDeleteAsset);
   const stableFocusAssetUse = useStableHandler((assetId: string) => focusAssetUse(assetId, layers));
@@ -5691,6 +5695,11 @@ export function EditorPage() {
       handleFlarexPickSource(asset);
       return;
     }
+    // ADR-023 S5b: same precedence, for a text/shape glyph fill.
+    if (fillTexturePickLayerId) {
+      handlePickFillTexture(asset);
+      return;
+    }
     const layerId = assetPickerForLayerId;
     if (!composition || !layerId) {
       return;
@@ -5702,6 +5711,21 @@ export function EditorPage() {
     }
     await handleDropAsset(asset.id, layer.trackId, layer.startSeconds, layerId);
     setNotice(`Replaced clip with ${asset.fileName}`);
+  }
+
+  /**
+   * ADR-023 S5b — set a text/shape layer's `fillTextureAssetId` from a media-pool tile click.
+   *
+   * Writes the ID and nothing else: the URL is resolved at render time (`resolveFillTexture`), so a
+   * project moved to another machine still names an image the pool can answer for. Writing a resolved
+   * URL here is the thing the decomposition exists to stop.
+   */
+  function handlePickFillTexture(asset: SourceAsset) {
+    const layerId = fillTexturePickLayerId;
+    setFillTexturePickLayerId(null);
+    if (!layerId) return;
+    updateLayer(layerId, (item) => ({ ...item, fillTextureAssetId: asset.id }));
+    setNotice(`Image fill: ${asset.fileName}`);
   }
 
   // Set a Flarex MediaIn node's `sourceAssetId` from a media-pool tile click (the shared write path
@@ -8815,8 +8839,14 @@ export function EditorPage() {
                   onApplyTemplate={editorPage === "notes" ? undefined : stableApplyTemplate}
                   selectedAssetId={selectedLayer?.assetId}
                   usedCounts={assetUseCounts}
-                  replaceActive={assetPickerForLayerId !== null || flarexSourcePick !== null}
-                  replaceLabel={flarexSourcePick ? "Pick an asset for the MediaIn node" : undefined}
+                  replaceActive={assetPickerForLayerId !== null || flarexSourcePick !== null || fillTexturePickLayerId !== null}
+                  replaceLabel={
+                    flarexSourcePick
+                      ? "Pick an asset for the MediaIn node"
+                      : fillTexturePickLayerId
+                        ? "Pick an image for the text fill"
+                        : undefined
+                  }
                   onAssignAsset={stableAssignAsset}
                   onAddAssetToTimeline={stableAddAssetToTimeline}
                   disableTimelineAdd={editorPage === "notes"}
@@ -9267,6 +9297,16 @@ export function EditorPage() {
                   {...inspectorHandlers}
                   hasCopiedTextLook={lookClipboard !== null}
                   assets={assets}
+                  onBrowseFillTexture={(layerId) => {
+                    // ADR-023 S5b: the same "Replace asset" pool mode Flarex's MediaIn uses, third
+                    // consumer. A mode rather than an embedded list, so the picker cannot drift from
+                    // what the bin actually holds.
+                    setAssetPickerForLayerId(null);
+                    setFlarexSourcePick(null);
+                    setFillTexturePickLayerId(layerId);
+                    setPanelTab("assets");
+                    setNotice("Pick an image for the text fill");
+                  }}
                   palette={imagePalette}
                   hideAssetBin
                   layer={inspectorLayer}
@@ -11890,6 +11930,8 @@ function AssetBinImpl({
   onCreateTimeline
 }: {
   assets: SourceAsset[];
+  /** ADR-023 S5b: put the media pool into pick-one mode for this layer's glyph fill. */
+  onBrowseFillTexture?: ((layerId: string) => void) | undefined;
   /** Scopes the Local bin to this project: assets owned by a DIFFERENT project are hidden; user-level library
    *  assets (no owner) and this project's own uploads stay. Omit to show everything (legacy behavior). */
   currentProjectId?: string | undefined;
@@ -14127,6 +14169,7 @@ const LayerInspector = memo(LayerInspectorImpl);
 
 function LayerInspectorImpl({
   assets,
+  onBrowseFillTexture,
   palette,
   hideAssetBin = false,
   layer,
@@ -14179,6 +14222,8 @@ function LayerInspectorImpl({
   onOpenScopesPanel
 }: {
   assets: SourceAsset[];
+  /** ADR-023 S5b: put the media pool into pick-one mode for this layer's glyph fill. */
+  onBrowseFillTexture?: ((layerId: string) => void) | undefined;
   palette: string[];
   hideAssetBin?: boolean;
   layer: TimelineLayer;
@@ -14361,6 +14406,8 @@ function LayerInspectorImpl({
           styleKf={makeStyleKeyframeTools(layer, currentTime, onChange, onSeek, autoKeyframe)}
           currentTime={currentTime}
           onSeek={onSeek}
+          assets={assets}
+          onBrowseFillTexture={onBrowseFillTexture}
         />
         {onSaveTextStyle && onApplyTextStyle && onUpdateTextStyle && onRenameTextStyle && onDeleteTextStyle ? (
           <TextStylesSection
@@ -14955,7 +15002,9 @@ function TextGraphicControls({
   onChange,
   styleKf,
   currentTime = 0,
-  onSeek
+  onSeek,
+  assets = [],
+  onBrowseFillTexture
 }: {
   layer: TimelineLayer;
   palette: string[];
@@ -14963,6 +15012,9 @@ function TextGraphicControls({
   styleKf?: StyleKeyframeTools | undefined;
   currentTime?: number | undefined;
   onSeek?: ((seconds: number) => void) | undefined;
+  /** ADR-023 S5b: the pool the glyph fill's `reference` resolves against. */
+  assets?: SourceAsset[] | undefined;
+  onBrowseFillTexture?: ((layerId: string) => void) | undefined;
 }) {
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
   // SOURCE TEXT keyframes (Premiere-style, hold): the editor shows/edits the runs governing the
@@ -15010,6 +15062,20 @@ function TextGraphicControls({
       },
       onReset: () => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined })),
       onPick: (next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))
+    },
+    /* ADR-023 S5b — image fill on the glyphs. The picker is the SHARED `reference`/asset editor (S4b),
+       so what crosses here is the pool to resolve against and the write, never a widget. Clearing
+       drops fit and scale with the image: a fit with no image is a value nothing can render. */
+    fillTexture: {
+      assetId: layer.fillTextureAssetId,
+      assets: assets.map((asset) => ({ id: asset.id, fileName: asset.fileName, thumbnailUrl: asset.thumbnailUrl })),
+      onPick: (assetId) =>
+        onChange((item) => ({
+          ...item,
+          fillTextureAssetId: assetId,
+          ...(assetId === undefined ? { fillTextureFit: undefined, fillTextureScale: undefined } : {})
+        })),
+      ...(onBrowseFillTexture ? { onBrowse: () => onBrowseFillTexture(layer.id) } : {})
     },
     slots: {
       /* ADR-023 S2.7 — Bold picks the bold FILE. Over a pinned ref these toggles rewrite the ref to
@@ -15138,6 +15204,16 @@ function TextGraphicControls({
               fields={pickTextStyleFields(styleFields, ["fillGradientFrom", "fillGradientTo", "fillGradientAngle"])}
             />
           </div>
+          {/* S5b / ADR-023 — image fill, decomposed into reference + enum + number. The picker is the
+              shared `reference`/asset editor S4b built; this stage adds no widget. */}
+          <div className="icon-control-row">
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["fillTextureAssetId"])} />
+          </div>
+          {layer.fillTextureAssetId ? (
+            <div className="icon-control-row">
+              <PropertyFieldList fields={pickTextStyleFields(styleFields, ["fillTextureFit", "fillTextureScale"])} />
+            </div>
+          ) : null}
         </div>
       </InspectorSection>
 
