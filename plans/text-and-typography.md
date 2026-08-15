@@ -609,8 +609,20 @@ at.**
   in it. It has no editor UI today, so no user can reach it; **S6 must not ship presets without closing
   this**, and the fix is to describe it in the schema, which needs a kind decision for a composite value.
 - The DOM overlay path is covered at the emitted-CSS level (`textstyle:schema` asserts the clip, the
-  fill-colour give-up and `box-decoration-break`), **not** by pixels: the pixel harness compares the two
-  raster consumers, which is where the shipped picture comes from. Stated rather than implied.
+  fill-colour give-up, `box-decoration-break` and the run's paint order), **not** by the pixel gate:
+  that harness compares the two raster consumers, which is where the shipped picture comes from.
+  `apps/worker/tmp/s5-dom-probe.mjs` paints the real emitted objects in Chrome instead, and it earned
+  its keep immediately — see below.
+
+**The same defect, twice, in two renderers, for one reason — and the second instance was only visible
+because the DOM was actually painted.** CSS paints **line boxes in order** (CSS 2.1 Appendix E), each
+one's inline backgrounds then its text. With the tight line-heights captions use (the default here is
+0.95, under 1) that means line two's pill paints over line one's descenders — which is precisely what
+the raster's first draft did, and what Chrome does natively. Fixing only the raster would have shipped
+the two renderers *disagreeing*, with every gate green, because no gate compares the DOM overlay to
+anything. The DOM half is `position: relative` on the run span when a pill is present: no offset, it
+just moves the glyphs into the positioned-descendant layer, above all in-flow inline backgrounds. Both
+paths now say "every pill, then all the text."
 
 ---
 

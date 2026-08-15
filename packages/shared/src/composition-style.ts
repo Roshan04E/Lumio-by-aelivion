@@ -1070,6 +1070,8 @@ export function getCompositionTextRunStyle(
     /** ADR-023 S5 — see {@link getCompositionTextStyle}'s `textFillGradient`. DOM path only; the
      *  raster reads the same emitted string and paints a canvas gradient instead. */
     textFillGradient?: string | undefined;
+    /** ADR-023 S5 — present when the layer has a per-line pill, which the run has to paint above. */
+    textLinePill?: string | undefined;
   }
 ): Record<string, unknown> {
   const baseFontSize = numberOr(baseStyle.fontSize, compositionTextDefaults.fontSize);
@@ -1098,7 +1100,22 @@ export function getCompositionTextRunStyle(
           // is invisible. It is also why the gradient cannot share an element with the pill.
           WebkitTextFillColor: "transparent"
         }
-      : {})
+      : {}),
+    /**
+     * ADR-023 D7 (S5) — lift the glyphs above the pill fragments. MEASURED, not defensive.
+     *
+     * CSS paints LINE BOXES in order (CSS 2.1 Appendix E), each one's inline backgrounds then its
+     * text — so with the tight line-heights captions use (the default here is 0.95, under 1) the
+     * second line's pill paints over the first line's descenders and eats them. Chrome does exactly
+     * that, verified in `apps/worker/tmp/s5-dom-probe.mjs`, and the raster's first draft reproduced it
+     * for the same structural reason before the pill pass was moved ahead of every glyph.
+     *
+     * `position: relative` moves the run into the positioned-descendant layer, which paints above all
+     * in-flow inline backgrounds — the DOM's way of saying "pills first, then all the text". No offset,
+     * so nothing moves; only the paint order changes. Emitted ONLY alongside a pill, so a layer without
+     * one is byte-identical.
+     */
+    ...(baseStyle.textLinePill ? { position: "relative" } : {})
   };
 }
 

@@ -243,6 +243,12 @@ const pinnedLora: FontRef = {
   const other = getCompositionTextStyle(textLayer({ backgroundPerLine: true, backgroundColor: "#eeeeee" }));
   check("S5 pill: two pill colours produce two DIFFERENT emitted styles (the raster cache key)", JSON.stringify(pilled) !== JSON.stringify(other));
 
+  // Measured in Chrome (`apps/worker/tmp/s5-dom-probe.mjs`): CSS paints LINE BOXES in order, so
+  // without this the second line's pill covers the first line's descenders — the same defect the
+  // raster's first draft had, arriving in the other renderer for the same structural reason.
+  check("S5 pill: the runs paint ABOVE the pill fragments", getCompositionTextRunStyle({ text: "hi" }, pilled).position === "relative");
+  check("S5 pill: and a pill-less layer gets no such key", !("position" in getCompositionTextRunStyle({ text: "hi" }, legacy)));
+
   const pillCss = getCompositionTextLinePillStyle(pilled);
   check("S5 pill: the DOM wrapper clones its box per line fragment", pillCss?.boxDecorationBreak === "clone" && pillCss?.backgroundColor === "#101010");
   check("S5 pill: no pill, no wrapper", getCompositionTextLinePillStyle(legacy) === undefined);
