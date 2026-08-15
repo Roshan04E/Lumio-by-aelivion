@@ -1537,6 +1537,45 @@ because the seam itself has not shipped and this entry's own pool half is unaffe
 next thing that admits under any kind of budget — the frame cache's I-P9 eviction, a future GPU-memory
 budget — starts from "serialize or stagger the burst" instead of re-discovering it.
 
+**UPDATE (2026-08-15) — ADR-021 step 2 SHIPPED, and clause (a) is gone AT THE FLAREX ACQUIRE SITE.
+Read the scope narrowly: this does not retire the entry.**
+
+The seam landed and passed its own acceptance on a real editor (`flarex-loader-ceiling-probe.ts`, 12
+distinct real renders bound as asset-source `MediaIn`s on one comp, wired through a Merge chain to
+`MediaOut`, real Chrome, both arms on the identical fixture):
+
+| arm | rendering | admission |
+|---|---|---|
+| session pool (BEFORE) | 3 of 12 | `capMisses 29`, 9 loaders → `<video>` |
+| byte-budgeted seam (AFTER) | **12 of 12** | **0 denials, 0 element fallbacks**, 0 evictions, peak 706 MB / 768 MB |
+
+**Why this is a removal rather than a recovery, which matters for how the entry retires.** Clause (a)
+asks that a source denied at mount be *subsequently admitted*. The seam satisfies it by making the
+denial not happen: there is no session, no slot, and therefore no mount-order lottery to lose. Every
+mechanism this entry catalogues — aging that is structurally inert, no post-storm decision point,
+`MIN_RESIDENCY_MS` converting arrival order into protected incumbency — is about arbitrating scarce
+SESSIONS, and at this acquire site there are none to arbitrate. That is a stronger fix than the retry
+path slices D/E/F chased, and it is why none of those mechanisms had to be repaired to get here.
+
+**What remains open, unchanged.** (1) The TIMELINE still acquires through `preview-frame-pool` and its
+caps are correct there and deliberately not relaxed — ADR-021 step 4 is where that changes, and it is
+not scheduled. (2) The comp-proxy acquire site (`useFlarexCompProxies.ts`) still mints a fresh blob URL
+per attempt, so blocker 3 — the identity slice — is untouched; the trigger recorded at the top of this
+entry stands. (3) Nothing here revisits D/E/F: they remain rejected/parked on their own evidence.
+
+**One defect this step FOUND by removing the ceiling, fixed in the same commit.** With all 12 loaders
+finally holding providers, a pre-existing dropped-request path became reachable at scale:
+`WebglMediaLayer.requestWcFrame`'s `wcProviderRef.current !== provider` guard correctly discards a frame
+whose provider the layer no longer holds, and then re-asks for nothing — so the layer waits on a request
+only the playback rAF loop would ever re-issue. PAUSED there is no such loop, and the loader stays dark
+forever. Attributed on a one-line control, paused, single variable: **without the re-arm 1 of 12 render
+(host substitutions 1854); with it 12 of 12, all coherent at `staleMs 0` (substitutions 79).** Fixed on
+the consumer's path per DEBT-009's rule — a paced `scheduleWcRerequest()` — not by exempting the
+provider from the identity check. **The ceiling had been hiding it:** under the pool the 9 losing
+loaders were denied a provider and took the `<video>` path, so they never reached the race. Worth
+recording as its own small class — *removing a limiter exposes the paths its victims never used to
+reach* — because steps 3 and 4 will remove two more.
+
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
 - Status: **RETIRED 2026-08-12** (see the closing update at the end of this entry)

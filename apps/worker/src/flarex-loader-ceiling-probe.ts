@@ -96,6 +96,12 @@ interface Sample {
   hostSubstitutions: number;
   seamFlag: boolean | null;
   heals: Record<string, number>;
+  /**
+   * What became of each frame the PROVIDER counted as served (`__rfFramePresent`). The join between
+   * `framesServed` and `served`, which are counted at different events and were previously read as if
+   * they were the same one — see `recordFrameDisposition`.
+   */
+  disposition: Record<string, number>;
 }
 
 async function sample(page: Page): Promise<Sample> {
@@ -154,6 +160,7 @@ async function sample(page: Page): Promise<Sample> {
       // WHICH self-heal sent a loader to <video>. `initTimeout` vs `nullFrames` vs `noSource` are three
       // different causes with three different fixes, and the element column alone cannot separate them.
       heals: { ...(w.__rfWcHeals ?? {}) } as Record<string, number>,
+      disposition: { ...(w.__rfFramePresent ?? {}) } as Record<string, number>,
       loaders,
       rendering: loaders.filter((l) => l.wcProvider && l.decode !== "element" && l.served != null).length,
       onElement: loaders.filter((l) => l.decode === "element").length,
@@ -254,11 +261,65 @@ function seedClips(count: number): string[] {
   return picked;
 }
 
-async function playAndSettle(page: Page): Promise<void> {
+/**
+ * Did the transport actually START? Returns the observed advance in seconds.
+ *
+ * THIS IS A PRECONDITION, NOT A NICETY, and its absence is why the parked run's numbers could not be
+ * read. `playAndSettle` clicks Play through a `.catch(() => undefined)`, so a click that lands on
+ * nothing is indistinguishable from one that starts playback — and the two produce entirely different
+ * machines. `WebglMediaLayer`'s repeat-pull loop is a rAF loop gated on `isPlaying` (:1765-1779): while
+ * playing, twelve loaders pull ~60×/s each; while PAUSED, each loader pulls once from its lease's
+ * `ready.then` and then only on a transport change. The parked run measured **pulls 17 for 12 loaders
+ * over a 9 s settle**, which is the paused machine almost exactly (12 first pulls + 5 follow-ups) and
+ * is arithmetically impossible for a playing one.
+ *
+ * So a run that reports "0-3 of 12 loaders rendering" without this check cannot say whether it measured
+ * the seam under playback or a paused editor that was never asked to decode. Reported either way; the
+ * caller decides whether to VOID.
+ */
+async function transportAdvance(page: Page, overMs = 1_200): Promise<number> {
+  const read = () =>
+    page.evaluate(() => {
+      const clock = (globalThis as unknown as { __rfClock?: { committed: number; live: number } }).__rfClock;
+      return clock ? clock.live : null;
+    });
+  const before = await read();
+  if (before == null) return Number.NaN; // no clock symbol at all — a different failure, named by NaN
+  await page.waitForTimeout(overMs);
+  const after = await read();
+  return after == null ? Number.NaN : after - before;
+}
+
+/**
+ * `PROBE_NO_PLAY=1` — settle the comp WITHOUT starting the transport.
+ *
+ * Not a convenience switch; it is the attribution arm, and it tests a product property in its own
+ * right. While playing, `WebglMediaLayer` runs a rAF loop that re-requests every source every frame
+ * (`:1765`), which papers over any defect whose symptom is "this loader stopped asking" — the loop
+ * simply asks again 60 times a second. PAUSED there is no such loop, so a source that drops a request
+ * stays dark until the user touches the transport. A compositor paused on a frame must show every one
+ * of its sources; that is the state a user spends most of their time in.
+ */
+const NO_PLAY = process.env.PROBE_NO_PLAY === "1";
+
+async function playAndSettle(page: Page): Promise<number> {
   await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
-  const play = page.locator('button[title*="Play"], button[aria-label*="Play"]').first();
+  if (NO_PLAY) {
+    await page.waitForTimeout(SETTLE_MS);
+    return 0;
+  }
+  // EXACT TITLE, and the substring match it replaces is why this probe measured a paused editor.
+  // `button[title*="Play"]` also matches VideoPreview's **"Playback stats (FPS / dropped frames /
+  // render scale)"** toggle (`VideoPreview.tsx:2019`), and `.first()` took it in DOM order — so every
+  // run so far clicked a stats button, never the transport. The editor's transport toggle is
+  // `EditorPage.tsx:9048`, whose title is exactly "Play (Space)" / "Pause (Space)".
+  const play = page.locator('button[title="Play (Space)"]').first();
   await play.click({ timeout: 10_000 }).catch(() => undefined);
+  // Measured BEFORE the settle: the question is whether playback started, and a reading taken after a
+  // 9 s wait could not tell "started" from "started, ran off the end of the material, and stopped".
+  const advance = await transportAdvance(page);
   await page.waitForTimeout(SETTLE_MS);
+  return advance;
 }
 
 async function main(): Promise<void> {
@@ -323,13 +384,17 @@ async function main(): Promise<void> {
   }
   console.log("");
 
-  const armResults: { arm: (typeof ARMS)[number]; s: Sample }[] = [];
+  const armResults: { arm: (typeof ARMS)[number]; s: Sample; advance: number }[] = [];
   for (const arm of ARMS) {
     console.log(`── ${arm.name}   [?${arm.flags}]`);
     await reopenWithFlags(page, projectUrl, `${arm.flags}&wcDecode=1&flarexTrace=1${EXTRA_FLAGS}`);
-    await playAndSettle(page);
+    const advance = await playAndSettle(page);
     const s = await sample(page);
-    armResults.push({ arm, s });
+    armResults.push({ arm, s, advance });
+    console.log(
+      `   transport advanced     : ${Number.isNaN(advance) ? "NO __rfClock — cannot tell" : `${advance.toFixed(2)}s in 1.2s`}` +
+        `${!Number.isNaN(advance) && advance < 0.2 ? "  ⚠ PAUSED — the per-frame pull loop never ran" : ""}`
+    );
     console.log(`   seam flag seen by page : ${s.seamFlag === null ? "ABSENT" : s.seamFlag}`);
     console.log(`   loaders present        : ${s.loaders.length}  (source-map keys total ${s.allSourceMapKeys.length})`);
     if (!s.loaders.length && s.allSourceMapKeys.length) {
@@ -339,6 +404,10 @@ async function main(): Promise<void> {
     console.log(`   fell back to <video>   : ${s.onElement}`);
     console.log(`   host substitutions     : ${s.hostSubstitutions}`);
     console.log(`   wc self-heals          : ${Object.entries(s.heals).map(([k, v]) => `${k}=${v}`).join(" · ") || "none"}`);
+    // The join between the provider's `framesServed` and the layer's `served`. `presented` is the only
+    // disposition that stamps a served time, so anything else here is a frame the façade counted and
+    // the canvas never got — which is the difference the parked run read as a reporting gap.
+    console.log(`   frame disposition      : ${Object.entries(s.disposition).map(([k, v]) => `${k}=${v}`).join(" · ") || "none (no frame reached the layer at all)"}`);
     if (s.pool) console.log(`   pool                   : created ${s.pool.created} · capMisses ${s.pool.capMisses} · denials ${s.pool.admissionDenials}`);
     if (s.budget) {
       console.log(
@@ -366,6 +435,28 @@ async function main(): Promise<void> {
   console.log(`  bound MediaIns                : ${bound}`);
   console.log(`  rendering, pool arm  (BEFORE) : ${pool.s.rendering}`);
   console.log(`  rendering, seam arm  (AFTER)  : ${seam.s.rendering}`);
+
+  // PRECONDITION BEFORE COMPARISON. A paused arm did not exercise the per-frame pull loop at all, so
+  // its `rendering` count describes an editor sitting still — and comparing a paused arm with a playing
+  // one is a two-variable experiment reported as one. Checked before the flag check because a run that
+  // never played is not evidence about a ceiling under either admission authority.
+  const stalled = NO_PLAY ? [] : armResults.filter((r) => !Number.isNaN(r.advance) && r.advance < 0.2);
+  if (NO_PLAY) {
+    console.log(
+      "\n  NOTE: PROBE_NO_PLAY=1 — the transport was never started, deliberately. The per-frame rAF\n" +
+        "        re-request loop did not run, so every loader's picture is the product of its own\n" +
+        "        request chain alone. This is the arm that can see a dropped request."
+    );
+  }
+  if (stalled.length) {
+    console.log(
+      `\n[ceiling] ⚠ VOID — the transport never advanced in the ${stalled.map((r) => r.arm.key).join(" and ")} arm(s) ` +
+        `(${stalled.map((r) => `${r.arm.key} ${r.advance.toFixed(2)}s`).join(", ")}).\n` +
+        "          The repeat-pull loop is gated on isPlaying, so a paused arm pulls once per loader and stops.\n" +
+        "          Neither the rendering count nor the ceiling comparison is about decoding under playback."
+    );
+    process.exitCode = 1;
+  }
 
   const flagsSeen = pool.s.seamFlag === false && seam.s.seamFlag === true;
   if (!flagsSeen) {

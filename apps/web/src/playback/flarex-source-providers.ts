@@ -160,9 +160,20 @@ const stats = {
    * Pulls that ended because their build came back `"failed"` or `"budget"`. Counted because they
    * previously exited with NO counter at all: an acceptance run read `pulls 25 · served 3 · nulls 0 ·
    * in-flight 0`, which does not add up, and the 22 missing pulls were invisible by construction.
-   * A ledger that does not balance must say so.
+   * A ledger that does not balance must say so. Read it WITH `buildAbandoned`, which attributes how
+   * many of these were ordinary remount churn rather than a source that cannot be decoded.
    */
   buildFailures: 0,
+  /**
+   * Builds abandoned because the ENTRY WAS RELEASED while its construction was in flight — a React
+   * remount, a `src` flip to the ingest-proxy variant, a comp closing. Split out of `buildFailures`
+   * because conflating them makes a healthy number look alarming and hides a real one behind it:
+   * `admitAndBuild`'s `entry.disposed` branch returns the same `"failed"` string as a codec the
+   * decoder genuinely cannot open, and step-2 acceptance runs read `build-failures 5-7` on a fixture
+   * where all twelve sources decoded perfectly. Churn is expected and self-correcting; an
+   * undecodable source is neither, and the consumer takes its `<video>` fallback for it.
+   */
+  buildAbandoned: 0,
 };
 
 /**
@@ -383,6 +394,9 @@ async function admitAndBuild(entry: Entry): Promise<BuildOutcome> {
       /* nothing to do */
     }
     charge(entry, 0);
+    // The consumer went away mid-build, which is ordinary remount churn — NOT an undecodable source.
+    // Same return value (the caller's handling is identical), different counter. See `buildAbandoned`.
+    stats.buildAbandoned += 1;
     return "failed";
   }
   if (!provider) {

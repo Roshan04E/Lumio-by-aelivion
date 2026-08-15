@@ -2943,3 +2943,81 @@ owning session decides to *abandon* the work.
 
 **Standing until then:** no measurement may rely on those fields; S4.7 stays flag-off pending its R2
 soak; S4.3 stays observability-only.
+
+## v35 — a discarded frame was never re-asked for, so a paused loader stayed dark forever (2026-08-15)
+
+**Problem:** on a Flarex comp with 12 asset-source `MediaIn`s moved onto ADR-021's pull seam, only 1-3
+of 12 loaders showed a picture even though every one of them held a live provider and the provider's own
+books said frames were being served. The source map read `state=AWAITING · why=WC_NO_FRAME · busy=false`
+on the rest — provider present, nothing in flight, no picture — while the compiler's host-substitution
+census climbed to 1854. Paused, it never recovered.
+
+**Root cause:** `WebglMediaLayer.requestWcFrame`'s `if (wcProviderRef.current !== provider) return;`
+guard. Discarding the frame is correct — it belongs to a provider the layer no longer holds, after a
+remount or a `src` flip to the ingest-proxy variant — but the exit **re-asked for nothing**. The layer
+had spent its one request and now waited for another, and the only thing that re-issues one during
+normal operation is the per-frame rAF loop, which is gated on `isPlaying` (`WebglMediaLayer.tsx:1765`).
+PAUSED there is no loop at all, so the loader waited forever.
+
+Two things had kept this invisible. **The loader ceiling was hiding it:** under the session pool the 9
+losing loaders were denied a provider and took the `<video>` path, so they never got far enough to lose
+this race — removing the admission ceiling is what made it reachable at scale. And **the two books
+count different events:** `__rfFlarexProviders.framesServed` increments when the façade's `getFrame`
+RESOLVES with a picture, while `__rfSourceMap.served` is stamped only in `presentFrame`. Reading
+`framesServed 23` beside `served: null` as "a frame reached the layer and went unreported" was an
+inference across that gap, and it is wrong in the other direction too: `servedSourceTimeRef` (`:2446`)
+and `wcFrameRef` (`:2452`) are written by the same function and cleared together (`:692`), so a layer
+holding a picture it does not report is unreachable by construction. `served: null` always meant no
+picture.
+
+**Fix:** a pre-registered disposition counter (`__rfFramePresent` — `presented` / `providerChanged` /
+`heldNotPresented` / `nullFrame` / `threw`) to name which exit consumes a served frame, then a paced
+`scheduleWcRerequest()` on the `providerChanged` exit. On the CONSUMER's path, per DEBT-009's rule —
+not by exempting the provider from the identity check. Self-limiting: `scheduleWcRerequest`'s `fire()`
+re-checks `wcProviderRef.current`, so a layer genuinely tearing down re-asks nothing.
+
+**Verify:** one-line control, paused arm, single variable, same fixture —
+
+| | rendering | presented | providerChanged | host substitutions |
+|---|---|---|---|---|
+| without the re-arm | 1 of 12 | 2 | 22 | 1854 |
+| with the re-arm | **12 of 12** | 42 | 18 | 79 |
+
+With it, all 12 paused loaders read `state=ok · staleMs 0` — a coherent comp. Under playback the
+acceptance probe reports 3 → 12 concurrently rendering loaders against the session-pool arm's ceiling
+(`capMisses 29`), 0 denials, 0 evictions, 706 MB peak of a 768 MB budget.
+
+**Honest limit:** 12 sources ACQUIRE and present; they do not stay coherent while PLAYING. In the
+playing arm only 3 of 12 read `ok`, the other 9 `stale` by up to 1728 ms. Twelve concurrent software
+1080p decoders do not hold rate on this machine, and ADR-021 §7 says so in advance — this step fixes
+acquisition, and acquisition was not the slow thing.
+
+## v35a — the probe was clicking "Playback stats", so every run measured a paused editor (2026-08-15)
+
+**Problem:** `flarex-loader-ceiling-probe.ts` reported loader-rendering counts that were meant to be
+about decoding under playback. They were about an editor sitting still at t=0.
+
+**Root cause:** `playAndSettle` located the transport with
+`button[title*="Play"], button[aria-label*="Play"]` and took `.first()`. That substring **also matches
+`VideoPreview.tsx`'s "Playback stats (FPS / dropped frames / render scale)" toggle**, which comes first
+in DOM order. The editor's transport control is `EditorPage.tsx`,
+`title={isPlaying ? "Pause (Space)" : "Play (Space)"}`.
+
+The tells were in the numbers and went unread for two sessions: **12 loaders over a 9 s settle produced
+`pulls 29`** — roughly one per loader, where playback produces thousands — and every rendering loader
+read `served=0.00`, a playhead that never left zero. The click itself was wrapped in
+`.catch(() => undefined)`, so landing on nothing looked identical to succeeding.
+
+**Fix:** exact selector `button[title="Play (Space)"]`, plus a `transportAdvance()` precondition that
+reads `__rfClock.live` before and after 1.2 s and **VOIDs the run** when it did not move. Also
+`PROBE_NO_PLAY=1`, which settles deliberately paused — the arm that can see a dropped request, because
+the rAF loop is not there to paper over one.
+
+**Verify:** after the fix the same probe reports `transport advanced : 1.64s in 1.2s` and
+`presented` rises from 4 to 1241 in the pool arm — the per-frame loop running for the first time in this
+probe's history.
+
+**Why it matters beyond this probe:** this is `measurement-preconditions` rule 1 applied to the
+TRANSPORT rather than the decoder. WebCodecs *was* engaged, `__rfWcMode` *did* read `wc-sw`, and the
+build-identity check *did* pass — every precondition the probe knew to assert was green, and the run
+was still about a different machine than the one it named.

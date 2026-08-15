@@ -150,6 +150,39 @@ function recordWcHeal(kind: "initTimeout" | "noSource" | "busyWedge" | "divergen
 }
 
 /**
+ * FRAME-DISPOSITION PROBE (2026-08-15, ADR-021 step 2) — what became of a frame the PROVIDER already
+ * counted as served.
+ *
+ * PRE-REGISTERED, before the run it exists to read. The parked step-2 measurement recorded
+ * `framesServed 15` in `__rfFlarexProviders` beside `served: null` on every loader in `__rfSourceMap`,
+ * and concluded a frame was reaching the layer and going unreported. That conclusion is not available
+ * from those two books, because they count different events: the provider's counter increments when
+ * `getFrame` RESOLVES with a picture (`flarex-source-providers.ts`, inside the façade), while the
+ * consumer's `served` is stamped only in `presentFrame`. Between them sit four exits that consume a
+ * resolved frame without presenting it, and NOTHING counts them — so "delivered" was inferred from
+ * "returned", which is this register's own recurring error read in the positive direction (DEBT-012:
+ * count the reasons, never infer which branch fired).
+ *
+ *   `presented`       reached `presentFrame` — the only outcome that stamps `served`.
+ *   `providerChanged` the layer's provider was swapped (remount, `src` change, element fallback)
+ *                     while this decode was in flight, so the answer belongs to a provider the layer
+ *                     no longer holds. The façade counted it; the canvas never saw it.
+ *   `heldNotPresented` the rewind catch-up hold deliberately kept the previous picture this pass.
+ *   `nullFrame`       resolved null (budget pressure, wedge guard, decoder bail).
+ *   `threw`           the promise rejected and the layer fell back.
+ *
+ * Unconditional integer increments on a path that already allocates — the diagnostics ring is not
+ * used deliberately, for the reason DEBT-013's denied registry gives: a reading that disappears when
+ * instrumentation is off cannot be the reading a verdict rests on.
+ */
+function recordFrameDisposition(kind: "presented" | "providerChanged" | "heldNotPresented" | "nullFrame" | "threw") {
+  if (typeof window === "undefined") return;
+  const w = window as unknown as { __rfFramePresent?: Record<string, number> };
+  const stats = (w.__rfFramePresent ??= {});
+  stats[kind] = (stats[kind] ?? 0) + 1;
+}
+
+/**
  * STALE-CLOCK PROBE (2026-07-26). A layer whose `currentTime` prop stops updating while the transport
  * plays keeps requesting ONE constant source time, so the decoder serves the same frame forever — the
  * picture freezes with `lastFrameLagSeconds` ≈ 0, which is invisible to EVERY heal here (they are all
@@ -2346,7 +2379,37 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         .then((frame) => {
           wcBusyRef.current = false;
           wcInFlightSinceMsRef.current = null;
-          if (wcProviderRef.current !== provider) return; // released/fell back mid-decode
+          if (wcProviderRef.current !== provider) {
+            // Counted, not merely returned: the façade has ALREADY incremented its own `framesServed`
+            // for this picture, so an uncounted exit here makes the two books disagree by construction.
+            if (frame) recordFrameDisposition("providerChanged");
+            /**
+             * RE-ARM, because this exit is a DROPPED REQUEST and nothing else re-issues it.
+             *
+             * The answer belongs to a provider this layer no longer holds, so discarding the picture is
+             * right. What was missing is the consequence: the layer had asked for a frame, threw the
+             * answer away, and then waited for a request that only a transport change or the rAF
+             * playback loop would ever make. PAUSED there is no rAF loop at all (`:1765` is gated on
+             * `isPlaying`), so the layer waited forever — provider held, `wcBusy` false, no picture.
+             *
+             * MEASURED, ADR-021 step 2 acceptance, 12 wired MediaIns on the byte-budgeted seam:
+             * `providerChanged=20 · presented=4` against `framesServed 23`, with 9 of 12 loaders parked
+             * at `state=AWAITING · why=WC_NO_FRAME · busy=false` and host substitutions at 1886. Twenty
+             * decoded pictures were produced, discarded here, and never re-asked for.
+             *
+             * The seam did not create this path — the guard predates it — but it made it reachable at
+             * scale: under the session pool the 9 losing loaders were denied a provider and took the
+             * `<video>` path, so they never got far enough to lose this race. Removing the admission
+             * ceiling is what exposed it.
+             *
+             * PACED, not immediate (`scheduleWcRerequest`, one macrotask or one display frame), and it
+             * self-limits: `fire()` re-checks `wcProviderRef.current`, so a layer that is genuinely
+             * tearing down re-asks nothing. Fixed on the CONSUMER's path — the provider is not exempted
+             * from the identity check, which is the repair DEBT-009 rules out.
+             */
+            scheduleWcRerequest();
+            return; // released/fell back mid-decode
+          }
           if (frame) {
             wcNullCountRef.current = 0;
             // S2 REVERSE (Premiere-style smooth reverse): sustained reverse playback is EXPECTED
@@ -2436,6 +2499,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               }
             }
             const presentFrame = () => {
+              recordFrameDisposition("presented");
               // A frame reached the canvas: whatever the layer was retrying for is over, so the backoff
               // starts clean next time. Without this a source that recovers keeps its old (long) delay.
               wcTolerateRetryRef.current = 0;
@@ -2477,6 +2541,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               // regions" (2026-07-04 __rfLiveFreeze capture: holding:true chained 10s+, 15s behind).
               if (wcHoldStartRef.current === null) wcHoldStartRef.current = nowMs;
               if (nowMs - wcHoldStartRef.current < WC_HOLD_MAX_MS) {
+                recordFrameDisposition("heldNotPresented");
                 wcRerequestPaceRef.current = "frame"; // self-driven catch-up hold — see the pace ref
                 wcRerequestRef.current = true;
                 // Soak telemetry (__rf* convention): proves in the field whether the rewind hold is
@@ -2501,6 +2566,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               presentFrame();
             }
           } else {
+            recordFrameDisposition("nullFrame");
             // Repeated nulls = this source can't be served by WebCodecs here → <video> fallback.
             wcNullCountRef.current += 1;
             if (props.tolerateLag) {
@@ -2536,6 +2602,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           }
         })
         .catch(() => {
+          recordFrameDisposition("threw");
           wcBusyRef.current = false;
           wcInFlightSinceMsRef.current = null;
           wcFallbackRef.current();
