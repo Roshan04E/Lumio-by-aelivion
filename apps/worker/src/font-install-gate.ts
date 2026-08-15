@@ -43,8 +43,15 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 const outDir = path.join(repoRoot, "tmp", "font-install-gate");
 const antonPath = path.join(repoRoot, "apps", "worker", "public", "fonts", "Anton-Regular.ttf");
 
-/** Render `scaled-text` with every text layer's font forced to `ref`. Returns the PNG path. */
-async function renderWithFont(ref: FontRef, label: string): Promise<string> {
+/**
+ * Render `scaled-text` with every text layer's font forced to `ref`. Returns the PNG path.
+ *
+ * `media: false` strips every non-text layer, which is not a stylistic variation — see the no-media
+ * arm in `main`. Every other arm in this gate renders a composition that happens to carry a media
+ * layer, and that media layer was masking a real defect for the whole of S2.
+ */
+async function renderWithFont(ref: FontRef, label: string, options: { media?: boolean } = {}): Promise<string> {
+  const withMedia = options.media !== false;
   const fixture = createRenderComparisonFixture("scaled-text");
   const composition = fixture.graph.composition!;
   let touched = 0;
@@ -54,11 +61,13 @@ async function renderWithFont(ref: FontRef, label: string): Promise<string> {
       ...composition,
       tracks: composition.tracks.map((track) => ({
         ...track,
-        layers: track.layers.map((layer) => {
-          if (layer.type !== "text") return layer;
-          touched += 1;
-          return { ...layer, fontRef: ref };
-        })
+        layers: track.layers
+          .filter((layer) => withMedia || layer.type === "text")
+          .map((layer) => {
+            if (layer.type !== "text") return layer;
+            touched += 1;
+            return { ...layer, fontRef: ref };
+          })
       }))
     }
   };
@@ -300,6 +309,57 @@ async function main(): Promise<void> {
       "resolved to one file, or the bold ref never reached the raster. This is the defect S2.7 exists to close, " +
       "and it is asserted between the two PINNED renders rather than against a fallback, because a faux-bolded " +
       "regular would also differ from a fallback."
+  );
+
+  /**
+   * ---- THE NO-MEDIA ARM (2026-08-15). ---------------------------------------------------------
+   *
+   * Found by S6's contact sheet, and invisible to every arm above because every fixture they render
+   * carries a media layer. Strip it and the SAME graph, the SAME seeded mirror and the SAME bytes in
+   * `inputProps` rendered a fallback: a silent substitution in an unattended export, the exact
+   * failure D3/T-2 exist to prevent.
+   *
+   * The cause was ordering, which is why nothing above could see it. The raster is drawn through a
+   * sync `ctx.font` that substitutes silently, and the only thing invalidating a fallback raster was
+   * a 150ms-debounced `document.fonts` listener — a LIVENESS signal (DEBT-009). Whether the right
+   * face reached the pixels therefore depended on whether something ELSE in the frame outlasted the
+   * debounce. A media decode round-trip does. Nothing does, in a composition of text alone.
+   *
+   * **Two PINNED families AT THE SAME WEIGHT, and it took two wrong drafts to land there.** Both
+   * wrong drafts failed the same way — they passed while the defect was present, because both were
+   * comparing two different FALLBACKS rather than a font against a font:
+   *
+   *   1. pinned Anton vs Anton named as a system stack. Different family stacks are emitted, so the
+   *      two fall back differently (a thin sans and a serif). Both wrong; `notEqual` satisfied.
+   *   2. pinned Anton 400 vs pinned Arimo 700. Same stack now, but the WEIGHT travels with the ref,
+   *      so the fallbacks are sans-serif 400 and sans-serif 700. Both wrong; `notEqual` satisfied.
+   *
+   * Only at equal weight do the two collapse onto one identical picture when the install path
+   * delivers neither — and Anton (ultra-bold condensed) against Arimo (an Arial metric clone) is as
+   * far apart as this catalogue gets when it delivers both. This is the S2.6 arm's lesson below,
+   * which already records two system-named families collapsing onto one fallback, arrived at from
+   * the other side: a `notEqual` between renders is evidence of nothing until every reason they
+   * could differ WITHOUT the font arriving has been removed.
+   *
+   * What this arm does NOT pin down, stated so nobody reads more into a pass than is there: it proves
+   * at least one of the two families arrives, not both. That is the claim being guarded — pinned
+   * bytes reach the raster in a composition with no media in it — and it is proven to discriminate by
+   * construction: with the readiness await removed, these two hashes are byte-identical.
+   */
+  const medialessAnton = await renderWithFont(pinned, "no-media-anton", { media: false });
+  const arimoRegularRef: FontRef = { source: "catalogue", family: "Arimo", weight: 400, style: "normal", fileHash: mirroredRegular.key.fileHash };
+  assert.equal(arimoRegularRef.weight, pinned.weight, "the two refs must share a weight, or their FALLBACKS differ and the arm proves nothing.");
+  const medialessArimo = await renderWithFont(arimoRegularRef, "no-media-arimo", { media: false });
+  process.stdout.write(
+    `no media → anton=${hashOf(medialessAnton).slice(0, 12)}  arimo=${hashOf(medialessArimo).slice(0, 12)}\n`
+  );
+  assert.notEqual(
+    hashOf(medialessAnton),
+    hashOf(medialessArimo),
+    "NO-MEDIA REGRESSION — in a composition with no media layer, two DIFFERENT pinned families rendered " +
+      "the identical picture, i.e. both fell back. The pinned bytes reach the raster only when something " +
+      "else in the frame is slow enough to let them win a race they should never have been in. " +
+      "See tmp/font-install-gate/no-media-*.png."
   );
 
   process.stdout.write("\nPASS — pinned bytes reach the raster, the render is deterministic, and a missing font aborts by name.\n");

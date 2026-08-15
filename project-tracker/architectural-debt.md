@@ -438,6 +438,20 @@ open, retired, or parked — it is simply wrong, and costs a full read to discov
 - Detection: a resource registered in one subsystem and swept by another that keys on a set the first
   subsystem never writes to. Concretely: a `ScenePool` entry with no `touchResource` call on its own
   consumption path.
+- **Instance 4 (2026-08-15) — OUTSIDE the scene pool, and it widens the class.** ADR-023 S6's contact
+  sheet surfaced a pinned font rendering as a fallback in any composition with no media layer.
+  `SceneTextRasterizer` drew and cached a text raster through a sync `ctx.font`, which substitutes
+  silently, and the only thing invalidating a fallback raster was a `document.fonts` `loadingdone`
+  listener bumping a version into the cache key — debounced 150ms. Whether the correct font reached
+  the pixels therefore depended on whether something else in the frame outlasted the debounce; a media
+  decode round-trip does, and text alone has nothing to lose the race to. **This is the same shape with
+  no pool and no reclaimer in it:** correctness rested on a notification the consumer never asked for.
+  Fixed the same way the other three were — on the consumer's path (`ensureOverlayFonts`, awaited
+  inside `rasterize`), never by exempting anything. The listener stays as an optimization.
+  **Detection widens accordingly:** not only "a resource swept by a subsystem that never writes to its
+  set", but **any correctness that depends on a signal arriving before an unrelated deadline** — an
+  event listener, a debounce, or a `ready` promise standing in for "the thing I am about to use is
+  usable". If the consumer can ask directly, it must.
 - **The fix for instance 3 is a touch on the compiler's consumption path, NOT an exemption.**
   `permanent` now exists and is the tempting one-liner; it is wrong here. A Flarex loader genuinely can
   depart, and an unreclaimable media resource is the VRAM leak S3.4 was written against — that trade
@@ -552,10 +566,11 @@ loses the ability to interpret its own numbers.
 
 ### DEBT-012 — CLASS: proof by a signal the subject never emits
 
-- Status: **open** (registered as a META-CLASS; now documents at least four shapes — see body:
+- Status: **open** (registered as a META-CLASS; now documents at least five shapes — see body:
   instance 1 liveness/DEBT-009, instance 2 declaration/F2, a mirror-image "precondition that
-  cannot pass," a "counter maintained on some paths and not others," and "verifying the wrong
-  SUBJECT" — plus a related but distinct shared-tree-collision pattern recorded here for proximity)
+  cannot pass," a "counter maintained on some paths and not others," "verifying the wrong
+  SUBJECT," and a "DIFFERENCE assertion satisfied by two broken states" — plus a related but distinct
+  shared-tree-collision pattern recorded here for proximity)
 - Registered: 2026-08-05 (ADR-013 Phase 0)
 - Reason: a health signal is verified against something **asserted upstream** rather than **observed from the subject**. The signal cannot fail, so it reads clean *because* the defect is present. This is the shape shared by DEBT-009 and by F2 below, and naming it is what makes it reviewable instead of rediscoverable.
 - Invariant affected: none directly — this is a class of *evidence* defect, which is why it evades invariant checks
@@ -704,6 +719,31 @@ not by any safeguard either session had. Third occurrence of two sessions writin
 producing a wrong or misleading commit — after the 2026-07-29 broad `git add -A` sweep and the 2026-08-07
 zero-context-patch corruption above. No fix is proposed here; recorded so the pattern is visible the next
 time it costs someone an hour.
+
+**A fifth shape — the DIFFERENCE assertion satisfied by two broken states (2026-08-15).** Shapes 1–4
+are all a signal that reads healthy while the subject is broken. This one is its negative-space twin,
+and it cost three gate drafts in one sitting. `font:install-gate` gained a no-media arm to guard the
+newly-fixed DEBT-009 instance 4, and its claim was "a pinned font reaches the raster", asserted as
+*two renders must DIFFER*. Two drafts passed while the defect was fully present:
+
+  1. pinned Anton vs Anton named as a system stack — different family stacks are emitted, so the two
+     land on different fallbacks (a thin sans and a serif). Both wrong. `notEqual` satisfied.
+  2. pinned Anton 400 vs pinned Arimo 700 — same stack now, but weight travels with the ref, so the
+     fallbacks are sans-serif 400 and sans-serif 700. Both wrong. `notEqual` satisfied.
+
+Only two pinned families **at the same weight** collapse onto one picture when neither arrives. The
+general form, and it is checkable at review time without running anything:
+
+> **For a gate asserting two things DIFFER, enumerate every way they could differ while the subject
+> is still broken. Each one is a way the gate passes vacuously.** An equality assertion fails safe —
+> it needs one reason to differ and gets it from the defect. A difference assertion fails OPEN: it is
+> satisfied by *any* asymmetry, including two flavours of the same failure.
+
+The tell here was available for free and was walked past twice: this same file already records, at its
+S2.6 arm, that two *system-named* families collapse onto one identical fallback. That is the same fact
+stated from the other side, sitting eight lines above the arm being written. **Detection:** a
+`notEqual`/`toBeGreaterThan`/"changed" assertion whose two operands differ in more than the one
+property under test. If the operands differ in two respects, the gate tests neither.
 
 ### DEBT-013 — a source denied at mount can never be admitted, and nothing reports it
 

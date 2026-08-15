@@ -954,18 +954,36 @@ Corrected contract: a stack is honoured when it displaces (`shadowLayers >= 2` a
 a single copy at blur 0 still emits nothing, because that is what every legacy layer resolves to
 (D1a). One golden moved; `render:baseline` covers the rest.
 
-**A pinned font does not reach the glyphs when the composition has no media layer. OPEN — belongs to
-S2/D3, not S6.** Reproduction: `apps/worker/tmp/s6-bisect.ts`, which renders the `scaled-text` fixture
-twice with Anton pinned, once whole and once with every non-text layer removed. Whole: Anton. Text
-only: the `sans-serif` fallback. The mirror is seeded, `resolveManifestFonts` returns the face with
-227KB of bytes (removing the seed aborts by name, so the refs demonstrably reach the resolver), and
-`InstallFonts` holds a `delayRender` handle until `document.fonts.load` resolves — yet the glyphs are
-fallback. The likely mechanism is the scene raster drawing and caching before the face is usable, with
-nothing invalidating it on font load; a media layer's own load is what incidentally delays the first
-raster today.
+**A pinned font does not reach the glyphs when the composition has no media layer. FIXED 2026-08-15.**
+Reproduction as filed: `apps/worker/tmp/s6-bisect.ts` renders the `scaled-text` fixture twice with
+Anton pinned, once whole and once with every non-text layer removed. Whole: Anton. Text only: a
+fallback. The mirror is seeded, `resolveManifestFonts` returns the face with 227KB of bytes (removing
+the seed aborts by name, so the refs demonstrably reach the resolver), and `InstallFonts` holds a
+`delayRender` handle until `document.fonts.load` resolves — yet the glyphs were fallback.
 
-**Why this matters more than a synthetic-fixture bug sounds:** a title card, a caption-only overlay
-project, or any text-over-colour composition has no media layer, and this is a SILENT substitution in
-an unattended export — the precise failure D3 and T-2 are written against. It is invisible to
-`font:install-gate` and to every pixel fixture because they all carry media. Whoever takes it should
-treat "the raster's font readiness" as the subject, not "the still renderer".
+**Mechanism, confirmed:** the filed hypothesis was right, and it is a DEBT-009 instance. `ctx.font`
+is sync and substitutes silently, so `SceneTextRasterizer` could draw and cache a fallback raster
+before the face was usable. The only thing that invalidated it was a `document.fonts` `loadingdone`
+listener bumping a version into the cache key — a LIVENESS signal, debounced 150ms. Whether the right
+font reached the pixels therefore depended on whether something ELSE in the frame outlasted the
+debounce. A media decode round-trip does. A composition of text alone has nothing to lose the race to,
+so it lost by default. Note that both halves of DEBT-009's rule apply: the fix touches readiness on
+the CONSUMER's path (`ensureOverlayFonts`, awaited inside `rasterize` beside the existing
+`ensureFillTexture` await, covering the measure as well as the paint — a box measured in the
+fallback's metrics stays wrong even if the right face later repaints inside it), and does not exempt
+anything from the sweep: the listener stays as a genuine optimization for a font arriving mid-session,
+but nothing correct rests on it.
+
+**Why this mattered more than a synthetic-fixture bug sounds:** a title card, a caption-only overlay
+project, or any text-over-colour composition has no media layer, and this was a SILENT substitution in
+an unattended export — the precise failure D3 and T-2 are written against.
+
+**And it was invisible to `font:install-gate` because every fixture there carries media.** A no-media
+arm is now in that gate, and getting it to DISCRIMINATE took three drafts, which is the reusable
+lesson (T-16's sibling, one layer up). Two drafts passed while the defect was present, because both
+compared two different FALLBACKS rather than a font against a font: pinned Anton vs Anton-as-a-system-
+stack emit different family stacks and so fall back differently; pinned Anton 400 vs pinned Arimo 700
+carry different weights into the same fallback. Only two pinned families **at the same weight**
+collapse onto one identical picture when neither arrives. **A `notEqual` between two renders is
+evidence of nothing until every reason they could differ WITHOUT the subject working has been
+removed** — and this file's own S2.6 arm had already recorded the same trap from the other side.

@@ -788,6 +788,11 @@ renders all 18 looks through the real Remotion renderer):
    **Not fixed here**: it is an S2/D3 render-boundary defect, not S6's, and it is recorded with its
    reproduction (`apps/worker/tmp/s6-bisect.ts`) rather than absorbed. `preset:sheet` puts a ground
    layer behind the cells so the sheet tells the truth about typography, and says why.
+   **FIXED 2026-08-15**, before S7 started, as a DEBT-009 instance: the raster's font readiness rested
+   on a debounced `document.fonts` listener, so the right face reached the pixels only when something
+   else in the frame outlasted the debounce. `ensureOverlayFonts` now awaits the layer's own faces on
+   the consumer's path, before the measure. `font:install-gate` gained a no-media arm; see ADR §8 for
+   why that arm needed three drafts before it could tell the two answers apart.
 
 The sheet also earned the Extrude preset a `lineHeight` of 1.35 rather than its neighbours' 1.05: a
 7×4px stack reaches 28px past the baseline and lands on the next line at tight leading. Nothing but

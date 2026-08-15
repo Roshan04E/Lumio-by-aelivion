@@ -23,6 +23,7 @@ import {
   drawShapeLayer,
   drawTextLayer,
   ensureFillTexture,
+  ensureOverlayFonts,
   measureOverlayBox,
   overlayOverhangMargin,
   type OverlayStyleOptions,
@@ -97,6 +98,14 @@ export class SceneTextRasterizer {
   private readonly versions = new Map<string, number>();
   // At most one raster in flight per layer, so the pooled canvas is never drawn into concurrently.
   private readonly inFlight = new Set<string>();
+  /**
+   * A re-raster wave for fonts that arrive from somewhere else mid-session — an OPTIMIZATION, and
+   * deliberately no longer load-bearing. It used to be the only thing that got a pinned font onto the
+   * glyphs, which made correctness rest on a debounced notification (DEBT-009, instance 4): a
+   * composition with no media layer had nothing slow enough in it to outlast the 150ms, and rendered
+   * a fallback. `ensureOverlayFonts` in `rasterize` now establishes readiness on the consumer's own
+   * path, so this can be late, coalesced, or never fire at all without the picture being wrong.
+   */
   private fontsVersion = 0;
   private fontsTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -276,6 +285,11 @@ export class SceneTextRasterizer {
       : getCompositionShapeStyle(layer, { currentTimeSeconds: t, ...this.styleOptions })) as Record<string, unknown>;
     const fill = typeof styleForFill.fillTexture === "string" ? parseFillTexture(styleForFill.fillTexture) : undefined;
     if (fill?.url) await ensureFillTexture(fill.url);
+    // ADR-023 D3/T-2 — and for the same reason as the line above it: the draw is sync and canvas
+    // substitutes silently, so the wait belongs HERE, before the measure, not in a listener that
+    // invalidates afterwards. `measureOverlayBox` below is as font-sensitive as the paint is — a box
+    // measured in the fallback's metrics stays wrong even once the right face repaints inside it.
+    await ensureOverlayFonts(layer, t, this.styleOptions);
     if (!boxMode) {
       // Comp mode (blur/glow path): comp-sized canvas, content-centered, transform-independent (4.1b).
       // The composite quad uses the comp box, so no box half-extents are returned.

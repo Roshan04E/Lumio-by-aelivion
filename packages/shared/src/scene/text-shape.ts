@@ -3,8 +3,9 @@
  *
  * Draws `text` (incl. rich runs + warp) and `shape` layers onto a 2D compositor canvas,
  * reusing the shared style helpers so sizes/colors/positions match the editor preview.
- * Text uses canvas fillText with the document's loaded fonts (the orchestrator preloads
- * them); warp text rasterizes the shared vector-outline SVG (font-independent). Shared so the
+ * Text uses canvas fillText with the document's loaded fonts — awaited by `ensureOverlayFonts`
+ * below, on this path, because canvas silently substitutes a fallback for a face that has not landed
+ * yet; warp text rasterizes the shared vector-outline SVG (font-independent). Shared so the
  * editor preview, local export, and the future Remotion SceneStage all rasterize identically.
  */
 
@@ -35,6 +36,73 @@ type Ctx = (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) & { le
  * step, which `packages/shared` cannot do for itself and must therefore be given.
  */
 export type OverlayStyleOptions = Pick<CompositionStyleOptions, "resolveAssetUrl">;
+
+// ─── Font readiness (ADR-023 D3/T-2) ─────────────────────────────────────────────────────────────
+/**
+ * Await the faces this layer is about to be drawn with, BEFORE it is measured or painted.
+ *
+ * Canvas2D has no font-loading story at all: `ctx.font = "700 80px Anton"` for a face that has not
+ * finished loading does not wait and does not fail — it silently resolves to the fallback, measures
+ * with the fallback's metrics, and paints the fallback's glyphs. The raster is then cached and looks
+ * exactly like a correct one. That is the silent substitution D3/T-2 exist to prevent, and it is the
+ * defect S6's contact sheet surfaced: an identical graph rendered Anton with a media layer present
+ * and a fallback without one.
+ *
+ * The rasterizer already had a `document.fonts` "loadingdone" listener bumping a cache-invalidating
+ * version, and that is a LIVENESS SIGNAL — DEBT-009's named bug class, correctness resting on a
+ * notification the consumer never asked for. It is debounced 150ms, so whether the right font reaches
+ * the pixels depended on whether something ELSE in the frame (a media decode round-trip) happened to
+ * outlast the debounce. A composition with no media had nothing to lose the race to.
+ *
+ * So readiness is established here, on the consumer's own path, by the consumer, for exactly the
+ * faces it is about to use. The listener stays — it is a genuine optimization for a font that arrives
+ * mid-session in the editor — but nothing correct depends on it any more.
+ *
+ * `check()` first so the steady state costs nothing: it is sync, and it returns true both for a
+ * loaded face and for a family with no matching `FontFace` at all (a plain system stack), which is
+ * precisely "there is nothing here to wait for".
+ */
+export function ensureOverlayFonts(layer: TimelineLayer, t: number, styleOptions: OverlayStyleOptions = {}): Promise<void> | void {
+  if (layer.type !== "text") return;
+  const fonts = typeof document !== "undefined" ? (document as Document).fonts : undefined;
+  if (!fonts?.load) return;
+
+  const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
+  const baseSize = num(style.fontSize, 72);
+  const specs = new Set<string>();
+  // Every RUN's font, not just the layer's: a rich-text run can carry its own family/weight/size, and
+  // a run-level face left unawaited is the same defect scoped to one word.
+  for (const run of getVisibleTextRuns(layer, t)) {
+    if (!run.text) continue;
+    const runStyle = getCompositionTextRunStyle(run, {
+      fontSize: baseSize,
+      fontWeight: style.fontWeight,
+      fontFamily: style.fontFamily,
+      fontStyle: style.fontStyle
+    } as never) as { fontSize?: number; fontWeight?: unknown; fontFamily?: unknown; fontStyle?: unknown };
+    specs.add(
+      fontString({
+        fontStyle: runStyle.fontStyle,
+        fontWeight: runStyle.fontWeight,
+        fontSize: num(runStyle.fontSize, baseSize),
+        fontFamily: runStyle.fontFamily
+      })
+    );
+  }
+  if (!specs.size) return;
+
+  // A malformed shorthand makes check() THROW rather than return false; treat that as "cannot tell"
+  // and fall through to load(), which reports the same problem by rejecting (and is caught below).
+  const pending = [...specs].filter((spec) => {
+    try {
+      return !fonts.check(spec);
+    } catch {
+      return true;
+    }
+  });
+  if (!pending.length) return;
+  return Promise.all(pending.map((spec) => fonts.load(spec).catch(() => undefined))).then(() => undefined);
+}
 
 // ─── Texture fill (D2) ───────────────────────────────────────────────────────────────────────────
 // Decoded-image cache for `layer.fillTexture`. The decode is ASYNC (fetch + createImageBitmap); the
