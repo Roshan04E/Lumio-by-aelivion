@@ -358,6 +358,36 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
   Each ships a win alone and 3b does not depend on 3a: a frame cache is keyed on the whole graph's
   hash and needs no per-node reuse.
 
+> **SCOPING FINDING, 2026-08-15 — 3a APPEARS TO BE ALREADY SHIPPED, and this needs a founder ruling
+> rather than an implementer's assumption. Recorded, deliberately NOT acted on.**
+>
+> Scoping 3a after step 2 landed turned up not one but two shipped mechanisms that together look like
+> the whole of its stated win, both predating this ADR and both delivered by the evaluation-engine and
+> kernel work §0 says this ADR does not reopen:
+>
+> 1. **The content-addressed materialization cache** (evaluation engine, Slice 2). `compile-flarex.ts`
+>    stamps `contentHash` — "the pure NodeContentHash" — on cacheable artifacts and deliberately leaves
+>    it unset where a stale hit is possible (unversioned or live-media sources); `scene-compositor.ts`
+>    consumes it; `flarex-node-thumbnails.ts` keys on `(ContractVersion, contentHash)`, which is the
+>    "hashes that already exist and already drive node thumbnails" this step names as its input.
+>    It has its own cross-frame parity gate, `flarex:cache-gate`, which asserts warm-vs-cold pixel
+>    identity AND that a static comp actually registers hits ("a cache that never hits is trivially
+>    parity-clean and completely worthless").
+> 2. **Per-node incremental reuse** (ADR-012 slices S6.4/S6.5/S6.6, `playback/incremental-evaluation.ts`),
+>    live and unconditional in `ScenePreviewCanvas`'s composite path, driven by the same
+>    `dependency-graph.ts` closure §3.2(c) measured, over content/context/time/source axes.
+>
+> **So the risk this note exists to prevent is a THIRD cache.** §6 as written sends the next implementer
+> to build 3a from scratch; on this evidence the work is to *verify 3a's win against the mechanisms
+> already in the tree* and close the step, or to name precisely what they do not cover. What is NOT
+> claimed here: that the shipped keys are the ones I-P7 specifies (they are not — the shipped node reuse
+> keys on `nodeId@time` with axis invalidation, not on `(ContractVersion, ContextVersion,
+> NodeContentHash)`), nor that the 92–95% edit-reuse figure has been re-measured on the live editor.
+> Both are cheap to settle and neither was settled tonight.
+>
+> **3b is unaffected and is genuinely absent** — a search for a composited-output cache finds nothing.
+> It remains the real remaining half of step 3, with I-P9's eviction ruling attached.
+
 > ~~Claimed for editing only; §3.2(c) forbids claiming it for playback.~~ — the blanket form of this
 > is superseded; it holds for 3a and not for 3b. See §3.2(c′).
 
