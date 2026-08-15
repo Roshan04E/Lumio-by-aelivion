@@ -17,7 +17,12 @@
  * base direction.
  */
 
-import { getCompositionTextStyle } from "./composition-style";
+import {
+  compositionTextDefaults,
+  getCompositionTextLinePillStyle,
+  getCompositionTextRunStyle,
+  getCompositionTextStyle
+} from "./composition-style";
 import {
   isInterpolablePropertyKind,
   migratePropertyValues,
@@ -103,6 +108,21 @@ const pinnedLora: FontRef = {
   check("schema: no default for fontRef (absence is legacy, permanently)", !("fontRef" in defaults));
   check("schema: no default for direction", !("direction" in defaults));
   check("schema: no default for strokePaintOrder", !("strokePaintOrder" in defaults));
+  // S5: all five new fields are absent-means-legacy, so none of them may hand out a default either.
+  check(
+    "schema: no defaults for the S5 fields",
+    !("fillGradientFrom" in defaults) &&
+      !("fillGradientTo" in defaults) &&
+      !("fillGradientAngle" in defaults) &&
+      !("backgroundPerLine" in defaults) &&
+      !("shadowLayers" in defaults)
+  );
+  // S5 is where a `gradient` kind would have been reached for. It was not, and the taxonomy assertion
+  // above only proves the kinds are legal — this one proves the escape hatches stayed shut.
+  check(
+    "schema: S5 added no escape-hatch field (no `control`/`custom` in the schema at all)",
+    textStyleSchema.fields.every((field) => field.kind !== "control" && field.kind !== "custom")
+  );
   check("schema: fontSize default is the RENDER fallback, not the authoring default", defaults.fontSize === 64);
 }
 
@@ -169,6 +189,81 @@ const pinnedLora: FontRef = {
   check("T-15 strokePaintOrder: the emitted paint-order CHANGES", after.paintOrder === "stroke fill");
 }
 
+// --- S5 (ADR-023 D7): the three looks, each with its absent-is-legacy half asserted ---------------
+{
+  // Gradient fill. Absent, half-authored, and complete are three DIFFERENT states, and the middle one
+  // is the one worth pinning: a stop with no other stop must render as the solid fill, not as a
+  // one-colour gradient, and it must emit NOTHING so a legacy layer's CSS is byte-identical.
+  const bare = getCompositionTextStyle(textLayer({}));
+  check("S5 gradient: absent emits no gradient", bare.textFillGradient === undefined);
+  check(
+    "S5 gradient: ONE stop still emits nothing (half-authored is not a gradient)",
+    getCompositionTextStyle(textLayer({ fillGradientFrom: "#ff0000" })).textFillGradient === undefined &&
+      getCompositionTextStyle(textLayer({ fillGradientTo: "#ff0000" })).textFillGradient === undefined
+  );
+  const full = getCompositionTextStyle(textLayer({ fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" }));
+  check("S5 gradient: both stops emit a linear-gradient", full.textFillGradient === "linear-gradient(180deg, #ff0000, #0000ff)");
+  check(
+    "S5 gradient: the angle reaches the declaration",
+    getCompositionTextStyle(textLayer({ fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff", fillGradientAngle: 45 }))
+      .textFillGradient === "linear-gradient(45deg, #ff0000, #0000ff)"
+  );
+  // The run style is where the DOM path actually paints it — a gradient that never reaches a run span
+  // is a gradient nothing renders, which is exactly the T-15 shape.
+  const runStyle = getCompositionTextRunStyle({ text: "hi" }, full);
+  check("S5 gradient: the run span clips its background to the text", runStyle.WebkitBackgroundClip === "text" && runStyle.backgroundImage === full.textFillGradient);
+  check("S5 gradient: and gives up its solid fill colour, or the gradient would be hidden", runStyle.WebkitTextFillColor === "transparent");
+  check(
+    "S5 gradient: a layer WITHOUT one emits the pre-S5 run style, key for key",
+    JSON.stringify(Object.keys(getCompositionTextRunStyle({ text: "hi" }, bare))) ===
+      JSON.stringify(["fontWeight", "fontStyle", "color", "backgroundColor", "fontFamily", "fontSize"])
+  );
+}
+
+{
+  // Per-line pill. The claim that needs an assertion is the NO-OP one: asking for per-line pills over
+  // a transparent background must leave the block's `background` exactly where it was, or "absent
+  // renders as today" quietly stops being true for every layer that has no pill to begin with.
+  const noPill = getCompositionTextStyle(textLayer({ backgroundPerLine: true }));
+  const legacy = getCompositionTextStyle(textLayer({}));
+  check("S5 pill: per-line over a TRANSPARENT background emits no pill", noPill.textLinePill === undefined);
+  // Byte-identity, not "the background is still transparent" — that comparison passes even when the
+  // block HAS given its background up, because the value it gave up was `"transparent"` either way.
+  check("S5 pill: and the whole emitted style is byte-identical to the legacy layer's", JSON.stringify(noPill) === JSON.stringify(legacy));
+
+  const pilled = getCompositionTextStyle(textLayer({ backgroundPerLine: true, backgroundColor: "#101010" }));
+  const blocked = getCompositionTextStyle(textLayer({ backgroundColor: "#101010" }));
+  check("S5 pill: a real background moves onto the lines", pilled.textLinePill === "0.08em 0.16em 0.1em #101010");
+  check("S5 pill: and off the block", pilled.background === "transparent" && blocked.background === "#101010");
+  check("S5 pill: the padding the block keeps is the padding the pill uses", pilled.padding === blocked.padding);
+
+  // The colour must survive into the emitted object even though the block gave it up. `scene-text-raster`
+  // keys its cache on this object: if the pill colour lived only on the layer, two pills differing only
+  // in colour would share a cache key and the second would render as the first, forever.
+  const other = getCompositionTextStyle(textLayer({ backgroundPerLine: true, backgroundColor: "#eeeeee" }));
+  check("S5 pill: two pill colours produce two DIFFERENT emitted styles (the raster cache key)", JSON.stringify(pilled) !== JSON.stringify(other));
+
+  const pillCss = getCompositionTextLinePillStyle(pilled);
+  check("S5 pill: the DOM wrapper clones its box per line fragment", pillCss?.boxDecorationBreak === "clone" && pillCss?.backgroundColor === "#101010");
+  check("S5 pill: no pill, no wrapper", getCompositionTextLinePillStyle(legacy) === undefined);
+}
+
+{
+  // Stacked shadows. One copy must be byte-identical to the declaration emitted before the field
+  // existed — not merely equivalent, because that string is part of the raster's cache key.
+  const one = getCompositionTextStyle(textLayer({ shadowBlur: 10, shadowOffsetX: 2, shadowOffsetY: 4 }));
+  const explicitOne = getCompositionTextStyle(textLayer({ shadowBlur: 10, shadowOffsetX: 2, shadowOffsetY: 4, shadowLayers: 1 }));
+  check("S5 stack: absent and 1 emit the same single shadow", one.textShadow === explicitOne.textShadow);
+  check("S5 stack: and it is the pre-S5 declaration", one.textShadow === `2px 4px 10px ${compositionTextDefaults.shadowColor}`);
+
+  const three = getCompositionTextStyle(textLayer({ shadowBlur: 10, shadowOffsetX: 2, shadowOffsetY: 4, shadowLayers: 3 }));
+  const parts = String(three.textShadow).split(/,(?![^(]*\))/).map((p) => p.trim());
+  check("S5 stack: three copies", parts.length === 3);
+  check("S5 stack: at 1x, 2x, 3x the offset, NEAREST first (CSS paints entry 0 on top)", parts[0]!.startsWith("2px 4px ") && parts[1]!.startsWith("4px 8px ") && parts[2]!.startsWith("6px 12px "));
+  check("S5 stack: zero blur still emits nothing, stack or no stack", getCompositionTextStyle(textLayer({ shadowLayers: 8 })).textShadow === undefined);
+  check("S5 stack: a fractional or negative count is one shadow", getCompositionTextStyle(textLayer({ shadowBlur: 10, shadowLayers: -3 })).textShadow === getCompositionTextStyle(textLayer({ shadowBlur: 10 })).textShadow);
+}
+
 {
   // Every presetable field, mechanically: capture a layer where each is set to something non-default
   // and prove the emitted style differs from the bare layer's. A field that changes nothing is a
@@ -193,7 +288,15 @@ const pinnedLora: FontRef = {
     shadowOffsetX: 13,
     shadowOffsetY: 17,
     textAlign: "left",
-    direction: "rtl"
+    direction: "rtl",
+    // S5 (ADR-023 D7). The gradient needs BOTH stops before anything is emitted, which is why the
+    // co-requisite table below pairs each stop with the other one — a stop swept alone would report
+    // "changes nothing", and that report would be true and useless (the S4 note on `strokeColor`).
+    fillGradientFrom: "#ff8800",
+    fillGradientTo: "#0088ff",
+    fillGradientAngle: 45,
+    backgroundPerLine: true,
+    shadowLayers: 6
   };
   /**
    * Some fields are CONDITIONALLY emitted and provably cannot move anything alone: `WebkitTextStroke`
@@ -208,7 +311,16 @@ const pinnedLora: FontRef = {
     strokePaintOrder: { strokeWidth: 10 },
     shadowColor: { shadowBlur: 8 },
     shadowOffsetX: { shadowBlur: 8 },
-    shadowOffsetY: { shadowBlur: 8 }
+    shadowOffsetY: { shadowBlur: 8 },
+    // S5. `fillGradientAngle` needs a gradient to be an angle OF; each stop needs the other stop; the
+    // per-line pill needs a background to move off the block; the shadow stack needs a shadow to
+    // stack. Every one of these is a property of the emitted CSS, read out of it, not a knob turned
+    // until an assertion went green.
+    fillGradientFrom: { fillGradientTo: "#000000" },
+    fillGradientTo: { fillGradientFrom: "#000000" },
+    fillGradientAngle: { fillGradientFrom: "#000000", fillGradientTo: "#ffffff" },
+    backgroundPerLine: { backgroundColor: "#101010" },
+    shadowLayers: { shadowBlur: 8, shadowOffsetY: 6 }
   };
 
   for (const key of TEXT_STYLE_FIELD_KEYS) {

@@ -51,6 +51,7 @@ import {
   getLayerVisibleContribution,
   getOverlayMaskWrapperStyle,
   getCompositionShapeStyle,
+  getCompositionTextLinePillStyle,
   getCompositionTextRunStyle,
   getCompositionTextStyle,
   getCompositionTransition,
@@ -3644,13 +3645,30 @@ const PreviewLayer = memo(function PreviewLayer({
     // content-sized) so it aligns + stays comp-fixed like the GPU scene path. `null` when unmasked → no
     // wrapper, byte-identical to before. The inner button re-enables pointer events (wrapper is none).
     const textMaskWrapper = getOverlayMaskWrapperStyle(layer);
+    // S5 / ADR-023 D7. Two of the emitted keys are NOT declarations this element can carry: the glyph
+    // gradient rides the run spans (`background-clip: text` would otherwise clip the pill colour off
+    // the box as well), and the per-line pill is by definition not the block's background. They travel
+    // in the style object because that object is the one thing every renderer reads and the thing the
+    // scene raster keys its cache on — so they are stripped here rather than emitted somewhere the
+    // cache cannot see. `linePill` is ONE wrapper around all the runs, not one per run: an inline box
+    // fragments per LINE, which is exactly the rectangle the raster draws behind each line.
+    const { textFillGradient: _textFillGradient, textLinePill: _textLinePill, ...textBoxStyle } = style;
+    const linePillStyle = getCompositionTextLinePillStyle(style) as CSSProperties | undefined;
+    const textRunSpans = visibleRuns.map((run, index) => (
+      <span
+        key={`${layer.id}_run_${index}`}
+        style={{ ...(getCompositionTextRunStyle(run, style) as CSSProperties), visibility: warpReady ? "hidden" : undefined }}
+      >
+        {run.text}
+      </span>
+    ));
     const textButton = (
       <button
         className={`preview-text-layer ${selected ? "is-selected" : ""}`}
         type="button"
         {...dragHandlers}
         style={{
-          ...(style as CSSProperties),
+          ...(textBoxStyle as CSSProperties),
           ...(hideVisual ? { opacity: 0 } : null),
           ...(textMaskWrapper ? { pointerEvents: "auto" } : null),
           // Render-only clones stay pointer-transparent (overrides the mask-wrapper's auto) so clicks reach
@@ -3658,14 +3676,7 @@ const PreviewLayer = memo(function PreviewLayer({
           ...(interactive ? null : { pointerEvents: "none" })
         }}
       >
-        {visibleRuns.map((run, index) => (
-          <span
-            key={`${layer.id}_run_${index}`}
-            style={{ ...(getCompositionTextRunStyle(run, style) as CSSProperties), visibility: warpReady ? "hidden" : undefined }}
-          >
-            {run.text}
-          </span>
-        ))}
+        {linePillStyle ? <span style={linePillStyle}>{textRunSpans}</span> : textRunSpans}
         {warpReady ? (
           // Force visibility so the warp shows even though the (sibling) runs are hidden — but when
           // the layer is GPU-composited (`hideVisual`, scene path), the scene raster already draws the

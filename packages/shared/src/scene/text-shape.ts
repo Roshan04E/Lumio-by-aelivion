@@ -16,6 +16,7 @@ import {
   getCompositionTextStyle,
   getCompositionTransform,
   getVisibleTextRuns,
+  parseTextLinePill,
 } from "../composition-style";
 import { hasTextWarp } from "../text-warp";
 import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
@@ -104,6 +105,60 @@ function fillTexturePaint(ctx: Ctx, layer: TimelineLayer, boxW: number, boxH: nu
     });
   }
   return pattern;
+}
+
+// ─── Gradient glyph fill (ADR-023 D7, S5) ────────────────────────────────────────────────────────
+/**
+ * The canvas gradient painting `textFillGradient` over an element box of `boxW×boxH` centered at the
+ * CURRENT origin — the raster's answer to CSS `background-clip: text`, and not an approximation of it:
+ * both end up filling the glyph coverage with the same two-stop ramp over the same box.
+ *
+ * The gradient LINE follows CSS's own definition for `linear-gradient(<a>deg, …)`: `a` is measured
+ * clockwise from "up", the line runs through the box centre, and its length is `|W·sin a| + |H·cos a|`
+ * so that both stops land exactly on the box corners' projections. Getting that length wrong is the
+ * classic way a canvas "equivalent" of a CSS gradient renders visibly shorter at 45°.
+ *
+ * Null when the layer has no gradient, or the string does not parse — caller keeps the solid colour.
+ */
+function fillGradientPaint(ctx: Ctx, style: Record<string, unknown>, boxW: number, boxH: number): CanvasGradient | null {
+  const declaration = style.textFillGradient;
+  if (typeof declaration !== "string" || !declaration || boxW <= 0 || boxH <= 0) return null;
+  const match = declaration.match(/^linear-gradient\(\s*(-?[\d.]+)deg\s*,\s*(.+?)\s*,\s*(.+?)\s*\)$/);
+  if (!match) return null;
+  const radians = (num(match[1], 180) * Math.PI) / 180;
+  const sin = Math.sin(radians);
+  const cos = Math.cos(radians);
+  const length = Math.abs(boxW * sin) + Math.abs(boxH * cos);
+  // Screen coords (y grows downward), so "up" is −y: the direction vector is (sin a, −cos a).
+  const half = length / 2;
+  const gradient = ctx.createLinearGradient(-half * sin, half * cos, half * sin, -half * cos);
+  gradient.addColorStop(0, match[2]!);
+  gradient.addColorStop(1, match[3]!);
+  return gradient;
+}
+
+/**
+ * Split a `text-shadow` LIST into its entries (ADR-023 D7, S5 — `shadowLayers`). Commas inside a colour
+ * function (`rgba(0, 0, 0, .5)`) are not separators, which is why this is a depth-aware scan rather
+ * than `split(",")` — the stock shadow colour is `rgba(0,0,0,0.62)`, so the naive version would break
+ * on the DEFAULT look rather than on an exotic one.
+ */
+function splitShadowList(css: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < css.length; i += 1) {
+    const ch = css[i];
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (ch === "," && depth === 0) {
+      parts.push(css.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const tail = css.slice(start).trim();
+  if (tail) parts.push(tail);
+  return parts;
 }
 
 function num(value: unknown, fallback = 0): number {
@@ -394,14 +449,35 @@ export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: 
  *  tracks the actual overhang. `W`/`H` (comp px) size percent-of-box overhangs (pen paths). */
 export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number, H: number): number {
   let m = 2; // base anti-aliasing pad
-  const shadowExtent = (css: string): number => {
-    const sm = css.match(/(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px/);
-    return sm ? Math.abs(num(sm[1])) + Math.abs(num(sm[2])) + num(sm[3]) * 1.5 + 2 : 0;
-  };
+  /**
+   * ADR-023 S5: `text-shadow` is a LIST once `shadowLayers` stacks copies, and the FARTHEST copy is the
+   * one that decides the margin. The regex used to take whichever entry matched first — which is the
+   * nearest, by emission order — so a stacked extrude would have been clipped by the tight box raster
+   * while the comp-sized path drew it fine. Max over every entry.
+   */
+  const shadowExtent = (css: string): number =>
+    Math.max(
+      0,
+      ...splitShadowList(css).map((entry) => {
+        const sm = entry.match(/(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px/);
+        return sm ? Math.abs(num(sm[1])) + Math.abs(num(sm[2])) + num(sm[3]) * 1.5 + 2 : 0;
+      })
+    );
   if (layer.type === "text") {
     const style = getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
     if (style.textShadow) m = Math.max(m, shadowExtent(String(style.textShadow)));
     if (style.WebkitTextStroke) m = Math.max(m, num(String(style.WebkitTextStroke)) + 2);
+    // ADR-023 S5: a per-line pill is drawn around each line's INK box (ascent+descent+2·padY), and the
+    // default `lineHeight` here is 0.95 — under 1, so the ink box is TALLER than the line box and the
+    // first line's pill reaches above the element box. The comp-sized raster never clipped; the tight
+    // box one would. `1.5×` bounds ascent+descent for the faces this ships with, and the term is
+    // clamped at zero so a generous line-height adds nothing.
+    if (style.textLinePill) {
+      const fontSize = num(style.fontSize, 72);
+      const padEm = String(style.padding ?? "0em 0em").split(" ");
+      const padY = num(padEm[0]) * fontSize;
+      m = Math.max(m, Math.max(0, (1.5 * fontSize - num(style.lineHeight, 1.2) * fontSize) / 2) + padY + 2);
+    }
   } else if (layer.type === "shape") {
     const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
     if (style.boxShadow) m = Math.max(m, shadowExtent(String(style.boxShadow)));
@@ -513,11 +589,26 @@ export async function drawTextLayer(
     }
   }
 
-  // Text shadow.
-  const shadow = style.textShadow ? String(style.textShadow) : "";
+  // Text shadow. ADR-023 S5: `shadowLayers` makes this a LIST. Entry 0 is the nearest copy and keeps
+  // the exact single-shadow path below untouched (a legacy layer emits a one-entry list, so `shadow`
+  // is the same string it always was); the extra copies are drawn as their own silhouette passes.
+  const shadowList = style.textShadow ? splitShadowList(String(style.textShadow)) : [];
+  const shadow = shadowList[0] ?? "";
   // Texture fill (D2): resolved once per raster against the text box (null → solid run colors).
   // Warp text keeps its own vector fills for now (the warp path returned above).
-  const glyphPaint = fillTexturePaint(ctx, layer, boxW, boxH);
+  //
+  // ADR-023 D7 (S5): a gradient fill is the same kind of whole-layer glyph paint, and `fillTexture`
+  // wins when both are set — it is the more specific paint and it shipped first (see
+  // TimelineLayer.fillGradientFrom). Resolved once per raster, against the same box.
+  const glyphPaint = fillTexturePaint(ctx, layer, boxW, boxH) ?? fillGradientPaint(ctx, style, boxW, boxH);
+  // ADR-023 D7 (S5): the per-line pill, read from the SAME emitted string the DOM path consumes so the
+  // two cannot disagree about the look — the discipline `paintOrder` and `direction` already follow.
+  // The block background above has already been emitted as `transparent` whenever this is present, so
+  // the two are never both drawn.
+  const linePill = typeof style.textLinePill === "string" ? parseTextLinePill(style.textLinePill) : undefined;
+  const pillPadY = linePill ? linePill.padYEm * fontSize : 0;
+  const pillPadX = linePill ? linePill.padXEm * fontSize : 0;
+  const pillRadius = linePill ? linePill.radiusEm * fontSize : 0;
 
   // Stroke (WebkitTextStroke: "Wpx color").
   const strokeStr = style.WebkitTextStroke ? String(style.WebkitTextStroke) : "";
@@ -550,6 +641,69 @@ export async function drawTextLayer(
   ctx.textBaseline = "alphabetic";
   const contentLeft = -boxW / 2 + padX;
   const contentRight = boxW / 2 - padX;
+
+  /** Where a line's pieces START, given its measured width — the one place the alignment rule lives. */
+  const lineStartX = (lw: number): number => {
+    // S0b: resolve the LOGICAL keywords against the layer's DECLARED direction. This is not the
+    // paint-time inference T-13 forbids — that is deriving direction from content; this is what CSS
+    // itself does with a direction it was given. `left`/`right` stay physical and untouched.
+    const physical =
+      textAlign === "start" ? (baseDirection === "rtl" ? "right" : "left")
+      : textAlign === "end" ? (baseDirection === "rtl" ? "left" : "right")
+      : textAlign;
+    return physical === "left" ? contentLeft : physical === "right" ? contentRight - lw : -lw / 2;
+  };
+
+  /**
+   * ADR-023 D7 (S5) — the per-line pills, ALL of them, before ANY glyph.
+   *
+   * A separate pass and not a step inside the draw loop, because CSS puts every inline box's background
+   * in the background layer, beneath all of the element's text. Drawn per line inside the loop, line
+   * two's pill lands on top of line one's descenders and eats them — which is what the first run of
+   * this feature rendered, visibly, on the two-line fixture.
+   *
+   * Each rect is sized from its line's INK box (`ascent..descent`) plus the padding, not from the
+   * line-height box, because the background of an inline box is its content area, which the engine
+   * derives from the font's ascent and descent — the same two numbers the baseline is computed from
+   * below. Sizing it from `lineHeightPx` would look right at line-height 1.0 and drift from the DOM at
+   * every other value, and the default here is 0.95.
+   */
+  if (linePill) {
+    ctx.save();
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = linePill.color;
+    let pillOffsetY = 0;
+    for (const [lineIndex, line] of lines.entries()) {
+      const lineBoxHeight = lineHeights[lineIndex] ?? fontSize * 1.2;
+      const lineBoxTop = -boxH / 2 + padY + pillOffsetY;
+      pillOffsetY += lineBoxHeight;
+      let ascent = 0;
+      let descent = 0;
+      for (const word of line) {
+        ctx.font = word.font;
+        const metrics = ctx.measureText(word.text);
+        ascent = Math.max(ascent, metrics.fontBoundingBoxAscent ?? word.fontSize * 0.8);
+        descent = Math.max(descent, metrics.fontBoundingBoxDescent ?? word.fontSize * 0.2);
+      }
+      // An EMPTY line has no ink and so no inline box to paint — CSS draws nothing there either, and a
+      // blank line in a caption showing a bare padded stub is the tell that this was missed.
+      if (!line.length) continue;
+      const lw = lineWidth(ctx, line);
+      if (lw <= 0) continue;
+      const baseline = lineBoxTop + (lineBoxHeight - (ascent + descent)) / 2 + ascent;
+      roundRect(
+        ctx,
+        lineStartX(lw) - pillPadX,
+        baseline - ascent - pillPadY,
+        lw + 2 * pillPadX,
+        ascent + descent + 2 * pillPadY,
+        pillRadius
+      );
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 
   let lineOffsetY = 0;
   lines.forEach((line, lineIndex) => {
@@ -590,15 +744,53 @@ export async function drawTextLayer(
      */
     const pieces = collapseLine(line);
     const lw = lineWidth(ctx, line);
-    // S0b: resolve the LOGICAL keywords against the layer's DECLARED direction. This is not the
-    // paint-time inference T-13 forbids — that is deriving direction from content; this is what CSS
-    // itself does with a direction it was given. `left`/`right` stay physical and untouched.
-    const physicalAlign =
-      textAlign === "start" ? (baseDirection === "rtl" ? "right" : "left")
-      : textAlign === "end" ? (baseDirection === "rtl" ? "left" : "right")
-      : textAlign;
-    let x = physicalAlign === "left" ? contentLeft : physicalAlign === "right" ? contentRight - lw : -lw / 2;
+    // S0b's logical-alignment resolution, now via `lineStartX` — the pill pass has to place a line the
+    // same way the glyphs are placed, and two copies of that rule is how a right-aligned pill ends up
+    // under left-aligned text.
+    let x = lineStartX(lw);
     ctx.textAlign = "left";
+
+    /**
+     * ADR-023 D7 (S5) — the stacked shadow copies, farthest first so the nearest ends up on top, which
+     * is the order CSS paints a `text-shadow` list in.
+     *
+     * Canvas carries ONE shadow at a time, so N shadows are N silhouette draws. The silhouette is
+     * whichever pass is outermost — the stroke under `paint-order: stroke fill`, the fill otherwise —
+     * matching the single-shadow rule the main draw already follows. Entry 0 is deliberately NOT drawn
+     * here: it rides the real pass below, exactly as it did before this field existed, which is what
+     * keeps a one-entry list byte-identical.
+     */
+    if (shadowList.length > 1) {
+      // The same arithmetic the draw loop below walks, computed up front because the shadow passes
+      // need every position N times and the loop consumes `x` as it goes.
+      const positions: number[] = [];
+      let px = x;
+      pieces.forEach((word, index) => {
+        ctx.font = word.font;
+        if (index > 0) px += ctx.measureText(" ").width;
+        positions.push(px);
+        px += ctx.measureText(word.text).width;
+      });
+      const outerStroke = strokeUnderFill && strokeWidth > 0;
+      for (let k = shadowList.length - 1; k >= 1; k -= 1) {
+        applyShadow(ctx, shadowList[k]!);
+        pieces.forEach((word, index) => {
+          ctx.font = word.font;
+          if (outerStroke) {
+            ctx.lineWidth = strokeWidth;
+            ctx.strokeStyle = strokeColor || "#000";
+            ctx.lineJoin = "round";
+            ctx.strokeText(word.text, positions[index]!, y);
+          } else {
+            ctx.fillStyle = glyphPaint ?? word.color;
+            ctx.fillText(word.text, positions[index]!, y);
+          }
+        });
+      }
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+    }
+
     pieces.forEach((word, wordIndex) => {
       ctx.font = word.font;
       if (wordIndex > 0) x += ctx.measureText(" ").width;

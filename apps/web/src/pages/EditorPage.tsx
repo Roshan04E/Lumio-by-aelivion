@@ -15131,6 +15131,13 @@ function TextGraphicControls({
           <div className="icon-control-row">
             <PropertyFieldList fields={pickTextStyleFields(styleFields, ["strokePaintOrder"])} />
           </div>
+          {/* S5 / ADR-023 D7 — tier-1 gradient fill. Both stops must be set before anything renders
+              (`resolveFillGradient`), so the three rows sit together rather than one per section. */}
+          <div className="icon-control-row">
+            <PropertyFieldList
+              fields={pickTextStyleFields(styleFields, ["fillGradientFrom", "fillGradientTo", "fillGradientAngle"])}
+            />
+          </div>
         </div>
       </InspectorSection>
 
@@ -15337,6 +15344,12 @@ function BackgroundControls({
       <div className="icon-control-row">
         <PropertyFieldList fields={pickTextStyleFields(fields, ["backgroundPaddingEm", "backgroundRadiusEm"])} />
       </div>
+      {/* S5 / ADR-023 D7 — one pill per wrapped line. Text only: a shape's background is its body. */}
+      {layer.type === "text" ? (
+        <div className="icon-control-row">
+          <PropertyFieldList fields={pickTextStyleFields(fields, ["backgroundPerLine"])} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -16005,9 +16018,19 @@ function ShadowControls({
   const defaults = layer.type === "shape" ? { ...defaultTextStyle, ...defaultShapeStyle } : defaultTextStyle;
   const fields = buildTextStyleFields({ layer, palette, onChange, styleKf, defaults, setShadowEnabled, slots: {} });
   return (
-    <div className="icon-control-row">
-      <PropertyFieldList fields={pickTextStyleFields(fields, ["shadowColor", "shadowBlur", "shadowOffsetX", "shadowOffsetY"])} />
-    </div>
+    <>
+      <div className="icon-control-row">
+        <PropertyFieldList fields={pickTextStyleFields(fields, ["shadowColor", "shadowBlur", "shadowOffsetX", "shadowOffsetY"])} />
+      </div>
+      {/* S5 / ADR-023 D7 — stacked shadows (faked extrude). TEXT ONLY: a shape's shadow is `box-shadow`
+          via `getShapeShadowCss`, which S5 does not touch, so the row would be a control that writes a
+          field nothing reads — the silent-no-op shape this programme keeps finding. */}
+      {layer.type === "text" ? (
+        <div className="icon-control-row">
+          <PropertyFieldList fields={pickTextStyleFields(fields, ["shadowLayers"])} />
+        </div>
+      ) : null}
+    </>
   );
 }
 

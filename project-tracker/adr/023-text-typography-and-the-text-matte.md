@@ -610,6 +610,25 @@ asserting `collapseLine` as a pure function (falsified by disabling the collapse
 assertion fail) plus the baseline delta, where S0b's committed render serves as the word-by-word
 reference. Recorded because the obvious next move — "add the missing fixture" — is wasted work.
 
+**T-15 addendum — a falsifier proves the field is WIRED. It never proves the picture is RIGHT, and the
+stills have to be looked at.** (S5, 2026-08-15.) S5's per-line pill passed every instrument it had:
+`render:compare:pixels` at 0.000%, the T-15 flip changing the render, the emitted style byte-exact, the
+no-op arms byte-identical. The render was still wrong — pills were drawn inside the line loop, so line
+two's background painted over line one's descenders and ate them. CSS puts every inline box's background
+in the background layer beneath *all* of the element's text, and a per-line raster has to paint every
+pill before any glyph. Nothing hash-shaped could have caught it: every hash-based question was being
+answered correctly about a picture nobody had opened. **Where a stage adds a look, its acceptance
+includes reading the still, and the falsifier's own output is the cheapest place to do it** — it already
+renders both arms.
+
+**T-15 addendum 2 — the exhaustiveness constraint only covers the set it is written over.** (S5,
+2026-08-15.) `fillTexture` (image fill, 2026-07-17) is a look field that is **not** in
+`TextStyleFields`, so Save Style and the clipboard drop it — the same defect S4 fixed for `fontRef` and
+`direction`, in a field the S4 constraint provably cannot see, because that constraint proves the
+presetable set equals `TextStyleFields` and says nothing about a look field that never joined the
+interface. Half a constraint reads exactly like a whole one, one level up. Unreachable today (no
+editor UI writes it), and **S6 may not ship presets over it**.
+
 **T-16 — A "visible degraded state" is proven by pixels, never by computed style.** (D3, T-12; S0,
 2026-08-13.) D3's font-substitution surface and T-12's warp marker both exist to announce a silent
 degradation, which makes a marker that silently fails to paint the purest form of the bug it guards
@@ -769,6 +788,25 @@ violated and D9 needs a different shape.
 **OQ2 — Do the two Chromiums interpolate `font-variation-settings` identically?** Untested. Variable
 axes are the one D7 item whose parity is not obviously free, because it involves the variation
 instancer rather than layout. Needs a pixel-gate fixture before the feature is claimed.
+
+**MOVED TO S9 2026-08-15 (S5), because a PRIOR question makes OQ2 unreachable and it was never going
+to be answered by the gate this asks for.** Measured, not inferred (`apps/worker/tmp/oq2-probe.mjs`):
+**canvas 2D exposes no `fontVariationSettings` property, and `ctx.font` rejects an inline
+`font-variation-settings` declaration.** Since T-13's correction, the canvas raster is where BOTH
+renderers get their text pixels — so a variable axis today moves the DOM overlay and nothing that
+ships. A pixel fixture comparing the two Chromiums would have compared two rasters that ignore the
+axis and reported parity, which is the fixture answering a question nobody asked.
+
+The probe was falsified before it was trusted: the same context *does* respond to a weight change in
+`measureText`, so the negative belongs to the API rather than to the instrument. **Its first draft was
+wrong in exactly the way this document keeps recording** — it tested `"fontVariationSettings" in ctx`
+*after* assigning to `ctx.fontVariationSettings`, reported `true`, and read back the expando it had
+just created. The authority for "does this API exist" is the PROTOTYPE, never the instance you have
+been writing to.
+
+S9 owns this now, and owns it whole: making a variable axis reachable at all is a raster problem
+(registering per-instance faces, or a second text surface), and only after that does OQ2's
+two-Chromium question become askable.
 
 **OQ3 — Full font files or per-project subsets?** Subsetting cuts payload substantially but makes
 the stored artifact a function of the subsetter's version, which undermines D1's determinism story

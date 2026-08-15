@@ -1,6 +1,6 @@
 {
-  "commit": "a1af4ef00901f41bb2c005877249fd35c27f8741",
-  "capturedAt": "2026-08-13T14:55:34.636Z",
+  "commit": "71457b809ba38f3b98de442ebb4581e26bf20395",
+  "capturedAt": "2026-08-15T09:53:09.390Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -198,6 +198,11 @@
       "width": 1080,
       "height": 1920
     },
+    "gradient-fill": {
+      "sha256": "d8cc56a4b37611a581d27d459bc8421a164d15a19f8b8fa30cb6414f95aece0b",
+      "width": 1080,
+      "height": 1920
+    },
     "grain": {
       "sha256": "67053e86bab568a178a2ea74c6e8aedadb1c0cb8f31abc4a0e60c8b2f3e306f0",
       "width": 1080,
@@ -293,6 +298,11 @@
       "width": 1080,
       "height": 1920
     },
+    "per-line-pill": {
+      "sha256": "201872871bdb29014961ab84d35a7ea1cf4e6246deb4eb8fb6c35e654c082575",
+      "width": 1080,
+      "height": 1920
+    },
     "pipeline-transition": {
       "sha256": "b9a5c166139c7a4599c62610fd0d00db4475a903b4abbe27b0232e133e087549",
       "width": 1080,
@@ -320,6 +330,11 @@
     },
     "scaled-text": {
       "sha256": "d67266f5d819b17f196c7c8963dd7cc56cc3900fc1c71fe70dcea9566a261368",
+      "width": 1080,
+      "height": 1920
+    },
+    "shadow-stack": {
+      "sha256": "ba3a800b36a83c7d7716c156f8f3491c27888e497a648b8b108bcfe53ec4f784",
       "width": 1080,
       "height": 1920
     },

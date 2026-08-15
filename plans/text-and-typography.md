@@ -23,7 +23,7 @@ S2.7 Bold picks the bold FILE            weight resolves to a face, not CSS    S
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         SHIPPED 2026-08-14; no migration; unblocks S6
 S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both pickers moved
-S5  tier-1 texture + CSS depth            rides S4
+S5  tier-1 texture + CSS depth            SHIPPED 2026-08-15; variable axes deferred (not OQ2)
 S6  caption + text preset library         rides S4; highest product value
 S7  the text matte (tier 2) + matte ops + warp rework   gated on OQ1 for the matte
                                                           half only; largest blast radius
@@ -550,6 +550,67 @@ immediate, no architecture change.
 **Verification:** a fixture per feature, both renderers. `background-clip: text` interacts with
 `mix-blend-mode` and `filter`, both of which `getCompositionTextStyle` already emits — test the
 combination, not just the property.
+
+**SHIPPED 2026-08-15 — three of the four items. The variable-axis half is DEFERRED, and not on OQ2.**
+
+Five schema fields, all in frozen ADR-003 kinds, no kind added and no `control`/`custom` reached for:
+`fillGradientFrom`/`fillGradientTo` (`color`), `fillGradientAngle` (`number`), `backgroundPerLine`
+(`boolean`), `shadowLayers` (`number`). Each is `absenceIsMeaningful` — absent is the pre-S5 look,
+permanently, with no migration (D1a).
+
+- **Gradient fill** — two stops and an angle. A richer stop list is the `gradient` kind, which is
+  frozen into the taxonomy and not yet buildable by `PropertyFieldList`; ADR-003's
+  promotion-out-of-the-remainder clause wants genuine two-system demand and S5 is one system, so the
+  two-stop form ships in kinds that already render and collapses into the kind through an ordinary
+  migration when a second system asks for it. **Both stops or nothing**: a half-authored gradient
+  renders as the solid fill. In the DOM it rides the run spans, because `background-clip: text` clips
+  the background *colour* as well and on the layer box it would silently eat the background pill.
+- **Per-line pills** — `box-decoration-break: clone` on ONE inline wrapper around all the runs (not
+  one per run, which would pad every run boundary), and one rounded rect per line in the raster, sized
+  from the line's ink box so the two constructions agree. The block keeps its padding and gives up its
+  background, so the element box does not move.
+- **Stacked shadows** — `text-shadow` was always a list and we emitted one entry; `shadowLayers`
+  stacks N copies at 1×…N× the offset, nearest first because CSS paints entry 0 on top. Independent
+  per-copy colours are a list of shadows and want the `list` kind; they are **not** approximated.
+
+**`font-variation-settings` is deferred, and the reason is prior to OQ2.** OQ2 asks whether the two
+Chromiums instance an axis identically. **Measured 2026-08-15 (`apps/worker/tmp/oq2-probe.mjs`): the
+canvas 2D context exposes no `fontVariationSettings` at all, and its `font` shorthand rejects an
+inline `font-variation-settings` declaration** — and since T-13's correction, the canvas raster is
+where BOTH renderers get their text pixels. So a variable axis would move the DOM overlay and nothing
+that ships. The probe was falsified before it was believed (the same context DOES respond to a weight
+change in `measureText`, so the negative is the API's, not the probe's) — and its first draft was
+itself wrong in the instructive way: it tested `"fontVariationSettings" in ctx` *after* assigning to
+it, and read back its own expando. OQ2 stays open and moves to S9, which is where a variable axis has
+to solve the raster problem anyway.
+
+**Evidence:** `render:baseline` **78/78 unchanged at zero tolerance** versus `a1af4ef` — the D1a claim
+for all five fields. `textstyle:golden` 77/77 (54 pre-existing + 23 new), and the 54 pre-existing cases
+differ from their S4 goldens by **exactly** the two appended `<undefined>` keys and nothing else, checked
+mechanically rather than by reading the diff. `textstyle:schema` sweeps 25 presetable fields. Three new
+pixel fixtures (`gradient-fill`, `per-line-pill`, `shadow-stack`) at 0.000%. And `text:s5-falsifier`,
+because 0.000% is also what a completely inert feature reports: each field flipped against its LEGACY
+shape (key deleted, not set falsy) must change the render, and each no-op arm — a one-stop gradient, a
+pill over a transparent background, `shadowLayers: 1` — must be byte-identical. All six assertions hold.
+
+**A defect the falsifier's stills caught that no hash could have.** The first per-line implementation
+drew each pill inside the line loop, so line two's pill painted over line one's descenders and ate
+them. Every gate was green: parity 0.000%, the flip changed the render, the emitted style was right.
+CSS puts every inline box's background in the background layer beneath *all* of the element's text,
+and the raster has to do the same — the pills are now one pass before any glyph. **A "does it differ"
+falsifier proves the field is wired, never that the picture is correct; the stills have to be looked
+at.**
+
+**Not done, deliberately, and each is a finding rather than a leftover:**
+
+- `fillTexture` (image fill, shipped 2026-07-17) is a look field that is **not** in `TextStyleFields`,
+  so Save Style and the clipboard silently drop it — the T-15 shape, in the preset path, in a field S4's
+  exhaustiveness constraint cannot see because the constraint is over `TextStyleFields` and this is not
+  in it. It has no editor UI today, so no user can reach it; **S6 must not ship presets without closing
+  this**, and the fix is to describe it in the schema, which needs a kind decision for a composite value.
+- The DOM overlay path is covered at the emitted-CSS level (`textstyle:schema` asserts the clip, the
+  fill-colour give-up and `box-decoration-break`), **not** by pixels: the pixel harness compares the two
+  raster consumers, which is where the shipped picture comes from. Stated rather than implied.
 
 ---
 

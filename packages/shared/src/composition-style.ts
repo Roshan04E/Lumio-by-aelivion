@@ -61,13 +61,18 @@ export interface CompositionLayerStyleInput {
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
   strokePaintOrder?: "over" | "under" | undefined;
+  fillGradientFrom?: string | undefined;
+  fillGradientTo?: string | undefined;
+  fillGradientAngle?: number | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
+  backgroundPerLine?: boolean | undefined;
   shadowColor?: string | undefined;
   shadowBlur?: number | undefined;
   shadowOffsetX?: number | undefined;
   shadowOffsetY?: number | undefined;
+  shadowLayers?: number | undefined;
   effects?: unknown[] | undefined;
   masks?: Mask[] | undefined;
 }
@@ -747,14 +752,25 @@ export interface ResolvedTextStyle {
   strokeWidth: number;
   /** `strokePaintOrder === "under"`. Absent reads as false without being written back as `"over"`. */
   strokeUnderFill: boolean;
+  /**
+   * ADR-023 S5. The two-stop glyph gradient, or ABSENT — and absent is the state a half-authored
+   * gradient collapses to, so "one stop set" can never emit a one-colour gradient that reads as a
+   * broken fill. Resolution is where that rule lives, not emission, because the raster and the DOM
+   * must not each decide it.
+   */
+  fillGradient: { from: string; to: string; angleDeg: number } | undefined;
   backgroundColor: string;
   backgroundPaddingEm: number;
   backgroundRadiusEm: number;
+  /** `backgroundPerLine === true`. Absent reads as false without being written back (D1a). */
+  backgroundPerLine: boolean;
   shadowColor: string;
   /** Already carries the effect-conditional default: 19 with a `shadow` effect on the layer, else 0. */
   shadowBlur: number;
   shadowOffsetX: number;
   shadowOffsetY: number;
+  /** Stacked-shadow copies, ≥1. Absent and anything below 1 resolve to 1 — one shadow, as before. */
+  shadowLayers: number;
 }
 
 /**
@@ -799,6 +815,10 @@ export function resolveTextStyle(
     // changes anything, so every project authored before this field existed emits exactly the CSS it
     // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
     strokeUnderFill: (layer.strokePaintOrder ?? style.strokePaintOrder) === "under",
+    // ADR-023 D7 (S5). BOTH stops or nothing — resolved here so the raster and the DOM cannot answer
+    // "is there a gradient" differently, and so a half-authored one falls back to the solid fill
+    // rather than emitting a one-colour gradient that reads as a bug.
+    fillGradient: resolveFillGradient(layer, style),
     backgroundColor: stringOr(layer.backgroundColor ?? style.backgroundColor, compositionTextDefaults.backgroundColor),
     backgroundPaddingEm: animStyleNumber(
       layer,
@@ -812,6 +832,8 @@ export function resolveTextStyle(
       "style.backgroundRadiusEm",
       numberOr(layer.backgroundRadiusEm ?? style.backgroundRadiusEm, compositionTextDefaults.borderRadiusEm)
     ),
+    // ADR-023 D7 (S5). Only an explicit `true` moves anything; absent is the single block pill (D1a).
+    backgroundPerLine: (layer.backgroundPerLine ?? style.backgroundPerLine) === true,
     shadowColor: stringOr(layer.shadowColor ?? style.shadowColor, compositionTextDefaults.shadowColor),
     shadowBlur: animStyleNumber(
       layer,
@@ -820,8 +842,37 @@ export function resolveTextStyle(
       numberOr(layer.shadowBlur ?? style.shadowBlur, hasShadowEffect ? compositionTextDefaults.shadowBlur : 0)
     ),
     shadowOffsetX: animStyleNumber(layer, options, "style.shadowOffsetX", numberOr(layer.shadowOffsetX ?? style.shadowOffsetX, compositionTextDefaults.shadowOffsetX)),
-    shadowOffsetY: animStyleNumber(layer, options, "style.shadowOffsetY", numberOr(layer.shadowOffsetY ?? style.shadowOffsetY, compositionTextDefaults.shadowOffsetY))
+    shadowOffsetY: animStyleNumber(layer, options, "style.shadowOffsetY", numberOr(layer.shadowOffsetY ?? style.shadowOffsetY, compositionTextDefaults.shadowOffsetY)),
+    // ADR-023 D7 (S5). Floored to an integer ≥ 1: a stack is a COUNT of copies, and 1 is exactly the
+    // single shadow every project emitted before this field existed.
+    shadowLayers: resolveShadowLayers(layer.shadowLayers ?? style.shadowLayers)
   };
+}
+
+/**
+ * ADR-023 D7 (S5) — the two-stop glyph gradient, or `undefined`.
+ *
+ * Absent unless BOTH stops are real colour strings. A gradient with one stop is not a gradient with a
+ * sensible other end; it is an unfinished edit, and the safe reading of an unfinished edit is the look
+ * the layer had before it started — the same "I could not read it and it said something else get the
+ * same answer" posture `normalizeProjectColorSettings` takes for colour.
+ */
+function resolveFillGradient(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  style: Record<string, unknown>
+): { from: string; to: string; angleDeg: number } | undefined {
+  const from = layer.fillGradientFrom ?? (style.fillGradientFrom as string | undefined);
+  const to = layer.fillGradientTo ?? (style.fillGradientTo as string | undefined);
+  if (typeof from !== "string" || !from || typeof to !== "string" || !to) return undefined;
+  const angle = layer.fillGradientAngle ?? (style.fillGradientAngle as number | undefined);
+  // 180deg — CSS `linear-gradient`'s own default direction (top → bottom).
+  return { from, to, angleDeg: typeof angle === "number" && Number.isFinite(angle) ? angle : 180 };
+}
+
+/** Stacked-shadow copies. Anything unreadable, fractional or below 1 is one shadow — today's look. */
+function resolveShadowLayers(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  return Math.max(1, Math.floor(value));
 }
 
 /**
@@ -839,6 +890,7 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
   // overlay (opentype outline + envelope mesh) by buildWarpedTextPathSvg; see
   // VideoPreview.tsx / remotion/Root.tsx and font-outlines.ts.
   const filter = combineFilter(effectCss.filter, getCompositionColorFilter(layer, options));
+  const linePill = textLinePillCss(resolved, paddingEmY, paddingEmX);
 
   return {
     left: `${transform.x}%`,
@@ -846,7 +898,11 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     maxWidth: `${compositionTextDefaults.maxWidthPercent}%`,
     padding: `${paddingEmY}em ${paddingEmX}em`,
     borderRadius: `${resolved.backgroundRadiusEm}em`,
-    background: resolved.backgroundColor,
+    // ADR-023 D7 (S5). Per-line pills move the background off the block and onto the line fragments,
+    // so the block gives its up — but ONLY when there is a background to move: a per-line flag over a
+    // transparent pill has nothing to relocate and must stay byte-identical to today (see
+    // `textLinePillCss`, which decides both halves of this from one place).
+    background: linePill ? "transparent" : resolved.backgroundColor,
     color: resolved.color,
     fontFamily: resolved.fontFamily,
     fontSize: resolved.fontSize,
@@ -872,8 +928,49 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     // leak its level into, nor inherit one from, whatever DOM happens to surround it in the editor.
     direction: resolved.direction,
     unicodeBidi: resolved.direction ? ("isolate" as const) : undefined,
-    whiteSpace: "pre-wrap" as const
+    whiteSpace: "pre-wrap" as const,
+    /**
+     * ADR-023 D7 (S5) — the two S5 looks that are NOT properties of this element.
+     *
+     * Both are emitted here, as strings, because this object is the ONE thing every renderer reads
+     * (and the thing `scene-text-raster` keys its cache on). A field that changes the picture and is
+     * not in here is invisible to the cache — a stale raster forever — and invisible to a parity gate,
+     * which is T-15's whole subject. So they travel with the rest of the style even though neither is
+     * a declaration this element can carry:
+     *
+     * - `textFillGradient` paints the GLYPHS. In the DOM `background-clip: text` clips the
+     *   background-*colour* as well, so on this element it would eat the pill; it belongs on the run
+     *   spans, which is where the DOM path puts it.
+     * - `textLinePill` is the per-line background, which by definition is not the block's background.
+     *
+     * The shape follows the file's existing idiom for exactly this problem — `WebkitTextStroke`'s
+     * `"8px #f00"` and `textShadow`'s `"0px 7px 19px rgba(…)"` — a space-separated string with the
+     * COLOUR LAST, so a colour containing spaces (`rgba(0, 0, 0, .5)`) parses without quoting.
+     *
+     * DOM consumers must destructure these out before spreading; they are not CSS properties.
+     */
+    textFillGradient: resolved.fillGradient
+      ? `linear-gradient(${resolved.fillGradient.angleDeg}deg, ${resolved.fillGradient.from}, ${resolved.fillGradient.to})`
+      : undefined,
+    textLinePill: linePill
   };
+}
+
+/**
+ * The per-line pill as `"<padY>em <padX>em <radius>em <color>"`, or `undefined` when the layer does not
+ * have one — which includes a layer that asked for per-line pills over a TRANSPARENT background.
+ *
+ * That last case is the one worth stating: it is not an optimisation. `getCompositionTextStyle` blanks
+ * the block's `background` whenever a pill is present, so if this returned a transparent pill the block
+ * would emit `background: "transparent"` in place of `background: "transparent"` — identical today, and
+ * one refactor away from not being. Deciding "is there a pill" once, here, is what keeps the two halves
+ * from disagreeing.
+ */
+function textLinePillCss(resolved: ResolvedTextStyle, paddingEmY: number, paddingEmX: number): string | undefined {
+  if (!resolved.backgroundPerLine) return undefined;
+  const color = resolved.backgroundColor;
+  if (!color || color === "transparent" || color === "none") return undefined;
+  return `${paddingEmY}em ${paddingEmX}em ${resolved.backgroundRadiusEm}em ${color}`;
 }
 
 export function getCompositionTextRuns(layer: { text?: string | undefined; textRuns?: TextRun[] | undefined }): TextRun[] {
@@ -970,9 +1067,17 @@ export function getCompositionTextRunStyle(
     color?: string | undefined;
     fontFamily?: string | undefined;
     fontStyle?: string | undefined;
+    /** ADR-023 S5 — see {@link getCompositionTextStyle}'s `textFillGradient`. DOM path only; the
+     *  raster reads the same emitted string and paints a canvas gradient instead. */
+    textFillGradient?: string | undefined;
   }
 ): Record<string, unknown> {
   const baseFontSize = numberOr(baseStyle.fontSize, compositionTextDefaults.fontSize);
+  // ADR-023 D7 (S5). `background-clip: text` belongs on the run span rather than the layer box, and
+  // the gradient overrides the run's own colour the way `fillTexture` already does — a whole-layer
+  // paint, because that is what "gradient-filled title" means. Keys are appended, and only when a
+  // gradient exists, so a layer without one emits exactly the object it emitted before S5.
+  const gradient = baseStyle.textFillGradient;
   return {
     fontWeight: run.bold ? 900 : baseStyle.fontWeight,
     // Like fontWeight above, the run only OVERRIDES the layer style — it must not zero it out.
@@ -983,7 +1088,67 @@ export function getCompositionTextRunStyle(
     // Per-run highlight (marker). Distinct from the layer's background pill.
     backgroundColor: run.backgroundColor,
     fontFamily: run.fontFamily ?? baseStyle.fontFamily,
-    fontSize: run.fontSizeMultiplier ? baseFontSize * run.fontSizeMultiplier : baseStyle.fontSize
+    fontSize: run.fontSizeMultiplier ? baseFontSize * run.fontSizeMultiplier : baseStyle.fontSize,
+    ...(gradient
+      ? {
+          backgroundImage: gradient,
+          WebkitBackgroundClip: "text",
+          backgroundClip: "text",
+          // Without this the solid `color` above paints over the clipped background and the gradient
+          // is invisible. It is also why the gradient cannot share an element with the pill.
+          WebkitTextFillColor: "transparent"
+        }
+      : {})
+  };
+}
+
+/**
+ * ADR-023 D7 (S5) — the per-line pill as CSS for ONE inline wrapper around ALL the runs, or
+ * `undefined` when the layer has no pill.
+ *
+ * A separate element from the glyph spans on purpose, and not for tidiness: `background-clip: text`
+ * clips the background COLOUR too, so a gradient-filled run that also carried the pill would eat it.
+ * Pill outside, glyphs inside, is the only construction where both looks compose.
+ *
+ * ONE wrapper for the whole text, not one per run, and that is the load-bearing half. Per-run wrappers
+ * would put the horizontal padding at every run BOUNDARY, so a line made of three rich-text runs would
+ * grow two interior bulges the raster does not draw. One wrapper fragments per LINE and pads only at
+ * the line ends, which is exactly the rectangle `drawTextLayer` puts behind each line.
+ *
+ * `box-decoration-break: clone` is the whole feature: it gives each line fragment of an inline box its
+ * own background, padding and corners. That is the browser's own per-line box, not a reimplementation
+ * of one, which is what keeps this inside D6's "layout and shaping are the browser's".
+ */
+export function getCompositionTextLinePillStyle(baseStyle: {
+  textLinePill?: string | undefined;
+}): Record<string, unknown> | undefined {
+  if (!baseStyle.textLinePill) return undefined;
+  const parsed = parseTextLinePill(baseStyle.textLinePill);
+  if (!parsed) return undefined;
+  return {
+    backgroundColor: parsed.color,
+    padding: `${parsed.padYEm}em ${parsed.padXEm}em`,
+    borderRadius: `${parsed.radiusEm}em`,
+    boxDecorationBreak: "clone",
+    WebkitBoxDecorationBreak: "clone"
+  };
+}
+
+/**
+ * Read back `"<padY>em <padX>em <radius>em <color>"`. One parser, exported, because the DOM path and
+ * the canvas raster must not each write their own — that is how `paintOrder` and `direction` are
+ * consumed too, and the reason both renderers cannot disagree about a look they read from one string.
+ */
+export function parseTextLinePill(
+  value: string
+): { padYEm: number; padXEm: number; radiusEm: number; color: string } | undefined {
+  const match = value.match(/^(-?[\d.]+)em\s+(-?[\d.]+)em\s+(-?[\d.]+)em\s+(.+)$/);
+  if (!match) return undefined;
+  return {
+    padYEm: Number(match[1]),
+    padXEm: Number(match[2]),
+    radiusEm: Number(match[3]),
+    color: match[4]!.trim()
   };
 }
 
@@ -1185,13 +1350,20 @@ export const MANIFEST_LAYER_STYLE_KEYS = [
   "strokeColor",
   "strokeWidth",
   "strokePaintOrder",
+  // ADR-023 D7 (S5). Same story as `fontRef` above: the exhaustiveness constraint below refused to
+  // compile until these five were listed, which is the constraint doing the job T-15 gave it.
+  "fillGradientFrom",
+  "fillGradientTo",
+  "fillGradientAngle",
   "backgroundColor",
   "backgroundPaddingEm",
   "backgroundRadiusEm",
+  "backgroundPerLine",
   "shadowColor",
   "shadowBlur",
   "shadowOffsetX",
-  "shadowOffsetY"
+  "shadowOffsetY",
+  "shadowLayers"
 ] as const satisfies ReadonlyArray<ManifestLayerStyleKey>;
 
 /**
@@ -1303,10 +1475,26 @@ export function isTextVisualOrderUnavailable(layer: {
   return signatures.size > 1;
 }
 
-/** `text-shadow` from an already-resolved style. Zero blur emits no declaration. */
+/**
+ * `text-shadow` from an already-resolved style. Zero blur emits no declaration.
+ *
+ * ADR-023 D7 (S5): `text-shadow` is a LIST, and `shadowLayers` says how many copies of the resolved
+ * shadow to stack at 1×…N× the offset — the faked 3D extrude. The NEAREST copy is emitted first
+ * because CSS paints the first entry topmost, so the stack recedes away from the glyph rather than
+ * climbing over it. `shadowLayers` resolves to 1 for every project authored before it existed, which
+ * is why a legacy layer's declaration is byte-identical and not merely equivalent.
+ *
+ * A stacked shadow with a non-zero BLUR is a smear, not a slab — that is CSS's answer as much as ours,
+ * and the extrude look is authored at blur 0. Nothing here corrects for it.
+ */
 function textShadowCss(resolved: ResolvedTextStyle): string | undefined {
   if (resolved.shadowBlur <= 0) return undefined;
-  return `${resolved.shadowOffsetX}px ${resolved.shadowOffsetY}px ${resolved.shadowBlur}px ${resolved.shadowColor}`;
+  const one = (k: number) =>
+    `${resolved.shadowOffsetX * k}px ${resolved.shadowOffsetY * k}px ${resolved.shadowBlur}px ${resolved.shadowColor}`;
+  if (resolved.shadowLayers <= 1) return one(1);
+  const parts: string[] = [];
+  for (let k = 1; k <= resolved.shadowLayers; k += 1) parts.push(one(k));
+  return parts.join(", ");
 }
 
 function getShapeShadowCss(layer: CompositionLayerStyleInput | TimelineLayer, style: Record<string, unknown>) {

@@ -253,6 +253,58 @@ const fields = [
     presetable: true,
     documentation: { description: "`paint-order: stroke fill` — a heavy stroke stops eating the letterform." }
   },
+  /**
+   * ADR-023 D7 (S5) — tier-1 gradient fill, as THREE fields rather than one.
+   *
+   * The composite `gradient` kind is in the frozen fifteen and is not one the renderer can build yet;
+   * ADR-003's promotion-out-of-the-remainder clause wants genuine two-system demand and S5 is one
+   * system. Two `color`s and a `number` describe a two-stop linear gradient exactly, in kinds that
+   * already render, and none of them is a private encoding a future `gradient` field would have to
+   * decode. When the kind is built these three collapse into it through a normal migration; until
+   * then this is what "metadata evolves before taxonomy" looks like in practice, not a workaround.
+   *
+   * `absenceIsMeaningful` on all three: absent is "no gradient", permanently, and a default colour
+   * filled in on load would turn every legacy title into a gradient (D1a).
+   */
+  {
+    key: "fillGradientFrom",
+    kind: "color",
+    group: "fill",
+    label: "Gradient from",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "First stop of the glyph gradient. Nothing is emitted unless BOTH stops are set.",
+      aiSynonyms: ["gradient start", "gradient top"]
+    }
+  },
+  {
+    key: "fillGradientTo",
+    kind: "color",
+    group: "fill",
+    label: "Gradient to",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "Second stop of the glyph gradient.",
+      aiSynonyms: ["gradient end", "gradient bottom"]
+    }
+  },
+  {
+    key: "fillGradientAngle",
+    kind: "number",
+    unit: "deg",
+    min: 0,
+    max: 360,
+    step: 1,
+    group: "fill",
+    label: "Gradient angle",
+    // Absent renders as CSS `linear-gradient`'s own default (180deg, top → bottom) — but only when a
+    // gradient exists at all, which is why this carries no `defaultValue` either.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: { description: "CSS degrees: 0 = up, 90 = right. Absent = 180 (top to bottom)." }
+  },
 
   // --- Background ----------------------------------------------------------------------------
   {
@@ -290,6 +342,20 @@ const fields = [
     defaultValue: compositionTextDefaults.borderRadiusEm,
     animatableAs: "style.backgroundRadiusEm",
     presetable: true
+  },
+  {
+    key: "backgroundPerLine",
+    kind: "boolean",
+    group: "background",
+    label: "Pill per line",
+    // ADR-023 D1a again: absent is the single block box, permanently. A `defaultValue: false` would
+    // read the same today and would be a lie the first time the authoring default changes.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "One pill per wrapped line instead of one box around the block — the caption look.",
+      aiSynonyms: ["per-line background", "line pills", "caption box"]
+    }
   },
 
   // --- Shadow --------------------------------------------------------------------------------
@@ -342,6 +408,24 @@ const fields = [
     defaultValue: compositionTextDefaults.shadowOffsetY,
     animatableAs: "style.shadowOffsetY",
     presetable: true
+  },
+  {
+    key: "shadowLayers",
+    kind: "number",
+    min: 1,
+    max: 24,
+    step: 1,
+    group: "shadow",
+    label: "Shadow stack",
+    // Absent means one shadow — which is also what `1` means, so this could carry `defaultValue: 1`
+    // honestly. It does not, for the D1a reason: the emitted declaration must stay byte-identical for
+    // a legacy layer, and a default is a value something is entitled to write in.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "Copies of the shadow at 1×…N× the offset — a faked 3D extrude. Authored at blur 0.",
+      aiSynonyms: ["extrude", "3d text", "stacked shadow", "long shadow"]
+    }
   }
 ] as const satisfies ReadonlyArray<PropertySchemaField<TextStyleSchemaKey>>;
 

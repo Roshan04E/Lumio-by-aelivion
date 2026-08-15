@@ -29,14 +29,18 @@ import type { ReactNode } from "react";
 import {
   AlignLeft,
   ArrowLeftRight,
+  Blend,
   CaseSensitive,
   Eye,
+  Layers,
   Maximize2,
   MoveHorizontal,
   MoveVertical,
   PaintBucket,
   PenLine,
   Radius,
+  RotateCw,
+  Rows3,
   Sparkles,
   Square
 } from "lucide-react";
@@ -297,6 +301,49 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
   );
   put(slotField(ctx, "strokePaintOrder"));
 
+  /**
+   * S5 / ADR-023 D7 — the two-stop glyph gradient. Three rows, one per schema field.
+   *
+   * RESET CLEARS THE GRADIENT rather than writing a default colour, and that is the D1a rule reaching
+   * the UI: absence is the "no gradient" state, so the only honest way back to it is to write nothing.
+   * Both stops are cleared together — a gradient with one stop does not render (`resolveFillGradient`
+   * requires both), so leaving one behind would be an invisible half-value sitting in saved data.
+   */
+  {
+    const clearGradient = () =>
+      onChange((item) => ({ ...item, fillGradientFrom: undefined, fillGradientTo: undefined, fillGradientAngle: undefined }));
+    fields.fillGradientFrom = {
+      kind: "color",
+      key: "fillGradientFrom",
+      label: labelOf("fillGradientFrom", "Gradient from"),
+      icon: <Blend size={14} />,
+      value: layer.fillGradientFrom ?? layer.color ?? defaults.color,
+      palette,
+      onReset: clearGradient,
+      onChange: (value) => onChange((item) => ({ ...item, fillGradientFrom: value }))
+    };
+    fields.fillGradientTo = {
+      kind: "color",
+      key: "fillGradientTo",
+      label: labelOf("fillGradientTo", "Gradient to"),
+      icon: <Blend size={14} />,
+      value: layer.fillGradientTo ?? layer.color ?? defaults.color,
+      palette,
+      onReset: clearGradient,
+      onChange: (value) => onChange((item) => ({ ...item, fillGradientTo: value }))
+    };
+    fields.fillGradientAngle = {
+      kind: "number",
+      key: "fillGradientAngle",
+      label: labelOf("fillGradientAngle", "Gradient angle"),
+      icon: <RotateCw size={14} />,
+      value: layer.fillGradientAngle ?? 180,
+      ...boundsOf("fillGradientAngle", { min: 0, max: 360, step: 1 }),
+      onReset: () => onChange((item) => ({ ...item, fillGradientAngle: undefined })),
+      onChange: (value) => onChange((item) => ({ ...item, fillGradientAngle: value }))
+    };
+  }
+
   // --- Background ---------------------------------------------------------------------------
   // Two rows over ONE schema field: the stored value is a single CSS colour, and the panel has always
   // split it into a swatch and an opacity. That decomposition is an adapter's business — the schema
@@ -355,6 +402,16 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
       onWrite: (value) => onChange((item) => ({ ...item, backgroundRadiusEm: value / 100 }))
     })
   );
+  // S5 / ADR-023 D7. Switching it OFF writes `undefined`, not `false`: absent is the legacy state and
+  // the two are indistinguishable to every renderer, so the one that stays out of saved data wins.
+  fields.backgroundPerLine = {
+    kind: "boolean",
+    key: "backgroundPerLine",
+    label: labelOf("backgroundPerLine", "Pill per line"),
+    icon: <Rows3 size={14} />,
+    value: layer.backgroundPerLine === true,
+    onChange: (value) => onChange((item) => ({ ...item, backgroundPerLine: value ? true : undefined }))
+  };
 
   // --- Shadow --------------------------------------------------------------------------------
   fields.shadowColor = {
@@ -422,6 +479,18 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
       onWrite: (value) => onChange((item) => ({ ...item, shadowOffsetY: value }))
     })
   );
+  // S5 / ADR-023 D7 — stacked shadows. `1` writes `undefined` for the same reason the per-line toggle
+  // does: one copy IS the legacy look, and the state that stays out of saved data is the one to write.
+  fields.shadowLayers = {
+    kind: "number",
+    key: "shadowLayers",
+    label: labelOf("shadowLayers", "Shadow stack"),
+    icon: <Layers size={14} />,
+    value: layer.shadowLayers ?? 1,
+    ...boundsOf("shadowLayers", { min: 1, max: 24, step: 1 }),
+    onReset: () => onChange((item) => ({ ...item, shadowLayers: undefined })),
+    onChange: (value) => onChange((item) => ({ ...item, shadowLayers: value > 1 ? value : undefined }))
+  };
 
   return fields;
 }

@@ -236,13 +236,21 @@ export interface TextStyleFields {
   /** See {@link TimelineLayer.strokePaintOrder}. Part of the look, so a saved style carries it — and
    *  a style captured before S1 simply has no key, which keeps meaning `"over"`. */
   strokePaintOrder?: "over" | "under" | undefined;
+  /** See {@link TimelineLayer.fillGradientFrom}. ADR-023 S5 — tier-1 gradient fill. */
+  fillGradientFrom?: string | undefined;
+  fillGradientTo?: string | undefined;
+  fillGradientAngle?: number | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
+  /** See {@link TimelineLayer.backgroundPerLine}. ADR-023 S5 — per-line caption pills. */
+  backgroundPerLine?: boolean | undefined;
   shadowColor?: string | undefined;
   shadowBlur?: number | undefined;
   shadowOffsetX?: number | undefined;
   shadowOffsetY?: number | undefined;
+  /** See {@link TimelineLayer.shadowLayers}. ADR-023 S5 — stacked shadows (faked extrude). */
+  shadowLayers?: number | undefined;
   textAlign?: "left" | "center" | "right" | "start" | "end" | undefined;
   /**
    * ADR-023 S4. Base paragraph direction is part of the look (it is a paragraph setting in After
@@ -859,13 +867,66 @@ export interface TimelineLayer {
    * else renders exactly as it does today until its author opts in.
    */
   strokePaintOrder?: "over" | "under" | undefined;
+  /**
+   * ADR-023 D7 (S5) — **tier-1 gradient fill for the glyphs**, the CSS `background-clip: text` look.
+   *
+   * Two stops and an angle, because that is what a frozen taxonomy can describe honestly today: a
+   * richer stop list is the `gradient` kind (ADR-003), which is frozen into the union but not yet
+   * buildable by `PropertyFieldList`, and inventing a stop-list encoding over `color`/`number` fields
+   * to dodge that would be the taxonomy decision taken by accident. Two stops covers the gold /
+   * chrome / duotone caption looks this stage exists for; the third stop arrives with the kind.
+   *
+   * **Both stops must be present for anything to be emitted**, so a half-authored gradient renders as
+   * the solid {@link TimelineLayer.color} rather than as a surprise. The gradient paints the GLYPHS
+   * (in the DOM it rides the run spans, not the layer box — `background-clip: text` clips the
+   * background *colour* too, so putting it on the box would silently eat the background pill), and it
+   * overrides every run's own colour, exactly as `fillTexture` does.
+   *
+   * `fillTexture` (an image fill) wins over a gradient when both are set: it is the more specific
+   * paint, and it shipped first.
+   *
+   * **ABSENT MEANS NO GRADIENT, permanently and without migration** — the D1a shape, as for
+   * {@link TimelineLayer.strokePaintOrder} and {@link TimelineLayer.direction}.
+   */
+  fillGradientFrom?: string | undefined;
+  fillGradientTo?: string | undefined;
+  /** Gradient angle in CSS degrees (0 = up, 90 = right). Absent = 180 (top→bottom), the CSS default. */
+  fillGradientAngle?: number | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
+  /**
+   * ADR-023 D7 (S5) — the background pill is drawn **per line** instead of as one box around the
+   * whole block. The caption look people actually mean: three wrapped lines get three pills that hug
+   * each line's own width, not one rectangle as wide as the longest.
+   *
+   * The block keeps its padding (so the element box and therefore the layout do not move) and gives
+   * up its background; the pill moves onto the line fragments. In the DOM that is
+   * `box-decoration-break: clone` on the inline runs, which is the browser's own per-fragment box; in
+   * the raster it is one rounded rect per line, sized from the line's ink metrics so the two agree.
+   *
+   * **ABSENT MEANS THE SINGLE BLOCK PILL, permanently and without migration** (D1a).
+   */
+  backgroundPerLine?: boolean | undefined;
   shadowColor?: string | undefined;
   shadowBlur?: number | undefined;
   shadowOffsetX?: number | undefined;
   shadowOffsetY?: number | undefined;
+  /**
+   * ADR-023 D7 (S5) — how many copies of the shadow are stacked, at 1×…N× the offset.
+   *
+   * `text-shadow` has always been a LIST and we emitted one entry. Stacking the same shadow at
+   * increasing offsets is how a hard 3D extrude is made, and at zero blur it reads as a solid
+   * extruded slab rather than as a blur. One number, no new kind, and the existing four shadow
+   * fields keep describing the shadow being repeated.
+   *
+   * Independent per-copy colours (a multi-colour glow) are genuinely a list of shadows and want the
+   * `gradient`-adjacent `list` kind; they are NOT approximated here.
+   *
+   * **ABSENT MEANS ONE SHADOW, permanently and without migration** (D1a). Values below 2 emit
+   * exactly what they emitted before this field existed.
+   */
+  shadowLayers?: number | undefined;
   /** Person/background cutout matte produced by Extract Person. Read by both renderers. */
   matte?: MatteRef | undefined;
   /**

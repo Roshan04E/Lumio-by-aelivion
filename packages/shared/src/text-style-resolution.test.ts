@@ -124,6 +124,51 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
   { name: "text/background", layer: textLayer({ backgroundColor: "#101010", backgroundPaddingEm: 0.5, backgroundRadiusEm: 0.75 }) },
   { name: "text/background-in-style-bag", layer: textLayer({ style: { backgroundColor: "#101010", backgroundPaddingEm: 0.5 } }) },
 
+  // --- S5: gradient fill — absent, half-authored, both stops, angle, style bag, texture ---------
+  { name: "text/gradient-absent", layer: textLayer({ color: "#ff0000" }) },
+  { name: "text/gradient-only-from", layer: textLayer({ fillGradientFrom: "#ff0000" }) },
+  { name: "text/gradient-only-to", layer: textLayer({ fillGradientTo: "#0000ff" }) },
+  { name: "text/gradient-angle-without-stops", layer: textLayer({ fillGradientAngle: 45 }) },
+  { name: "text/gradient-both-stops", layer: textLayer({ fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" }) },
+  { name: "text/gradient-angled", layer: textLayer({ fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff", fillGradientAngle: 45 }) },
+  {
+    name: "text/gradient-rgba-stops",
+    layer: textLayer({ fillGradientFrom: "rgba(255, 0, 0, 0.5)", fillGradientTo: "rgba(0, 0, 255, 0.25)" })
+  },
+  { name: "text/gradient-in-style-bag", layer: textLayer({ style: { fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" } }) },
+
+  // --- S5: per-line pill — the no-op case first, because that is the legacy claim ---------------
+  { name: "text/per-line-pill-over-transparent", layer: textLayer({ backgroundPerLine: true }) },
+  { name: "text/per-line-pill", layer: textLayer({ backgroundPerLine: true, backgroundColor: "#101010" }) },
+  {
+    name: "text/per-line-pill-with-padding-and-radius",
+    layer: textLayer({ backgroundPerLine: true, backgroundColor: "#101010", backgroundPaddingEm: 0.4, backgroundRadiusEm: 0.6 })
+  },
+  {
+    name: "text/per-line-pill-rgba",
+    layer: textLayer({ backgroundPerLine: true, backgroundColor: "rgba(16, 16, 16, 0.8)" })
+  },
+  { name: "text/per-line-pill-false", layer: textLayer({ backgroundPerLine: false, backgroundColor: "#101010" }) },
+  { name: "text/per-line-pill-in-style-bag", layer: textLayer({ backgroundColor: "#101010", style: { backgroundPerLine: true } }) },
+  {
+    name: "text/per-line-pill-and-gradient",
+    layer: textLayer({ backgroundPerLine: true, backgroundColor: "#101010", fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" })
+  },
+
+  // --- S5: stacked shadows — 1 must be byte-identical to absent ---------------------------------
+  { name: "text/shadow-stack-one", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, shadowLayers: 1 }) },
+  { name: "text/shadow-stack-absent", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6 }) },
+  { name: "text/shadow-stack-four", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, shadowLayers: 4 }) },
+  { name: "text/shadow-stack-zero-blur", layer: textLayer({ shadowOffsetY: 6, shadowLayers: 4 }) },
+  { name: "text/shadow-stack-extrude", layer: textLayer({ effects: [shadowEffect], shadowBlur: 0.001, shadowOffsetX: 3, shadowOffsetY: 3, shadowLayers: 8 }) },
+  { name: "text/shadow-stack-fractional", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, shadowLayers: 2.7 }) },
+  { name: "text/shadow-stack-in-style-bag", layer: textLayer({ shadowBlur: 10, shadowOffsetY: 6, style: { shadowLayers: 3 } }) },
+  {
+    name: "text/shadow-stack-animated-offset",
+    layer: textLayer({ shadowBlur: 10, shadowLayers: 3, animations: styleKeyframes("style.shadowOffsetY", 0, 20) }),
+    options: { currentTimeSeconds: 2 }
+  },
+
   // --- geometry / width / transform / blend / effects ------------------------------------------
   { name: "text/text-width", layer: textLayer({ textWidthPercent: 60 }) },
   { name: "text/text-width-zero", layer: textLayer({ textWidthPercent: 0 }) },

@@ -139,6 +139,9 @@ export type RenderComparisonFixtureKey =
   | "nested-junction-transition"
   | "nested-junction-preroll"
   | "texture-fill"
+  | "gradient-fill"
+  | "per-line-pill"
+  | "shadow-stack"
   | "flarex-key-glow"
   | "flarex-curves"
   | "flarex-keyframed-blur"
@@ -226,6 +229,9 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "nested-junction-transition",
   "nested-junction-preroll",
   "texture-fill",
+  "gradient-fill",
+  "per-line-pill",
+  "shadow-stack",
   "flarex-key-glow",
   "flarex-curves",
   "flarex-keyframed-blur",
@@ -1512,6 +1518,14 @@ interface FixtureVariant {
   textDirection?: TimelineLayer["direction"];
   textContent?: string;
   textAlignOverride?: TimelineLayer["textAlign"];
+  /**
+   * S5 (ADR-023 D7): the three tier-1 looks. Every one of these is undefined in every other variant,
+   * so `textFixtureLayer` omits the keys entirely and every pre-S5 fixture stays byte-identical —
+   * which is the claim `render:baseline` is checking, not a happy side effect.
+   */
+  textFillGradient?: { from: string; to: string; angle?: number };
+  textPerLinePill?: { color: string; paddingEm?: number; radiusEm?: number };
+  textShadowStack?: { layers: number; blur: number; offsetX: number; offsetY: number; color: string };
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
    *  effects array — over a background layer so the keyed-away area is a real composite. */
   flarex?: FlarexComp;
@@ -1756,6 +1770,47 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         textDirection: "auto",
         textAlignOverride: "end",
         textContent: "مرحبا Brand بالعالم؟"
+      };
+    case "gradient-fill":
+      // S5 (ADR-023 D7). A HARD-contrast gradient at 45°, on big glyphs, over a stroke — the three
+      // things that make a wrong answer legible rather than arguable. The angle is off-axis on
+      // purpose: 180° would look identical whether the canvas gradient line is computed with CSS's
+      // `|W·sin a| + |H·cos a|` length or with the naive box height, and 45° is exactly where a
+      // naive length renders the ramp visibly short of the corners.
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 300,
+        textStrokeWidth: 10,
+        textFillGradient: { from: "#ff2d55", to: "#00e5ff", angle: 45 }
+      };
+    case "per-line-pill":
+      // S5 (ADR-023 D7). TWO lines of very different length, which is the only way the feature is
+      // visible at all: one pill per line hugs each line's own width, and the pre-S5 block box is a
+      // single rectangle as wide as the longer line. A one-line fixture renders identically either
+      // way and would pass over a feature that does nothing.
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 120,
+        textStrokeWidth: 0,
+        textContent: "Save this\nnow",
+        textPerLinePill: { color: "#f5d90a", paddingEm: 0.18, radiusEm: 0.3 }
+      };
+    case "shadow-stack":
+      // S5 (ADR-023 D7). Eight copies at ZERO blur and a diagonal offset — the faked extrude, and the
+      // configuration where the stack is unmistakable: with blur the copies smear into one another
+      // and a single wide shadow would be hard to tell from eight. It also pins the ORDER, because a
+      // stack drawn nearest-last would bury the glyph under its own shadow.
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 300,
+        textStrokeWidth: 6,
+        textShadowStack: { layers: 8, blur: 0.001, offsetX: 6, offsetY: 6, color: "#7b2ff7" }
       };
     case "media-opacity":
       return { effects: [], fit: "cover", mediaOpacity: 50 };
@@ -2094,7 +2149,15 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
   // concern — scaled-text (resolution-aware BOX raster), graded-text (LUT grade), masked-text (clip
   // matte), tilted-text (3D quad). All four now composite text on the GPU (Phase 4.1c/d, no DOM fallback).
   const useTextFixture = Boolean(
-    variant.textScale || variant.textEffects || variant.textMasks || variant.textTilt || variant.textStrokePaintOrder || variant.textDirection
+    variant.textScale ||
+      variant.textEffects ||
+      variant.textMasks ||
+      variant.textTilt ||
+      variant.textStrokePaintOrder ||
+      variant.textDirection ||
+      variant.textFillGradient ||
+      variant.textPerLinePill ||
+      variant.textShadowStack
   );
   const textFixtureLayer: TimelineLayer = {
     id: "fixture_scaled_text",
@@ -2129,6 +2192,33 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     effects: variant.textEffects ?? [],
     ...(variant.textMasks ? { masks: variant.textMasks } : {}),
     ...(variant.textFillTexture ? { fillTexture: variant.textFillTexture } : {}),
+    // S5 (ADR-023 D7). Spread conditionally, like every text field before them, so a variant that does
+    // not ask for the look carries no key at all rather than an explicit "off" — absent and off render
+    // the same today, and only absent is guaranteed to keep doing so (D1a).
+    ...(variant.textFillGradient
+      ? {
+          fillGradientFrom: variant.textFillGradient.from,
+          fillGradientTo: variant.textFillGradient.to,
+          ...(variant.textFillGradient.angle === undefined ? {} : { fillGradientAngle: variant.textFillGradient.angle })
+        }
+      : {}),
+    ...(variant.textPerLinePill
+      ? {
+          backgroundPerLine: true,
+          backgroundColor: variant.textPerLinePill.color,
+          ...(variant.textPerLinePill.paddingEm === undefined ? {} : { backgroundPaddingEm: variant.textPerLinePill.paddingEm }),
+          ...(variant.textPerLinePill.radiusEm === undefined ? {} : { backgroundRadiusEm: variant.textPerLinePill.radiusEm })
+        }
+      : {}),
+    ...(variant.textShadowStack
+      ? {
+          shadowLayers: variant.textShadowStack.layers,
+          shadowBlur: variant.textShadowStack.blur,
+          shadowOffsetX: variant.textShadowStack.offsetX,
+          shadowOffsetY: variant.textShadowStack.offsetY,
+          shadowColor: variant.textShadowStack.color
+        }
+      : {}),
     keyframes: []
   };
 
