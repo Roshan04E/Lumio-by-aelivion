@@ -21,6 +21,7 @@
     "render:baseline": "tsx src/render-baseline-gate.ts",
     "text:look-probe": "tsx src/text-look-clipboard-probe.ts",
     "warp:deform-gate": "tsx src/warp-deform-gate.ts",
+    "oq1:spike": "tsx src/oq1-matte-spike.ts",
     "text:direction-falsifier": "tsx src/text-direction-falsifier.ts",
     "text:s5-falsifier": "tsx src/text-s5-falsifier.ts",
     "font:ref-falsifier": "tsx src/font-ref-falsifier.ts",

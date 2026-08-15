@@ -331,7 +331,7 @@ In priority order:
 shaping** — so D6 holds. SVG is a second *rendering surface*, not a second *text engine*, and it is
 used only when a style actually needs it. A style that does not is plain DOM.
 
-### D9 — Text emits a matte, and `FlarexMatteValue` widens to admit a raster. (Accepted in intent; **Provisional** pending OQ1)
+### D9 — Text emits a matte, and `FlarexMatteValue` widens to admit a raster. (**Accepted** 2026-08-15 — OQ1's spike cleared it; was Provisional)
 
 Tier 2 textured text is: **the text produces a matte; the matte keys a GL fill.** Fusion and After
 Effects both do it this way, and it is why in those tools "video inside text" is not a text feature
@@ -849,6 +849,50 @@ every `matteInput` consumer and classifies each as vector-only, raster-capable, 
 (ii) measures a raster feather/choke against the existing vector rasterizer at 1080p. **Run this
 before any D9 code.** If the raster path forces every matte chain to rasterize early, T-7 is
 violated and D9 needs a different shape.
+
+**CLOSED 2026-08-15 — the spike ran (`oq1:spike`, `apps/worker/src/oq1-matte-spike.ts`; raw numbers
+in `tmp/oq1-spike/oq1-measurements.json`). D9 LEAVES PROVISIONAL. T-7 is NOT violated, and the
+reason is structural rather than lucky.**
+
+*(i) Blast radius — 8 `matteInput` call sites, 7 distinct consumers, and 6 of the 8 already rasterize
+the matte the instant they receive it:* `color`:916, `filter`:1006, `merge`:1484, `blur`:1570 and the
+keyer's `garbage`:1688 / `holdOut`:1697 all call `rasterizeMatte` on entry. **Only `matteControl`
+(:1746/:1747) preserves vector**, and it is the only matte→matte node in the graph.
+
+So the T-7 question has a much narrower answer than the ADR assumed when it called this "the largest
+single cost in this programme". A raster value cannot make a rasterizing consumer rasterize EARLIER,
+because there is no earlier — those six are already the point of rasterization. The only chain that
+can lose losslessness is one that reaches `matteControl`, and it loses it only when one of that
+node's own inputs is a raster. That is not early rasterization; that is **rasterizing at the point a
+raster is genuinely introduced, which is T-7's rule stated exactly**. Vector-only chains are
+untouched: two vector inputs still combine as `Mask[]`, still feather in vector space, still
+complement losslessly.
+
+*(ii) Cost — feather is free, choke is not, and the two must not be scoped as one item.*
+
+| op | vector path | raster path | verdict |
+|---|---|---|---|
+| feather | `ctx.filter = blur(r)` (already raster!) | the same blur | **no new machinery, no new cost** — 0.025 ms vs a 0.020 ms control |
+| choke/spread | `stroke(path)`, `lineWidth = expansion*2`, 0.020 ms, exact | needs a per-pixel threshold shift, **40.3 ms at 1080p** | **needs-work — GPU pass, not canvas 2D** |
+
+The feather result is the useful surprise: `scene-mask-matte.ts:119-131` already implements feather
+by blurring the RASTERIZED shape, so what the ADR called "the vector rasterizer's feather" has always
+been a raster op. There is nothing to port.
+
+Choke is the opposite. The naive raster choke — blur, then steepen with CSS `contrast()` — **does not
+choke at all**: measured, it left the 50% alpha crossing exactly where it started (sample 40, against
+the vector stroke's correct 12px shift to sample 28). A symmetric blur does not move the crossing and
+CSS filter functions can sharpen a ramp but cannot SHIFT its threshold. The honest version (blur, then
+remap alpha per pixel) does move the edge and costs 40.3 ms at 1080p, because it is 2M pixels of JS
+through `getImageData`/`putImageData`. **Constraint on D10, therefore: raster choke/spread belongs in
+the GPU fragment-pass vocabulary the compositor already has, never on the canvas-2D matte path.**
+
+*A note on the instrument, because the first draft of this spike produced a fabricated number.* It
+reported "raster feather is ~775× cheaper than vector feather" — comparing a blur of a canvas that had
+just been drawn into against a blur of a canvas that had been sitting untouched, and attributing the
+whole difference to the blur. The control arm ("blur of a pre-drawn canvas": 0.020 ms) is what
+exposed it. The 35 ms on the vector arm is the fill and the canvas readback. **Any timing comparison
+whose two arms differ in more than the operation under test is T-15 addendum 3 wearing a stopwatch.**
 
 **OQ2 — Do the two Chromiums interpolate `font-variation-settings` identically?** Untested. Variable
 axes are the one D7 item whose parity is not obviously free, because it involves the variation
