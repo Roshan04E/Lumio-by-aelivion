@@ -20,13 +20,13 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const outFile = path.join(repoRoot, "packages/shared/src/font-index-data.ts");
 
 const METADATA_URL = "https://fonts.google.com/metadata/fonts";
-const TREE_URL = "https://api.github.com/repos/google/fonts/git/trees/main?recursive=1";
+export const TREE_URL = "https://api.github.com/repos/google/fonts/git/trees/main?recursive=1";
 
 /**
  * **Where a family's LICENCE lives, and why the index has to know.**
@@ -50,6 +50,27 @@ const LICENSE_PATHS: Record<string, string> = {
   c: "ufl/%/LICENCE.txt"
 };
 
+/**
+ * The licence code for a family this index has VERIFIED has none, permanently — as opposed to
+ * "we looked and found nothing this run" (see `main`'s exhaustiveness check below, which is what
+ * catches the difference).
+ *
+ * Two families, both Google-proprietary: absent from `google/fonts` entirely (no `ofl/`, `apache/`
+ * or `ufl/` directory — checked directly against the live tree, 2026-08-16) AND their own served
+ * bytes carry no name-table licence either (IDs 13/14 stripped, measured). That is not a lookup
+ * failure to paper over; it is the actual, correct answer, and it is worth a code of its own rather
+ * than the same empty string a lookup MISS would produce — an empty field reads downstream as
+ * "unknown, might resolve later," and for these two it never will.
+ *
+ * **This is a manually-maintained allowlist, not inferred from any metadata flag.** `isOpenSource`
+ * is true for every family the API returns (checked, elsewhere in this file) and `isBrandFont` is
+ * true for the entire Noto family tree too — which DOES have a real licence — so neither flag can
+ * stand in for "genuinely unlicensed." A family belongs on this list only after being checked the
+ * way the two below were: no directory, no name-table licence, confirmed by hand.
+ */
+export const RESTRICTED_LICENSE_CODE = "x";
+export const RESTRICTED_FAMILIES = new Set(["Google Sans", "Google Sans Flex"]);
+
 interface GoogleFamily {
   family: string;
   category: string;
@@ -69,8 +90,37 @@ const CATEGORY_CODE: Record<string, string> = {
 };
 
 /** The `google/fonts` directory name for a family. Verified against the real tree, below. */
-function familySlug(family: string): string {
+export function familySlug(family: string): string {
   return family.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Slug → licence code, from a `google/fonts` git tree listing. Extracted from `main` so
+ * `font-index-build-test.ts` can exercise the REAL lookup against a REAL, freshly-fetched tree
+ * without going through metadata fetch + file write — the failure this stage exists to catch is a
+ * missed FILE, and a test that reimplemented the regex would agree with the regex being wrong.
+ */
+export function buildLicenseCodeBySlug(tree: { path: string }[]): Map<string, string> {
+  const licenseCodeBySlug = new Map<string, string>();
+  for (const [code, template] of Object.entries(LICENSE_PATHS)) {
+    const pattern = new RegExp(`^${template.replace("%", "([^/]+)").replace(/\./g, "\\.")}$`);
+    for (const entry of tree) {
+      const match = pattern.exec(entry.path);
+      // First code wins, in LICENSE_PATHS order — a directory never carries two of these.
+      if (match?.[1] && !licenseCodeBySlug.has(match[1])) licenseCodeBySlug.set(match[1], code);
+    }
+  }
+  return licenseCodeBySlug;
+}
+
+/**
+ * The licence code a family resolves to, or `undefined` when this run cannot answer either way — the
+ * `unresolvedLicenses` case in `main` below. Also extracted for `font-index-build-test.ts`: this one
+ * function is the entire "ten free fonts blamed for a lookup miss" defect, isolated from the network
+ * calls around it.
+ */
+export function resolveLicenseCode(familyName: string, licenseCodeBySlug: ReadonlyMap<string, string>): string | undefined {
+  return licenseCodeBySlug.get(familySlug(familyName)) ?? (RESTRICTED_FAMILIES.has(familyName) ? RESTRICTED_LICENSE_CODE : undefined);
 }
 
 async function main(): Promise<void> {
@@ -98,15 +148,7 @@ async function main(): Promise<void> {
   if (tree.truncated) throw new Error("google/fonts tree came back TRUNCATED — licence coverage would be silently partial.");
   if (!tree.tree?.length) throw new Error("google/fonts tree came back empty.");
 
-  const licenseCodeBySlug = new Map<string, string>();
-  for (const [code, template] of Object.entries(LICENSE_PATHS)) {
-    const pattern = new RegExp(`^${template.replace("%", "([^/]+)").replace(/\./g, "\\.")}$`);
-    for (const entry of tree.tree) {
-      const match = pattern.exec(entry.path);
-      // First code wins, in LICENSE_PATHS order — a directory never carries two of these.
-      if (match?.[1] && !licenseCodeBySlug.has(match[1])) licenseCodeBySlug.set(match[1], code);
-    }
-  }
+  const licenseCodeBySlug = buildLicenseCodeBySlug(tree.tree);
 
   const usable = families
     .filter((family) => CATEGORY_CODE[family.category] && family.subsets.length > 0)
@@ -127,6 +169,10 @@ async function main(): Promise<void> {
     return code;
   };
 
+  /** Families that expected a licence (not on `RESTRICTED_FAMILIES`) and found none. See the
+   *  exhaustiveness check right after `lines` below. */
+  const unresolvedLicenses: string[] = [];
+
   const lines = usable.map((family) => {
     // Google keys faces as "400" / "400i". Kept verbatim: the decoder reads the trailing "i" as
     // italic, and inventing a different spelling here would mean two encodings of one fact.
@@ -144,15 +190,46 @@ async function main(): Promise<void> {
     // `${` would either corrupt the format or execute. Refuse rather than escape: a font name that
     // needs escaping is a signal the format is wrong, not a case to paper over.
     if (/[|`\n]|\$\{/.test(family.family)) throw new Error(`family name is not safe for the index format: ${family.family}`);
-    // Empty means "no licence file in google/fonts". Those families are still LISTED, because the
-    // font's own name table may still carry one and the mirror checks both — and if neither has it,
-    // the pick fails with a named error, which is the visible refusal D4a wants rather than a family
-    // quietly absent from the picker for a reason no one can see.
-    const license = licenseCodeBySlug.get(familySlug(family.family)) ?? "";
-    return `${family.family}|${CATEGORY_CODE[family.category]}|${faces}|${subsets}|${license}`;
+    /**
+     * A code from THREE sources, in order, and an empty string is no longer one of them:
+     *  1. A real licence file found in `google/fonts` — the common case.
+     *  2. `RESTRICTED_LICENSE_CODE` — this family is on the manually-verified "genuinely has none"
+     *     list, checked by hand, not inferred.
+     *  3. Neither — collected into `unresolvedLicenses` below rather than emitted as `""`. An empty
+     *     field here used to mean "no licence file in google/fonts", read downstream as a licence
+     *     FACT (`fontIndex()`'s own doc: "the mirror falls back to the name table"); it was actually
+     *     just as often "the lookup missed" — ten free, properly-licensed families came back this
+     *     way, and a silent miss reads exactly like the two that are genuinely unlicensed. See
+     *     `main`'s exhaustiveness check for what happens to this list.
+     */
+    const license = resolveLicenseCode(family.family, licenseCodeBySlug);
+    if (license === undefined) unresolvedLicenses.push(family.family);
+    return `${family.family}|${CATEGORY_CODE[family.category]}|${faces}|${subsets}|${license ?? ""}`;
   });
 
+  /**
+   * THE EXHAUSTIVENESS CHECK. A family this index expected to resolve a licence for — everything
+   * that is not on `RESTRICTED_FAMILIES` — and did not, fails the WHOLE build rather than shipping a
+   * catalogue with an ambiguous blank in it. `warpFontCatalog` shipped empty once and nobody noticed
+   * until a user did; a `""` here is the same failure at smaller scale, and this is the check that
+   * turns it into something a human sees at build time instead.
+   *
+   * Not a per-family skip: refusing the WHOLE run is what makes this impossible to routinely ignore.
+   * A build that silently drops ten rows and ships the other 1932 still passes a glance at the
+   * family count; a build that refuses outright, naming names, does not.
+   */
+  if (unresolvedLicenses.length) {
+    throw new Error(
+      `${unresolvedLicenses.length} famil${unresolvedLicenses.length === 1 ? "y" : "ies"} expected a licence and none was found ` +
+        `(not in google/fonts, not on RESTRICTED_FAMILIES): ${unresolvedLicenses.join(", ")}. ` +
+        `Either google/fonts genuinely lacks this family's licence file right now (check by hand, then ` +
+        `re-run once it lands — this is a live upstream repo and this can be transient), or it belongs on ` +
+        `RESTRICTED_FAMILIES if it is verified proprietary. Never widen this into a silent empty field.`
+    );
+  }
+
   const faceCount = usable.reduce((total, family) => total + Object.keys(family.fonts).length, 0);
+  const restrictedCount = lines.filter((line) => line.endsWith(`|${RESTRICTED_LICENSE_CODE}`)).length;
 
   const source = `/**
  * ADR-023 S2.6 — GENERATED. Do not edit by hand.
@@ -169,12 +246,15 @@ async function main(): Promise<void> {
  * One line per family, in POPULARITY order — the order is the default sort and costs nothing to
  * store. Fields: family|category|faces|subsets|licence, where category is one of s/f/d/h/m, faces
  * are Google's own keys ("400", "700i"), subsets are indices into FONT_INDEX_SUBSETS, and licence is
- * a key of FONT_INDEX_LICENSE_PATHS (empty when \`google/fonts\` carries no licence file for the
- * family — ${lines.filter((line) => line.endsWith("|")).length} of ${lines.length}, which fall back to the font's own name table).
+ * either a key of FONT_INDEX_LICENSE_PATHS, or "${RESTRICTED_LICENSE_CODE}" for a family verified to
+ * have no public licence at all (Google-proprietary — see RESTRICTED_FAMILIES in
+ * font-index-build.ts). NEVER empty: a family this build could not resolve either way fails the
+ * whole run rather than shipping a blank that reads as a licence fact — ${restrictedCount} famil${restrictedCount === 1 ? "y is" : "ies are"} restricted this run.
  */
 export const FONT_INDEX_SUBSETS: readonly string[] = ${JSON.stringify(subsetTable, null, 0).replace(/","/g, '", "')};
 
-/** Licence code → path in \`google/fonts\`, with \`%\` standing for the family's directory slug. */
+/** Licence code → path in \`google/fonts\`, with \`%\` standing for the family's directory slug. Does
+ *  NOT include "${RESTRICTED_LICENSE_CODE}" (restricted) — that code names no path; see font-index.ts's decoder. */
 export const FONT_INDEX_LICENSE_PATHS: Readonly<Record<string, string>> = ${JSON.stringify(LICENSE_PATHS, null, 2).replace(/\n/g, "\n")};
 
 export const FONT_INDEX_RAW = \`${lines.join("\n")}\`;
@@ -185,7 +265,15 @@ export const FONT_INDEX_RAW = \`${lines.join("\n")}\`;
   console.log(`Wrote ${usable.length} families / ${faceCount} faces / ${subsetTable.length} subsets → ${path.relative(repoRoot, outFile)} (${kb} KB)`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${String(error?.stack ?? error)}\n`);
-  process.exit(1);
-});
+// Guarded: `font-index-license-test.ts` imports this module's pure exports (`resolveLicenseCode`,
+// `buildLicenseCodeBySlug`) without wanting the full network-fetching, file-writing `main()` to run
+// as an import side effect. `require.main === module`'s ESM shape — `pathToFileURL` rather than a
+// hand-built `file://${...}` string because `process.argv[1]` is a Windows backslash PATH, not a URL,
+// and comparing it against `import.meta.url` (always forward-slashed) as a raw string silently never
+// matches on Windows: the guard would swallow every direct `tsx font-index-build.ts` run too.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((error) => {
+    process.stderr.write(`${String(error?.stack ?? error)}\n`);
+    process.exit(1);
+  });
+}

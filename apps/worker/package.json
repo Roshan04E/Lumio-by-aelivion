@@ -37,6 +37,7 @@
     "font:face-test": "tsx src/font-face-resolution-test.ts",
     "font:index-build": "tsx src/font-index-build.ts",
     "font:index-test": "tsx src/font-index-test.ts",
+    "font:index-license-test": "tsx src/font-index-license-test.ts",
     "font:picker-perf": "tsx src/font-picker-perf-gate.ts",
     "font:preview-gate": "tsx src/font-preview-gate.ts",
     "render:linear-gate": "tsx src/render-linear-gate.ts",

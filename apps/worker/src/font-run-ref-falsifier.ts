@@ -44,6 +44,52 @@ const outDir = path.join(repoRoot, "tmp", "font-run-ref-falsifier");
 const SHARED_FAMILY_NAME = "Anton";
 const LEGACY_STACK = `${SHARED_FAMILY_NAME}, sans-serif`;
 
+/**
+ * Render `scaled-text` with its text layer's `text`/`fontFamily` set directly — NO `textRuns` at
+ * all, the pre-S10 shape every legacy project still has. The D1a control below needs this rather
+ * than a one-run `textRuns` array compared against a two-run one: splitting text across ANY run
+ * boundary — even two runs sharing one identical style — measurably changes kerning (each run is a
+ * separate `fillText`/measure pass; the browser never kerns across that boundary). That is a
+ * PRE-EXISTING characteristic of multi-run layout, orthogonal to font identity, and comparing across
+ * a run-count change would fail this falsifier on a question it was never asking (confirmed: an
+ * earlier draft of this arm compared one run against two same-styled runs and failed on exactly this,
+ * for a reason that had nothing to do with S10). The real D1a claim is narrower — LAYER-level legacy
+ * behaviour, untouched — so the control compares LAYER against a single matching RUN, never run
+ * count against run count.
+ */
+async function renderWithLayerFont(text: string, fontFamily: string, label: string): Promise<string> {
+  const fixture = createRenderComparisonFixture("scaled-text");
+  const composition = fixture.graph.composition;
+  if (!composition) throw new Error(`Fixture "scaled-text" must include a composition.`);
+  let textLayersTouched = 0;
+  const graph = {
+    ...fixture.graph,
+    composition: {
+      ...composition,
+      tracks: composition.tracks.map((track) => ({
+        ...track,
+        layers: track.layers.map((layer) => {
+          if (layer.type !== "text") return layer;
+          textLayersTouched += 1;
+          return { ...layer, text, textRuns: undefined, fontFamily, fontRef: undefined };
+        })
+      }))
+    }
+  };
+  assert.ok(textLayersTouched > 0, `Fixture "scaled-text" has no text layer — the arm is void.`);
+  const manifest = buildRenderManifest({
+    projectId: graph.projectId,
+    graph,
+    assets: fixture.assets,
+    quality: "final",
+    createdAt: new Date(0).toISOString()
+  });
+  const frame = Math.round(renderComparisonFrameSeconds * manifest.output.fps);
+  const outputLocation = path.join(outDir, `${label}.png`);
+  await renderManifestStill({ manifest, frame, outputLocation, rendererMode: "webgl" });
+  return createHash("sha256").update(fs.readFileSync(outputLocation)).digest("hex");
+}
+
 /** Render `scaled-text` with its text layer's runs set to two runs, and hash the PNG. */
 async function renderWithRuns(runs: TextRun[], label: string): Promise<string> {
   const fixture = createRenderComparisonFixture("scaled-text");
@@ -121,25 +167,21 @@ async function main(): Promise<void> {
       "'Anton' pinned by hash must be different renders."
   );
 
-  // D1a's legacy control, one layer down: a run with ONLY a `fontFamily` string (no ref — arm A's
-  // FIRST run, unchanged between arms) must render IDENTICALLY to how it always did — proven here by
-  // running the SAME first-run text/style through a layer with nothing else on the line, and checking
-  // it against a hand-built single-run composition with the identical legacy stack.
-  const singleRunLegacy = await renderWithRuns([{ text: "LEGACY", fontFamily: LEGACY_STACK }], "single-run-legacy");
-  const singleRunSplit = await renderWithRuns(
-    [
-      { text: "LEG", fontFamily: LEGACY_STACK },
-      { text: "ACY", fontFamily: LEGACY_STACK }
-    ],
-    "single-run-split"
-  );
-  process.stdout.write(`single-run=${singleRunLegacy.slice(0, 12)}  split-same-style=${singleRunSplit.slice(0, 12)}\n`);
+  // D1a's legacy control, one layer down: a SINGLE run carrying ONLY a `fontFamily` string (no ref)
+  // must resolve BYTE-IDENTICALLY to the LAYER carrying that same string directly (no runs at all —
+  // the shape every legacy project already has). Compared layer-vs-one-run rather than
+  // one-run-vs-two-runs, deliberately: see `renderWithLayerFont`'s doc for why a run-COUNT change is
+  // the wrong control (it reintroduces a kerning confound this arm is not asking about).
+  const layerFont = await renderWithLayerFont("LEGACY", LEGACY_STACK, "layer-font-legacy");
+  const oneRunFont = await renderWithRuns([{ text: "LEGACY", fontFamily: LEGACY_STACK }], "one-run-legacy");
+  process.stdout.write(`layer-font=${layerFont.slice(0, 12)}  one-run-font=${oneRunFont.slice(0, 12)}\n`);
   assert.equal(
-    singleRunLegacy,
-    singleRunSplit,
-    "D1a FAILED (run level) — splitting one legacy-stack run into two runs of the SAME stack changed " +
-      "the render. A run's own `fontFamily` string must resolve exactly as a system stack, byte-for-byte, " +
-      "with or without a sibling run present."
+    layerFont,
+    oneRunFont,
+    "D1a FAILED (run level) — a layer's own `fontFamily` and a single run repeating that SAME string " +
+      "rendered DIFFERENTLY. A run's `fontFamily` alone must resolve exactly as a system stack, " +
+      "byte-for-byte with the layer carrying no runs at all — that byte-identity is what makes S10 safe " +
+      "for a project authored before it existed."
   );
 
   process.stdout.write(

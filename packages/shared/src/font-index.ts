@@ -37,6 +37,19 @@ export interface FontIndexFace {
   style: "normal" | "italic";
 }
 
+/**
+ * ADR-023 S10.5 — the licence code for a family VERIFIED to have none, permanently. Must match
+ * `RESTRICTED_LICENSE_CODE` in `font-index-build.ts` (same convention as `fontFamilySlug` below,
+ * which already has to match that file's `familySlug`).
+ *
+ * Distinct from an ABSENT `licensePath`, which used to be the only signal and meant two different
+ * things at once: "checked, and this family truly has no licence" and "the lookup missed." A row
+ * carrying this code is the first; a row is never allowed to carry the second — `font-index-build.ts`
+ * fails the whole generation run rather than emit one, so every row in `FONT_INDEX_RAW` is either a
+ * real path or this code, never a blank the picker has to guess about.
+ */
+const RESTRICTED_LICENSE_CODE = "x";
+
 export interface FontIndexFamily {
   family: string;
   category: FontIndexCategory;
@@ -44,7 +57,8 @@ export interface FontIndexFamily {
   /** Google's subset names — "latin", "arabic", "devanagari", … Never "menu"; see the generator. */
   subsets: readonly string[];
   /**
-   * Path to the family's licence in `google/fonts`, or `undefined` when it keeps none there.
+   * Path to the family's licence in `google/fonts`, or `undefined` for a `restricted` family (below)
+   * — never `undefined` for any OTHER reason; see `RESTRICTED_LICENSE_CODE`'s own doc.
    *
    * **This exists because the licence is not in the font.** Google's CDN strips name IDs 13/14 from
    * every static instance it serves (measured — Cairo, Amiri, Noto Naskh Arabic, Inter all come back
@@ -52,11 +66,15 @@ export interface FontIndexFamily {
    * family the picker can offer. The licence is not missing, only stored beside the font instead of
    * inside it. T-11 is unchanged: the mirror writes font and licence in one operation or writes
    * neither. Only the source of the licence bytes moved.
-   *
-   * `undefined` is not permission to skip it — the mirror then falls back to the name table and
-   * refuses the family outright if that is empty too.
    */
   licensePath: string | undefined;
+  /**
+   * True for a family verified to carry no public licence at all — Google-proprietary, checked by
+   * hand (`RESTRICTED_FAMILIES` in `font-index-build.ts`). Permanent, not "not yet mirrored": the
+   * picker should say so (a restricted family will never resolve, however long you wait), rather
+   * than showing the same "unavailable" a transient mirror failure would.
+   */
+  restricted: boolean;
 }
 
 /** The `google/fonts` directory name for a family. Must match the generator's derivation. */
@@ -89,9 +107,10 @@ export function fontIndex(): readonly FontIndexFamily[] {
       .split(",")
       .map((code) => FONT_INDEX_SUBSETS[Number(code)])
       .filter((name): name is string => Boolean(name));
+    const restricted = licenseCode === RESTRICTED_LICENSE_CODE;
     const licenseTemplate = licenseCode ? FONT_INDEX_LICENSE_PATHS[licenseCode] : undefined;
     const licensePath = licenseTemplate?.replace("%", fontFamilySlug(family));
-    if (faces.length) families.push({ family, category, faces, subsets, licensePath });
+    if (faces.length) families.push({ family, category, faces, subsets, licensePath, restricted });
   }
   decoded = families;
   return decoded;

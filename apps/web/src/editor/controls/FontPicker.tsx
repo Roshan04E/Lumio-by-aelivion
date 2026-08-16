@@ -50,6 +50,7 @@ import {
   subscribeCataloguePreviews
 } from "../../lib/font-catalogue-preview";
 import { clearFontPinState, fontPinState, fontPinVersion, pinFont, subscribeFontPins } from "../../lib/font-pin";
+import { useAuth } from "../../lib/auth";
 import type { ReferenceResolver, ResolvedReference } from "../inspector/controls/ReferenceControl";
 import {
   addUserFont,
@@ -136,6 +137,27 @@ type Row =
 
 const bundledFamilies = new Set(fontCatalogue.map((entry) => entry.family));
 
+/**
+ * The row's always-visible failure label — as opposed to `title`, which already carries the real
+ * `pin.message` but only reaches someone who hovers.
+ *
+ * Reproduced with a real guest session (2026-08-16): picking any non-bundled family with no signed-in
+ * account 401s on `/fonts/mirror` (`fonts.routes.ts`'s `requireAuth`), and the row's only ALWAYS-VISIBLE
+ * text used to be the generic "unavailable" — indistinguishable from a family the catalogue genuinely
+ * cannot offer. `pin.message` at that point is literally "Authentication required" (`api.ts`'s
+ * `AuthRequiredError`), sitting one hover away and unread by the person the mirror just turned away.
+ * This is font-pin.ts's D1 comment made visible: "the row says what went wrong" only counts if the row
+ * says it without being asked.
+ *
+ * Kept to sign-in specifically, not a general "show the raw message" — `pin.message` can also be a raw
+ * server string for other failures, and putting arbitrary server text in a fixed-width chip is a
+ * layout bug waiting to happen. Anything else still reads "unavailable", which was always correct for
+ * "the mirror could not fetch this face."
+ */
+function pinFailureMeta(message: string): string {
+  return /sign in|auth/i.test(message) ? "sign in to add" : "unavailable";
+}
+
 export function FontPicker({
   value,
   resolved,
@@ -155,6 +177,21 @@ export function FontPicker({
   const [scrollTop, setScrollTop] = useState(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * ADR-023 D4 — user-font upload needs a real `ownerId`, and a guest session (the default `/create`
+   * path, no login involved at all) has none: `addUserFont` refuses with "Sign in to add your own
+   * fonts" (`user-fonts.ts:157`), correctly — D4 forbids a placeholder owner, and that refusal must
+   * stay exactly as strict.
+   *
+   * The DECISION here is which side of that refusal changes: not the account requirement (real
+   * accounts are the whole isolation boundary D4 exists for), but WHEN the user learns about it. Before
+   * this, the "+ Upload" button looked identical for a guest and a signed-in account, so a guest had to
+   * click it, sit through the native file dialog, and pick a file before the refusal appeared — an
+   * affordance that is present, does nothing useful on the first attempt, and explains nothing until
+   * after the wasted round trip. Disabling it up front with the same message the click would have
+   * produced anyway costs nothing D4 cares about and saves that round trip.
+   */
+  const { isAuthenticated } = useAuth();
 
   useSyncExternalStore(subscribeCataloguePreviews, cataloguePreviewVersion, cataloguePreviewVersion);
   useSyncExternalStore(subscribeFontPins, fontPinVersion, fontPinVersion);
@@ -370,10 +407,21 @@ export function FontPicker({
                 }
               }}
             />
-            <button type="button" className="font-picker-chip" data-testid="font-upload-trigger" onClick={() => fileRef.current?.click()}>
+            <button
+              type="button"
+              className="font-picker-chip"
+              data-testid="font-upload-trigger"
+              disabled={!isAuthenticated}
+              title={isAuthenticated ? undefined : "Sign in to add your own fonts — a font is stored against your account."}
+              onClick={() => fileRef.current?.click()}
+            >
               + Upload your own font
             </button>
-            {uploadError ? (
+            {!isAuthenticated ? (
+              <span className="font-picker-upload-error" data-testid="font-upload-signin-required">
+                Sign in to add your own fonts — a font is stored against your account.
+              </span>
+            ) : uploadError ? (
               <span className="font-picker-upload-error" data-testid="font-upload-error">
                 {uploadError}
               </span>
@@ -472,7 +520,13 @@ export function FontPicker({
                     data-font-family={entry.family}
                     data-preview-ready={ready ? "true" : "false"}
                     data-pin-state={pin?.status ?? ""}
-                    title={pin?.status === "failed" ? pin.message : entry.subsets.join(", ")}
+                    title={
+                      pin?.status === "failed"
+                        ? pin.message
+                        : entry.restricted
+                          ? "Restricted use — Google has published no redistribution licence for this family, so it can never be mirrored."
+                          : entry.subsets.join(", ")
+                    }
                     onClick={() => void choose(entry.family)}
                   >
                     <span
@@ -484,14 +538,19 @@ export function FontPicker({
                       {ready ? previewSample(entry.subsets, script) : "·"}
                     </span>
                     <span className="font-picker-name">{entry.family}</span>
+                    {/* ADR-023 S10.5. `restricted` is a PERMANENT answer (font-index.ts's own doc) —
+                        said here, before a click, rather than only after the mirror refuses. "No
+                        licence" reads as a gap the catalogue might close later; this family never will. */}
                     <span className="font-picker-meta">
                       {pin?.status === "resolving"
                         ? "adding…"
                         : pin?.status === "failed"
-                          ? "unavailable"
-                          : row.bundled
-                            ? "bundled"
-                            : entry.category}
+                          ? pinFailureMeta(pin.message)
+                          : entry.restricted
+                            ? "restricted"
+                            : row.bundled
+                              ? "bundled"
+                              : entry.category}
                     </span>
                     {selected ? <Check size={13} aria-hidden="true" /> : null}
                   </button>

@@ -12,6 +12,7 @@
  * like a working feature. A substitution nobody is told about is exactly that.
  */
 import {
+  catalogueFileForHash,
   collectPinnedFontInstances,
   fontAxisInstanceFamily,
   fontLoadSpec,
@@ -31,8 +32,33 @@ import { readLocalUserFont } from "./user-fonts";
 /** Per-font outcome. `undefined` for a family means "never asked for" — not "fine". */
 export type FontInstallState = "installed" | "missing";
 
+/**
+ * WHY a font install failed — carried alongside {@link FontInstallState} rather than folded into
+ * it, because `FontInstallState` is a WIRE-LEVEL answer (installed vs not) that several call sites
+ * key caches and effects on, and widening it would ripple into all of them for a value only the
+ * badge/banner actually read.
+ *
+ * Three reasons, not more, and each one is a real branch inside {@link installPinnedFont} below:
+ *  - `unauthenticated` — a per-user face needs a bearer token and this session has none.
+ *  - `not-found` — the store returned a non-OK response. Deliberately the SAME reason for "this
+ *    hash genuinely does not exist" and for "it exists, but not in an account you can see" (D4):
+ *    the server's own 404-for-both rule (`font-store.ts`'s `canServeFont` comment) exists so a
+ *    cross-account probe cannot tell those apart from the HTTP response, and a more specific label
+ *    here would hand back exactly the bit that rule withholds.
+ *  - `decode-failed` — bytes arrived (the fetch succeeded) but `FontFace.load()` rejected anyway —
+ *    a corrupt or truncated file, not an availability problem at all.
+ */
+export type FontInstallFailureReason = "unauthenticated" | "not-found" | "decode-failed";
+
+const FONT_INSTALL_FAILURE_MESSAGES: Record<FontInstallFailureReason, string> = {
+  unauthenticated: "Sign in to load this font — showing a substitute",
+  "not-found": "This font's file is missing — showing a substitute",
+  "decode-failed": "This font's file is corrupted — showing a substitute"
+};
+
 const installs = new Map<string, Promise<FontInstallState>>();
 const states = new Map<string, FontInstallState>();
+const failureReasons = new Map<string, FontInstallFailureReason>();
 const listeners = new Set<() => void>();
 
 /** Where the API serves stored objects. Same base the asset pipeline already uses. */
@@ -62,6 +88,16 @@ export function installPinnedFont(ref: PinnedFontRef, axes?: FontVariationAxes |
   const existing = installs.get(key);
   if (existing) return existing;
 
+  // Recorded on every failing exit below, so the badge/banner can say WHY rather than just THAT.
+  // A closure over `key` rather than a parameter: every early return in the switch below is a
+  // `return "missing"`, and turning each into `return fail("...")` is the only way to guarantee no
+  // exit leaves the reason map stale from a PREVIOUS attempt at this same ref (a retried install
+  // after e.g. signing in must overwrite, not append to, whatever failed before).
+  const fail = (reason: FontInstallFailureReason): "missing" => {
+    failureReasons.set(key, reason);
+    return "missing";
+  };
+
   const promise = (async (): Promise<FontInstallState> => {
     // D4/T-3: discriminate on the store to get a location. There is no generic "URL of a font".
     const storeKey = fontStoreKeyFor(ref);
@@ -83,9 +119,20 @@ export function installPinnedFont(ref: PinnedFontRef, axes?: FontVariationAxes |
        * returning "the URL of a font" would be exactly the shared supertype D4 forbids.
        */
       switch (storeKey.store) {
-        case "catalogue":
-          source = `url(${storageUrl(fontObjectKey(storeKey))})`;
+        case "catalogue": {
+          // A catalogue face that ships with this app is served from the app, not the mirror: the
+          // mirror is seeded FROM the bundled file (font-pin.ts:10-11), so its hash is never a hash
+          // the mirror holds, and resolving it through `storageUrl` 404s on a face that is sitting in
+          // this very build. `file:` on the catalogue row is the switch between the two.
+          const bundled = catalogueFileForHash(storeKey.fileHash);
+          const url = bundled ? `/${bundled}` : storageUrl(fontObjectKey(storeKey));
+          // Checked explicitly (rather than letting `FontFace.load()` discover it) so a 404 here and
+          // a genuine decode failure below produce two different reasons instead of one opaque catch.
+          const check = await fetch(url);
+          if (!check.ok) return fail("not-found");
+          source = `url(${url})`;
           break;
+        }
         case "user": {
           /**
            * LOCAL FIRST (D5). The bytes of a font this account uploaded are on this device already,
@@ -101,11 +148,12 @@ export function installPinnedFont(ref: PinnedFontRef, axes?: FontVariationAxes |
             break;
           }
           const token = localStorage.getItem("orreris_token");
-          if (!token) return "missing";
+          if (!token) return fail("unauthenticated");
           const response = await fetch(storageUrl(fontObjectKey(storeKey)), { headers: { Authorization: `Bearer ${token}` } });
           // A 404 here is the server refusing, and it is deliberately indistinguishable from the
-          // font not existing — see the /storage guard. Either way this account cannot have it.
-          if (!response.ok) return "missing";
+          // font not existing — see the /storage guard. Either way this account cannot have it, and
+          // "not-found" is the one reason that does not confirm or deny which of the two it was.
+          if (!response.ok) return fail("not-found");
           const url = URL.createObjectURL(await response.blob());
           revoke = () => URL.revokeObjectURL(url);
           source = `url(${url})`;
@@ -149,7 +197,11 @@ export function installPinnedFont(ref: PinnedFontRef, axes?: FontVariationAxes |
     } catch {
       // No rethrow, and no console noise pretending to be a report. The state IS the report — it
       // drives the layer marker and the banner, which is what D3 asks for.
-      return "missing";
+      //
+      // Every OTHER exit above already named its reason and returned before reaching here, so
+      // landing in this catch means the bytes themselves arrived (the fetch checks passed) and
+      // `FontFace.load()` rejected anyway — a corrupt/truncated file, not an availability problem.
+      return fail("decode-failed");
     } finally {
       // `FontFace.load()` has read the blob by now, so the object URL has done its job. Released
       // here rather than left to the page's lifetime: a session that installs a few dozen user
@@ -226,7 +278,11 @@ function fontFileBytes(ref: PinnedFontRef): Promise<Uint8Array | undefined> {
     try {
       let blob: Blob | undefined;
       if (storeKey.store === "catalogue") {
-        const response = await fetch(storageUrl(fontObjectKey(storeKey)));
+        // Same bundled/mirror switch as `installPinnedFont` above, and for the same reason: the
+        // bundled hash is never in the mirror, so this branch has to check `file:` before it ever
+        // asks the store.
+        const bundled = catalogueFileForHash(storeKey.fileHash);
+        const response = await fetch(bundled ? `/${bundled}` : storageUrl(fontObjectKey(storeKey)));
         if (!response.ok) return undefined;
         blob = await response.blob();
       } else {
@@ -312,6 +368,23 @@ export function fontInstallState(ref: PinnedFontRef, axes?: FontVariationAxes | 
 }
 
 /**
+ * What to tell a person about a `"missing"` install, in place of the generic "showing a
+ * substitute" the badge used to say unconditionally. `undefined` for anything that is not
+ * currently `"missing"` — a caller that shows this text on every state would print stale copy the
+ * moment a retry (e.g. signing in) succeeds, since `failureReasons` is deliberately never cleared
+ * on its own (a fresh attempt overwrites it via `fail()`, a success just leaves it unread).
+ */
+export function fontInstallFailureMessage(ref: PinnedFontRef, axes?: FontVariationAxes | undefined): string | undefined {
+  const key = fontRefInstallKey(ref, axes);
+  if (states.get(key) !== "missing") return undefined;
+  const reason = failureReasons.get(key);
+  // No reason recorded is reachable only via the `!storeKey` guard at the top of `installPinnedFont`
+  // — unreachable for any ref this function's own type accepts, kept as a safe fallback rather than
+  // an assertion so a future ref variant degrades to generic copy instead of a blank badge.
+  return reason ? FONT_INSTALL_FAILURE_MESSAGES[reason] : "This font couldn't be loaded — showing a substitute";
+}
+
+/**
  * Every pinned font in a composition that we KNOW is missing.
  *
  * Deliberately excludes in-flight loads: a font that has not finished loading is not yet evidence of
@@ -353,4 +426,5 @@ export function fontInstallVersion(): number {
 export function __resetFontInstallsForTest(): void {
   installs.clear();
   states.clear();
+  failureReasons.clear();
 }
