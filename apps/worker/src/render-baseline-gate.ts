@@ -54,6 +54,7 @@ import {
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import { renderManifestStill } from "./remotion-renderer";
+import { assertFreeDisk, assertQuietBrowserMachine, describeFreeDisk } from "./browser/browser-preflight";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const baselineDir = path.join(repoRoot, "tmp", "render-baseline");
@@ -214,6 +215,21 @@ async function checkRelations(scope: Set<string>, shas: Map<string, string>): Pr
 }
 
 async function main(): Promise<void> {
+  /**
+   * THE PRECONDITION, which this gate did not have until 2026-08-16 — and it is the gate that paid
+   * for the lesson. A full sweep died at `ENOSPC` partway through, having already printed a column of
+   * `unchanged`; that column was read as a verdict and written into a commit message before the crash
+   * was noticed. A second, later sweep that STARTED with 8.6 GB flagged two fixtures as CHANGED at
+   * 3/2073600 and 0/2073600 pixels, and neither reproduced on a narrowed re-run — irreproducible
+   * differences on a volume that was draining under the run, which is indistinguishable from a real
+   * regression by inspection and therefore VOIDS rather than being subtracted.
+   *
+   * A zero-tolerance instrument is exactly the one that must refuse to start on a dirty machine: its
+   * output is a hash comparison, so noise does not present as noise, it presents as "an existing
+   * project just shifted."
+   */
+  assertQuietBrowserMachine({ label: "render:baseline", scriptMarker: "render-baseline-gate" });
+  console.log(`preflight: ${describeFreeDisk()}`);
   fs.mkdirSync(baselineDir, { recursive: true });
 
   if (capture) {
@@ -223,6 +239,9 @@ async function main(): Promise<void> {
     const fixtures: Record<string, BaselineEntry> = { ...(readManifest()?.fixtures ?? {}) };
     const captured = new Map<string, string>();
     for (const key of fixtureKeys) {
+      // Same reason as the compare loop below — and worse here: a capture taken on a draining volume
+      // freezes the noise into the REFERENCE, where every later run inherits it.
+      assertFreeDisk("render:baseline --capture");
       const out = path.join(baselineDir, `${key}.png`);
       await renderFixture(key, out);
       fixtures[key] = { sha256: sha256File(out), ...pngSize(out) };
@@ -286,6 +305,14 @@ async function main(): Promise<void> {
       missing.push(key);
       continue;
     }
+    /**
+     * RE-CHECKED PER FIXTURE, not only at startup, and that is the whole point of the addition.
+     * Remotion's per-render scratch is transient but large: a sweep can begin with headroom and run
+     * out twenty fixtures in, and every row printed after that moment is suspect while looking
+     * exactly like the rows before it. Voiding here costs the rest of the sweep; NOT voiding here
+     * costs a verdict that gets believed.
+     */
+    assertFreeDisk("render:baseline");
     const currentPath = path.join(currentDir, `${key}.png`);
     await renderFixture(key, currentPath);
     const sha = sha256File(currentPath);
