@@ -41,11 +41,13 @@
  * ancestors (the `pnpm`/`tsx` chain that launched it carries the script name in its command line too,
  * and a preflight that fails on its own launcher is worse than no preflight).
  *
- * AND IT COUNTS FREE DISK (2026-08-16), which is the same lesson a third time. "The machine is clean"
- * had meant no stray browser and no stale harness; it now also means the machine can still WRITE. A
- * full disk is the worst member of this family because it is the quietest: it surfaces as frames that
- * do not reproduce, which reads as a renderer defect rather than an environment one. See
- * `assertDiskHeadroom` below for the measured cost.
+ * AND IT REAPS LEAKED PROFILE DIRS (2026-08-16), which is the same lesson a third time. "The machine
+ * is clean" had meant no stray browser and no stale harness; it now also means the machine can still
+ * WRITE. A full disk is the quietest member of this family: it surfaces as frames that do not
+ * reproduce, which reads as a renderer defect rather than an environment one -- 195.8 GB of leaked
+ * profiles voided a night of field readings and nearly put a false I-P8 finding in the tracker
+ * (DEBT-024/025). The free-disk REFUSAL is `assertFreeDisk`; this file also has to COLLECT, because a
+ * precondition the tooling violates by design every single run is one nobody can satisfy by hand.
  *
  * THE PATTERN, for whoever adds the fourth. Each entry here was paid for by a run whose OUTPUT LOOKED
  * LIKE DATA -- negative memory deltas, a 25-minute hang, an irreproducible frame. If a precondition
@@ -53,67 +55,94 @@
  * hard refusal, not in a checklist someone reads afterwards.
  */
 import { execSync } from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const isWindows = process.platform === "win32";
 
 /**
- * FREE DISK IS A PRECONDITION (added 2026-08-16, and it cost a night's readings).
+ * Leaked headless-browser profile directories, and why the reaper below is not optional.
  *
- * `%LOCALAPPDATA%\Temp` had grown to 239.7 GB across 13,843 directories -- 13,813 of them leaked
- * `puppeteer_dev_chrome_profile-*` trees at ~14 MB each (195.8 GB measured, oldest 2026-08-09) -- and
- * C: reached ZERO bytes free. Every reading `flarex:frame-cache-field` took in that state is void.
+ * 13,995 of these had accumulated (195.8 GB, oldest 7 days). That is not an incident -- it is very
+ * nearly EVERY browser this repo has ever launched. `remotion-renderer.ts` calls `selectComposition`,
+ * `renderMedia` and `renderStill` without a shared `puppeteerInstance`, so each call opens and closes
+ * its own browser; the close runs, but puppeteer's cleanup of its temp profile fails silently on
+ * Windows when Chrome still holds handles under it. Two-plus profiles per fixture, ~23 fixtures, every
+ * gate run, for a week.
  *
- * WHY THIS IS WORSE THAN A CRASH, and why it belongs next to the process checks above. A full disk
- * does not announce itself as a disk problem. Chrome cannot write its cache, a screenshot comes back
- * partial or not at all, a decoder fails, a heredoc dies mid-write -- and what the harness SEES is:
- * *the picture at a fixed `t` is not reproducible*. That is indistinguishable from a real renderer
- * nondeterminism finding, and it was very nearly written into the tracker as one (see DEBT-024/025).
- * The moment the condition became loud enough to notice -- "No space left on device" -- was NOT the
- * moment it started; it had been silently corrupting runs for an unknown stretch before that.
+ * WITHOUT REAPING, THE FREE-DISK CHECK IS A TRAP. `assertFreeDisk` would refuse to run gates because
+ * of garbage the gates themselves produced, and the operational answer would become "delete 14,000
+ * directories by hand every few days", which nobody does -- so `GATE_MIN_FREE_GB` would get set to 0
+ * and the guard would be worth nothing. A precondition that the tooling routinely violates by design
+ * has to come with its own collector, which is why this sits in the same file and runs FIRST.
  *
- * So: a browser gate on a full disk must VOID AT STARTUP rather than produce numbers. The existing
- * preconditions on this file are "no stray browser" and "no stale harness"; the machine being clean
- * now also means the machine can still WRITE.
+ * The real fix is a shared browser instance in the renderer (DEBT-026): fewer launches, faster gates,
+ * and no garbage to collect. This reaper makes that non-urgent rather than replacing it.
  */
-const DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024 ** 3;
+const PROFILE_DIR_PATTERNS = [/^puppeteer_dev_chrome_profile/i, /^playwright[_-]/i, /^\.org\.chromium\.Chromium\./i];
 
-function minFreeDiskBytes(): number {
-  const override = Number(process.env.GATE_MIN_FREE_DISK_GB);
-  return Number.isFinite(override) && override >= 0 ? override * 1024 ** 3 : DEFAULT_MIN_FREE_DISK_BYTES;
+const DEFAULT_REAP_AGE_MS = 2 * 60 * 60 * 1000;
+/** Preflight must stay a preflight. Leftover garbage beyond this budget is caught by the next run. */
+const REAP_TIME_BUDGET_MS = 20_000;
+
+export interface ProfileReapResult {
+  removed: number;
+  failed: number;
+  skippedYoung: number;
+  timedOut: boolean;
 }
 
 /**
- * Free bytes on the volume holding `target`, or null if it cannot be determined.
+ * Best-effort delete of stale browser profile directories in the temp dir.
  *
- * Null means "cannot see", never "full": like `listStaleHarnessProcesses`, a guard that cannot read
- * the machine must not invent a reason to block work.
+ * AGE IS THE ONLY SAFETY GUARD, and it is the right one. A live run's profile is minutes old, so a
+ * 2-hour threshold cannot touch it; and unlike the process checks in this file there is no way to ask
+ * a directory who owns it. Deliberately NOT gated on "no automation browser alive" -- gates run
+ * concurrently with each other and with the user's own work, and a reaper that only fires on a
+ * perfectly idle machine would never fire at all.
+ *
+ * Never throws. This is housekeeping: a failed delete (Chrome still holding a handle) is normal, and
+ * a preflight that dies while tidying up would be worse than the mess.
  */
-export function freeDiskBytes(target: string): number | null {
+export function reapStaleBrowserProfiles(maxAgeMs = DEFAULT_REAP_AGE_MS, dir?: string): ProfileReapResult {
+  const result: ProfileReapResult = { removed: 0, failed: 0, skippedYoung: 0, timedOut: false };
+  if (maxAgeMs <= 0) return result;
+  const startedAt = Date.now();
+  const cutoff = startedAt - maxAgeMs;
+  let entries: fs.Dirent[];
+  // `dir` is for the self-test only. Without it the test shares the machine's real temp backlog, and
+  // a large backlog eats the time budget on alphabetically-earlier names before reaching the test's
+  // own fixtures -- which presents as a failing reaper (measured: two false failures while 195.8 GB
+  // was being cleared). A guard's own test must not depend on how dirty the machine happens to be.
+  const tmp = dir ?? os.tmpdir();
   try {
-    const resolved = path.resolve(target);
-    if (isWindows) {
-      const root = path.parse(resolved).root.replace(/[\\/]+$/, "");
-      if (!root) return null;
-      const raw = execSync(`powershell -NoProfile -Command "(New-Object System.IO.DriveInfo('${root}')).AvailableFreeSpace"`, {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      const bytes = Number(raw);
-      return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
-    }
-    const raw = execSync(`df -Pk ${JSON.stringify(resolved)}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const line = raw.split(/\r?\n/)[1];
-    if (!line) return null;
-    const availableKb = Number(line.trim().split(/\s+/)[3]);
-    return Number.isFinite(availableKb) ? availableKb * 1024 : null;
+    entries = fs.readdirSync(tmp, { withFileTypes: true });
   } catch {
-    return null;
+    return result;
   }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !PROFILE_DIR_PATTERNS.some((p) => p.test(entry.name))) continue;
+    if (Date.now() - startedAt > REAP_TIME_BUDGET_MS) {
+      result.timedOut = true;
+      break;
+    }
+    const full = path.join(tmp, entry.name);
+    try {
+      // birthtime is unreliable across filesystems; mtime is what actually tracks last use here.
+      const stat = fs.statSync(full);
+      if (Math.max(stat.mtimeMs, stat.birthtimeMs) > cutoff) {
+        result.skippedYoung += 1;
+        continue;
+      }
+      fs.rmSync(full, { recursive: true, force: true, maxRetries: 1 });
+      result.removed += 1;
+    } catch {
+      result.failed += 1;
+    }
+  }
+  return result;
 }
-
-const gb = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 
 /**
  * Refuse to run when either volume a browser gate writes to is below the floor.
@@ -128,37 +157,19 @@ const gb = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(2)} GB`;
  * between rungs: a long ladder can EXHAUST the disk partway through, and the rungs after that point
  * are void while the rungs before are fine. That is the same reason `assertZeroBrowserFloor` exists.
  */
-export function assertDiskHeadroom(label: string): void {
-  const floor = minFreeDiskBytes();
-  if (floor <= 0) return;
-  const volumes = [
-    { what: "temp (browser profiles, caches, crash dumps)", dir: os.tmpdir() },
-    { what: "repo (screenshots, fixture output, vite cache)", dir: process.cwd() },
-  ];
-  const seen = new Map<string, { what: string; dir: string; free: number }>();
-  for (const volume of volumes) {
-    const free = freeDiskBytes(volume.dir);
-    if (free == null) continue;
-    const key = isWindows ? path.parse(path.resolve(volume.dir)).root.toUpperCase() : volume.dir;
-    const prior = seen.get(key);
-    // Same volume reached by two paths -> keep one row, but name both roles in the message.
-    if (prior) prior.what = `${prior.what} + ${volume.what}`;
-    else seen.set(key, { what: volume.what, dir: volume.dir, free });
+export function reapProfilesForPreflight(): void {
+  const raw = Number(process.env.GATE_PROFILE_REAP_HOURS);
+  const hours = Number.isFinite(raw) && raw >= 0 ? raw : 2;
+  const reaped = reapStaleBrowserProfiles(hours * 60 * 60 * 1000);
+  if (reaped.removed > 0 || reaped.timedOut) {
+    process.stdout.write(
+      `[preflight] reaped ${reaped.removed} stale browser profile dir(s)` +
+        (reaped.skippedYoung ? `, kept ${reaped.skippedYoung} younger than ${hours}h` : "") +
+        (reaped.failed ? `, ${reaped.failed} in use` : "") +
+        (reaped.timedOut ? ` — hit the ${REAP_TIME_BUDGET_MS / 1000}s budget, more will go next run` : "") +
+        "\n"
+    );
   }
-  const starved = [...seen.values()].filter((v) => v.free < floor);
-  if (!starved.length) return;
-  throw new Error(
-    `${label}: REFUSING TO RUN — only ${starved.map((v) => gb(v.free)).join(" / ")} free, below the ${gb(floor)} floor.\n` +
-      starved.map((v) => `    ${gb(v.free)} free on ${path.parse(path.resolve(v.dir)).root} — ${v.what}`).join("\n") +
-      `\n  A full disk does NOT fail honestly. Chrome cannot write its cache, screenshots come back partial, ` +
-      `decoders fail — and what a gate reports is "the same frame did not reproduce", which is ` +
-      `indistinguishable from a real renderer finding (measured 2026-08-16: a night of field-probe readings ` +
-      `voided, and an I-P8 nondeterminism conclusion nearly written into the tracker as fact — DEBT-024/025).\n` +
-      `  Likeliest cause here: leaked headless-browser profiles. Every launch leaves one and nothing reaps them ` +
-      `(measured: 13,813 puppeteer_dev_chrome_profile-* dirs, 195.8 GB, oldest 7 days).\n` +
-      `  Check:  powershell -NoProfile -Command "(Get-ChildItem $env:TEMP -Directory -Filter 'puppeteer_dev_chrome_profile*').Count"\n` +
-      `  Floor is overridable for a genuinely small job: GATE_MIN_FREE_DISK_GB=2 (0 disables).`
-  );
 }
 
 /** Automation markers. A real user-launched Chrome carries none of these. */
@@ -362,10 +373,9 @@ export function assertQuietBrowserMachine(options: BrowserPreflightOptions): voi
   if (preflightDone) return;
   preflightDone = true;
   const { label, reap = false, scriptMarker } = options;
-  // FIRST, before any process check. It is the cheapest of the three, and it is the one that makes
-  // the other two's numbers lie: a stray-browser count read off a machine that cannot write is not
-  // wrong so much as meaningless. Refusing here also refuses before the gate spends minutes on vite.
-  assertDiskHeadroom(label);
+  // FIRST, and before any free-disk check: collect this tooling's own garbage, so a gate is never
+  // refused for space that 14,000 dead profile dirs are holding (DEBT-025/026).
+  reapProfilesForPreflight();
   if (scriptMarker) {
     const stale = listStaleHarnessProcesses(scriptMarker);
     if (stale.length) {

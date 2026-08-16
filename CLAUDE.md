@@ -56,10 +56,9 @@ Iterate narrowed (`render-pixel-comparison.ts:220`, `render-baseline-gate.ts:74`
 
 **Most lost hours are void runs, not slow runs.** A stray Chrome tree or a leftover vite child from an interrupted run burns a full sweep for nothing. Run `apps/worker/src/browser/browser-preflight.ts` before any gate, and treat the first run in a fresh worktree as a throwaway (see the vite pre-bundle note above).
 
-**CHECK FREE DISK BEFORE ANY BROWSER RUN.** `assertQuietBrowserMachine` now enforces this first (5 GB floor, `GATE_MIN_FREE_DISK_GB` overrides, 0 disables), but know why it is there: on 2026-08-16 a full C: voided a night of field-probe readings and very nearly put a false renderer-nondeterminism finding into the tracker. A full disk does not fail honestly - Chrome cannot write its cache, screenshots come back partial, decoders fail, and what you SEE is "the same frame did not reproduce". The cause is self-inflicted and recurring: every headless launch leaks a browser profile into `%TEMP%` and nothing reaps them (13,813 dirs / 195.8 GB measured, DEBT-025). If a gate refuses on disk, reap those before doing anything clever:
+**FREE DISK IS A PRECONDITION, and it is enforced.** `assertFreeDisk` refuses below a 5 GB floor (`GATE_MIN_FREE_GB` overrides) and `reapStaleBrowserProfiles` clears leaked profile dirs older than 2h (`GATE_PROFILE_REAP_HOURS`) before it measures - both in `browser-preflight.ts`, both reached from `assertQuietBrowserMachine`. Know why: on 2026-08-16 a full C: voided a night of field-probe readings and very nearly put a false renderer-nondeterminism finding into the tracker, while a second session the same night had a partial `render:baseline` column read as a verdict and written into a commit message. **A full disk does not fail honestly** - Chrome cannot write its cache, screenshots come back partial, decoders fail, and what you SEE is "the same frame did not reproduce". The cause is self-inflicted: every Remotion API call opens a browser and leaks its profile (13,995 dirs / 195.8 GB measured - DEBT-025, root cause DEBT-026). The reaper keeps it in check; if you ever need the manual count:
 
 ```bash
-# count them first; delete only ones older than a couple of hours so a live run keeps its profile
 powershell -NoProfile -Command "(Get-ChildItem $env:TEMP -Directory -Filter 'puppeteer_dev_chrome_profile*').Count"
 ```
 

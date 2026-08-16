@@ -3909,11 +3909,50 @@ leftover browser PROCESSES corrupt gates, and the memory note about stray Chrome
 Nobody was watching the directories those processes leave behind. One launch leaks one profile; a week
 of gate runs leaks fourteen thousand.
 
-**The fix has two halves, and the second is the one that lasts:**
-1. Reap stale `puppeteer_dev_chrome_profile-*` / `playwright_*` / named user-data-dirs in
-   `browser-preflight.ts`, on the same age filter it already uses for processes.
-2. Better, have the launch sites pass an explicit user-data-dir under the repo's own scratch and delete
-   it on exit, so the garbage is owned rather than merely swept.
+**The fix has two halves. Half one SHIPPED 2026-08-16; half two is DEBT-026.**
+1. **DONE.** `reapStaleBrowserProfiles` in `browser-preflight.ts` deletes `puppeteer_dev_chrome_profile-*`
+   / `playwright_*` dirs older than 2h (`GATE_PROFILE_REAP_HOURS`), running before `assertFreeDisk`
+   measures, so the refusal is never triggered by garbage the gates themselves produce. Age is the only
+   safety guard available for a directory and it is sufficient: a live run's profile is minutes old.
+2. **DEBT-026.** Have the renderer share one browser rather than opening one per API call, so the
+   garbage is never produced. That is the durable fix; the reaper only makes it non-urgent.
+
+**Reaped by hand 2026-08-16 (founder go-ahead):** 13,813 dirs older than 2h plus
+`debt019-profile-120s`, leaving the 190 younger than 2h alone — **8.63 GB → 238.45 GB free**.
 
 **Add free disk space to the measurement preconditions.** Alongside "prove the subsystem ran", "prove
 the flag applied" and "prove the machine is clean", there is now "prove the machine can still write".
+
+---
+
+### DEBT-026 — the Remotion renderer opens a browser per call, and every one of them leaks its profile
+
+**Open 2026-08-16.** **Expiry:** when `remotion-renderer.ts` shares one browser across a render, and
+`%TEMP%` stops growing by a profile directory per Remotion API call.
+
+**The measurement.** 13,995 `puppeteer_dev_chrome_profile-*` directories, **195.8 GB**, oldest 7 days,
+which filled C: to zero bytes free and voided a night of readings (DEBT-025, DEBT-024). That count is
+not an incident. It is approximately *every browser this repo has ever launched*.
+
+**The cause.** `remotion-renderer.ts` calls `selectComposition`, `renderMedia` and `renderStill`
+without ever passing a shared `puppeteerInstance`, so **each call opens and closes its own browser** —
+two or more per fixture, ~23 fixtures, every gate run. Our code does close them; what fails is
+puppeteer's cleanup of its own temp profile, which on Windows cannot remove a tree Chrome still holds
+handles under, and fails silently. The directory name is puppeteer's default, which is what identifies
+Remotion rather than our Playwright gates as the source.
+
+**Why it is not urgent, and what makes it worth doing anyway.** `assertQuietBrowserMachine` now reaps
+profile dirs older than 2h before it measures free space, so the disk no longer fills. The reason to
+fix the source is speed, not space: a browser launch dominates gate startup (the whole basis of the
+gate-cost-discipline rule in CLAUDE.md), and this launches one per API call rather than one per run.
+Sharing an instance should measurably cut every Remotion-driven gate.
+
+**Why it needs a session rather than a patch.** `selectComposition` and `renderMedia` must then agree
+on browser lifetime, cancellation (`cancelSignal`) has to stay correct across a shared instance, and
+`chromiumOptions: { gl: "angle" }` — load-bearing for the in-composition WebGL2 colour engine — has to
+apply to the shared browser rather than per call. That is a render-correctness change, and it must be
+proven byte-neutral with `render:baseline` at zero tolerance, which per CLAUDE.md is the one claim that
+must never be batched with another.
+
+**Do NOT "fix" this by raising the reap frequency.** The reaper is the collector, not the cure; it
+exists so this item can wait for a proper session.

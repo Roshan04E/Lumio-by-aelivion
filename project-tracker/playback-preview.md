@@ -3082,8 +3082,17 @@ subtract. Re-run that instrument on a clean machine; do not rebuild it.
    6 of 6 — every position unstable, so "no divergence above the floor" was arithmetically guaranteed.
 
 **And the durable output, which outlives the cache question: FREE DISK IS NOW A HARD PRECONDITION.**
-`assertDiskHeadroom` in `apps/worker/src/browser/browser-preflight.ts` refuses at startup below a 5 GB
-floor (`GATE_MIN_FREE_DISK_GB` overrides; 0 disables), checking both the temp volume and the repo
-volume, and runs FIRST in `assertQuietBrowserMachine` — ahead of the stray-browser and stale-harness
-checks, because a browser count read off a machine that cannot write is meaningless rather than wrong.
+Two halves, and they were built by two sessions on the same night without knowing it — which is its own
+evidence about how sharply this bites.
+
+- **The refusal**, `assertFreeDisk` (sibling session, `browser-preflight.ts`): 5 GB floor,
+  `GATE_MIN_FREE_GB` overrides, checks both the temp and repo volumes, called first in
+  `assertQuietBrowserMachine`, from `assertZeroBrowserFloor`, and per-fixture in `render-baseline-gate`
+  — because a sweep can start with headroom and run out three fixtures in.
+- **The collector**, `reapStaleBrowserProfiles` (this session, same file): deletes leaked
+  `puppeteer_dev_chrome_profile-*` / `playwright_*` dirs older than 2h (`GATE_PROFILE_REAP_HOURS`)
+  before the refusal measures anything. Without it the refusal is a trap — it would block gates over
+  garbage the gates themselves produce every run, and the operational answer would become "delete
+  14,000 directories by hand", which nobody does, so the floor would just get set to 0.
+
 "The machine is clean" now means: no stray browser, no stale harness, **and it can still write.**
