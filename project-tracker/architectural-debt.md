@@ -3842,9 +3842,13 @@ conservative invalidation for a stale one.
 
 ### DEBT-024 — ADR-021 3b's host wiring is UNVERIFIED, and every field reading taken so far is VOID
 
-**Open 2026-08-16.** The 3b host wiring ships **DEFAULT OFF** (`getFrameCacheEnabled()` returns false;
+**RESOLVED 2026-08-16** — the wiring is verified and the default is **ON**; see the closing update at
+the end of this entry. The reasoning trail below is kept in full, because two of its three "findings"
+were instrument error and the sequence of how that was established is the useful part.
+
+~~**Open 2026-08-16.** The 3b host wiring ships **DEFAULT OFF** (`getFrameCacheEnabled()` returns false;
 `?frameCache=1` opts in). **Expiry:** when `flarex:frame-cache-field` returns a non-VOID verdict on a
-machine with free disk.
+machine with free disk.~~
 
 **Not in doubt: the MECHANISM.** `flarex:frame-cache-gate` is green on every arm and provably
 falsifiable — `FRAME_CACHE_SABOTAGE=drop-t` gives 16 failures, `drop-graph` 2. That gate hosts its own
@@ -3911,6 +3915,104 @@ renderer defect; it is established that a re-render oracle cannot currently cert
 **KEEP THE DEFAULT OFF.** Two of three clean runs passing is not the bar for flipping a default that
 decides whether the editor shows a stale frame. The remaining work is to make the oracle deterministic
 — or to find an oracle that does not depend on re-rendering — not to re-run this one hoping for three.
+
+**CLOSED 2026-08-16 — DEFAULT ON, by SPLITTING the question rather than by re-running the same one.**
+
+The paragraph above asked for a deterministic oracle and then looked for it in the wrong place: in a
+longer settle over live footage. The two questions tangled together here are not one question.
+
+- **Is the host's KEY complete?** That is the cache's question and the only one that can decide the
+  default.
+- **Does the picture at a fixed `t` reproduce over the LIVE MEDIA PATH?** That is a property of decode
+  and settle, it is real, and it is **not** a frame-cache defect. Registered as **DEBT-027**.
+
+A Flarex comp is eligible because the **compiler** stamps a content token — it does not need a MediaIn
+to be eligible. So the first question can be asked on content that has no decode in it at all. New
+fixture (`FIELD_FIXTURE=deterministic`, `buildDeterministicFlarexFixture`): the seeded video clip is
+**deleted**, six SHAPE clips are tiled 3s apart along the timeline, each wrapped in its own Flarex comp,
+and each stop is a different shape. No decode anywhere in the frame, so `storable`
+(`staleIds`/`notReadyIds` both empty) is trivially true and the oracle is sound.
+
+**Result, 4 runs (3 + 1 confirming), every one green and every hash identical across runs AND across
+page loads:**
+
+```
+eligible=true · A-FILL hits=1 · A-SERVE hits=6 misses=0 · stores=8 declined=0 entries=8 · 63.3MB
+attributable 0 [] · noise floor 0 []      (budget 0 — see below)
+6 distinct pictures at 6 exact times: 1.0s 4.0s 7.0s 10.0s 13.0s 16.0s
+```
+
+**The noise budget in this arm is ZERO, not 1.** Nothing decodes, so there is no mechanism by which a
+bypassed re-render could differ from the previous one; a single unstable position would be an
+unexplained result, not tolerable noise. The media arm keeps a budget of 1 because its instability is
+the question it is asking.
+
+**And the probe was made to prove it could FAIL, from the run's own data.** "A equals B at every
+position" is also what an instrument that cannot tell frames apart reports. So the comparison is
+re-run SHIFTED — `A-SERVE[i]` against `B[i+1]`, the frame a key that lost `t` would have collided
+with — and every position must disagree. All 5 comparisons disagree. A wrong-`t` serve would be seen.
+
+**Two defects the fixture found on its way in, both worth the entry on their own.**
+
+1. **The shape dropdown's `onChange` ADDS the layer** (`TimelineStrip.tsx:3176`); it does not merely
+   arm the button beside it. Clicking both put a second, un-comped clip at every start time, and a
+   frame is cacheable only if EVERY draw carries a token — so the twin made every frame **ineligible**
+   and the first run reported "the 3b wiring is inert in the product". A true statement about a
+   fixture with a stowaway in it. The guard was `after > before`; it is now `after === before + 1`.
+2. **`eligible: false` was unactionable observability.** It is true of every uncacheable frame there
+   is and cannot tell a plain clip (expected — step 4's job) from a Flarex comp that silently lowered
+   to nothing (a defect). `__rfFrameCache` now also reports `draws` and `blockedBy` (the first
+   token-less draw's `debugLayerId`), which is what turned the run above from a dead end into a
+   one-line diagnosis.
+
+**What the default is claimed for, narrowly: scrub-back and loop over ground already rendered.** Not
+playback — ADR-021 §7 has not moved, and a first pass over new ground is all misses. And only where
+every draw carries a content token, which today means a Flarex comp; step 4 is where the timeline
+earns the same identity. Escape hatch `?frameCache=0`.
+
+Green at the flip: `flarex:frame-cache-gate` all arms, `flarex:frame-cache-field` 4/4, web + worker
+typecheck, `render:compare:pixels`.
+
+---
+
+### DEBT-027 — the picture at a fixed `t` does not reproduce over the live media path
+
+**Open 2026-08-16.** **Status:** registered, deliberately NOT being chased. **Expiry:** when a
+`FIELD_FIXTURE=media` run reaches a zero noise floor three times running, or when the cause is named.
+
+**The finding.** `flarex:frame-cache-field` renders the same six playhead positions twice in one page
+load, with the frame cache bypassed on both sweeps, over a Flarex comp on real footage. Two such
+sweeps should be identical. They are not: **1–2 of 6 positions differ**, and a longer settle does not
+converge:
+
+| `FIELD_SETTLE_MS` | unstable positions per run (of 6) |
+| --- | --- |
+| 900 | 2, 3 |
+| 2500 | 1, 1, 2 |
+| 6000 | 2, 1 (a third run died at browser launch) |
+
+900 → 2500 helps. **2500 → 6000 does not.** That is the *nondeterministic* branch, not the
+*converging* one: the settle predicate being too eager is real, but a residual survives every wait
+tested.
+
+**These numbers are trustworthy in a way the earlier ones were not**, and that is why this is a
+finding rather than another void. Taken with 238 GB free (DEBT-025 fixed), after the probe's two own
+defects were found and fixed (stops past the end of the comp; a seed clip selected for being static),
+and with the ruler calibrated at runtime plus a hard VOID unless the stops land on distinct times.
+
+**Why it is NOT a frame-cache defect, and must not gate one.** The same host, the same key and the
+same compositor are exercised by `FIELD_FIXTURE=deterministic` — six shape clips, no decode — and
+there the identical instrument returns a **zero** noise floor, four runs running, with hashes stable
+across page loads. The variable that moves is the media path, not the cache. What this costs is an
+ORACLE: over live footage a re-render cannot certify a frame, so questions of this shape have to be
+asked on deterministic content until it is fixed.
+
+**Where to start when it is picked up.** `settledRef` (`ScenePreviewCanvas.tsx`) is
+`staleIds.length === 0 && notReadyIds.length === 0` — the settle predicate the 900 → 2500 improvement
+implicates. That it improves but does not converge says there are (at least) two terms: one the
+predicate can see and one it cannot. The obvious suspect for the second is a decode whose output
+differs between two seeks to the same `t` (GOP position, reset timing — the ~34 ms reset cost of
+ADR-021 §3.3 and OQ1 is the same subsystem). **Do not chase it from the frame-cache side.**
 
 ---
 

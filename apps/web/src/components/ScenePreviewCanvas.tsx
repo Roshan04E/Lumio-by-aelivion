@@ -1777,6 +1777,8 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
      * answer to a later question.
      */
     let frameCacheRequest: { key: string; storable: boolean } | undefined;
+    /** The first draw in this frame that carried no content token, when one did. Observability only. */
+    let frameCacheBlocker: string | null = null;
     /**
      * RUNTIME BYPASS, for the field probe and for nothing else.
      *
@@ -1799,6 +1801,11 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         const token = (draw as { flarexContentToken?: string }).flarexContentToken;
         if (token === undefined) {
           eligible = false;
+          // WHICH draw refused, not merely that one did. A bare `eligible: false` is unactionable:
+          // "some layer in this frame has no identity" is true of every uncacheable frame there is,
+          // and the reader cannot tell a plain clip (expected, step 4's job) from a Flarex comp that
+          // silently lowered to nothing (a defect). One field turns a dead end into a diagnosis.
+          frameCacheBlocker = (draw as { debugLayerId?: string }).debugLayerId ?? "unnamed-draw";
           break;
         }
         tokens += `${token};`;
@@ -1843,7 +1850,12 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       {
         const w = window as unknown as { __rfFrameCache?: Record<string, unknown> };
         const stats = compositor.frameCacheStats?.() ?? null;
-        w.__rfFrameCache = { eligible: frameCacheRequest !== undefined, ...(stats ?? {}) };
+        w.__rfFrameCache = {
+          eligible: frameCacheRequest !== undefined,
+          draws: draws.length,
+          blockedBy: frameCacheBlocker,
+          ...(stats ?? {}),
+        };
       }
       notePresent({
         targetTime: t,

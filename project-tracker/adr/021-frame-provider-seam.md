@@ -497,19 +497,28 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > identity — and widening the predicate earlier would mean inventing an identity for draws that do not
 > have one, where the failure surfaces as a wrong picture rather than a miss.
 >
-> **THE HOST WIRING SHIPS DEFAULT OFF AND IS UNVERIFIED.** `compileFlarexComp` stamps the token,
-> `build-scene-draws` completes it with the layer's identity digest, and `ScenePreviewCanvas` declares
-> the key — all present and reviewable behind `?frameCache=1`. Whether that key is COMPLETE on a real
-> project is **not yet measured**: every `flarex:frame-cache-field` reading was taken while C: ran down
-> to zero bytes free, and all of them are VOID (DEBT-024, DEBT-025).
+> **THE HOST WIRING IS VERIFIED AND THE DEFAULT IS ON (2026-08-16).** `compileFlarexComp` stamps the
+> token, `build-scene-draws` completes it with the layer's identity digest, `ScenePreviewCanvas`
+> declares the key, and `getFrameCacheEnabled()` now returns true. Escape hatch `?frameCache=0`.
 >
-> **In particular, this ADR does NOT record a finding against I-P8.** An earlier draft of this note
-> claimed the picture at a fixed `t` is not reproducible in the live editor. That claim came from runs
-> on a full disk, where a failed cache write, a partial screenshot or a dead decoder all present as
-> "the frame did not reproduce" — indistinguishable from a real renderer result. I-P8 is **untested**
-> here, not falsified. If the same-load probe still shows irreproducibility with disk free, the finding
-> becomes real at that point, and `FIELD_SETTLE_MS` splits converging (settle predicate too eager) from
-> nondeterministic (3b's ceiling set by the media path).
+> **The default was decided by SPLITTING the question, because two questions were tangled in one
+> fixture and only one of them is the cache's.** A Flarex comp is eligible because the COMPILER stamps
+> a content token — it does not need a MediaIn to be eligible. So "is this host's key COMPLETE" can be
+> asked on content with no decode in it: `FIELD_FIXTURE=deterministic` deletes the seeded video clip
+> and tiles six SHAPE clips along the timeline, each in its own comp, each stop a different shape.
+> Result, four runs: `eligible`, **6 of 6 frames served from cache with 0 misses and 0 declined, every
+> one pixel-identical to a fresh render, noise floor 0 against a budget of 0**, and the same six hashes
+> across all four runs and across page loads. The probe also re-runs its own comparison SHIFTED by one
+> position and requires every shifted pair to differ, so a green run cannot be the report of an
+> instrument that could not tell two frames apart in the first place.
+>
+> **I-P8 over the LIVE MEDIA PATH is a separate, real, registered question — DEBT-027.** Two bypassed
+> sweeps in one load over real footage differ at 1–2 of 6 positions, and a longer settle does not
+> converge (900→2500 ms helps, 2500→6000 ms does not). Measured with disk free and with the probe's own
+> two defects fixed, so these numbers stand — unlike the readings taken on a full disk, which are void
+> (DEBT-024, DEBT-025). What that costs is an ORACLE, not this cache: the identical instrument returns a
+> zero noise floor on deterministic content through the same host, the same key and the same
+> compositor. It does not gate 3b, and it must not be chased from the frame-cache side.
 >
 > **NOT a playback win, and §7 has not moved:** composite 20.9–855.2 ms against decode's 2.8–9.0 ms at
 > every N. A first pass over new ground is all misses. The claim is scrub-back and loop.
@@ -525,6 +534,47 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > It was briefly specified as a 3b key term and withdrawn by founder correction: 3b has no business
 > carrying it, and there is no coupling to the parallel ADR-023 programme. When the timeline moves onto
 > the seam and its layers earn content tokens, direction must be one of the terms those tokens fold.
+
+> **STEP-4 SCOPING, 2026-08-16. The step has two independent halves and they are NOT equally ready.
+> Recorded before implementation, because the second half turns out to be blocked on something that
+> reads like a solved problem and is not.**
+>
+> **(A) Timeline layers earn content tokens** — what widens frame-cache eligibility from "a Flarex comp
+> and nothing else" to ordinary frames. `layerIdentityDigest` (`build-scene-draws.ts:323`) already folds
+> a `TimelineLayer` WHOLE, memoized on object identity, so the placement half is done and total by
+> construction. What a token additionally needs is everything the PICTURE depends on that the layer
+> object does not describe.
+>
+> **(B) Timeline media acquisition moves onto the byte-budgeted provider seam** — the loader-ceiling,
+> I-P6 and burst-admission work step 2 did for Flarex, done for the timeline's `preview-frame-pool`.
+> This is a decoder-topology change and therefore carries ADR-012's binding rule: **every decoder
+> topology change requires a decoder soak, and must be bisectable.** Expect the burst-admission defect
+> again — N constructions judged against a budget that starts empty is a property of any admission
+> authority, not of the Flarex page.
+>
+> **THE BLOCKER IN (A), AND IT IS SPECIFIC. A media layer's `sourceVersion` is a WALL CLOCK, not a
+> content identity.** `gl-context.ts:278` stamps `updatedAt: nowMs()` on every producer draw, and
+> `build-scene-draws.ts:746` reads it as the media draw's version. That is exactly right for what it
+> was built for — skip a redundant texture upload when nothing redrew — and it is useless as a cache
+> key term: two visits to the same `t` produce two different values, so a token folding it would never
+> hit, and a token IGNORING it would serve whatever picture the decoder happened to have. There is no
+> third option available today, because the decode path does not report WHICH source time the frame it
+> served actually is.
+>
+> Non-media layers do not have this problem: text and shape carry `rasterizer.versionOf(layer.id)`, a
+> real content version (`build-scene-draws.ts:679`), dropped to `undefined` only under a non-identity
+> colour pipeline — a correct, conservative refusal that a token can simply honour.
+>
+> **So the honest sequence is 4a → 4b → (B), and 4b shares an instrument with DEBT-027.** "Which source
+> time is this frame" is the same missing fact that makes a re-render oracle unusable over live footage.
+> Building it once serves both, and building the frame token on media before it exists would put a
+> wrong picture behind a cache key — the one failure mode 3b's whole gate order was arranged to prevent.
+>
+> - **4a — non-media timeline layers earn content tokens** (text, shape, image/graphic, adjustment),
+>   including the D6a direction obligation above. Win on its own: frames whose every layer is non-media
+>   — title cards, lower-thirds, motion-graphics sequences — become scrub-and-loop cacheable.
+> - **4b — media layers earn tokens**, once a provider can name the served source time.
+> - **(B) — timeline acquisition onto the seam**, with a decoder soak and one change per commit.
 
 **Not in the sequence, and newly ordered ahead of the all-intra proxy by §3.3:** reducing the cost
 and the frequency of decoder resets. Provider-local (§4.2), needs no seam change, and worth more

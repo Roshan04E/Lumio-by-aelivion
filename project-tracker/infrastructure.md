@@ -200,3 +200,44 @@ untouched — stays on the loose bar.
 **Verify:** `pnpm --filter @orreris/worker typecheck` clean. 3 consecutive full `render:compare:pixels`
 sweeps (`PIXEL_BROWSER_CHANNEL=chrome`), 76/76 passing each time, `flarex-generators` at 0.000% in all
 three.
+
+## v7 — `flarex-generators` is failing again, and this time it is NOT a flake (2026-08-16)
+
+**Problem:** `render:compare:pixels` fails one fixture — `flarex-generators: 0.691% > 0.500%`.
+
+**What is different from v3/v5/v6, and it is the whole reason this is a new entry.** Every prior
+episode was a READINESS RACE: the same fixture read 86.895% in ~40% of runs and 0.000% in the rest, so
+the reading was a coin toss and the repair was to make capture wait for a settled frame. That is not
+what is happening now. **Three consecutive isolated runs returned 14320/2073600 — the identical pixel
+count, to the pixel.** A race does not produce the same number three times. This is a stable
+divergence between the two renderers at a value the tightened 0.5% bar (set in v6) refuses.
+
+**It is not the ADR-021 3b frame cache, established on a single variable before anything else was
+looked at.** The frame-cache default flipped ON in the same working tree that produced the failure,
+which makes it the obvious suspect and the one worth eliminating first:
+
+| arm | reading |
+| --- | --- |
+| `getFrameCacheEnabled()` → `true` (the flip) | 0.691% (14320 px) |
+| `getFrameCacheEnabled()` → `false`, one line, nothing else changed | 0.691% (14320 px) |
+| committed HEAD, **no local changes at all** (`git stash`) | 0.691% (14320 px) |
+
+Identical three ways. The cache is inert when off, and the failure survives removing the entire
+session's work, so it predates it. There is also a structural reason it could not be the cache: the
+pixel harness renders ONE frame per fixture, so a frame cache is cold and can only miss — the case
+where it is trivially correct, and precisely the blindness that made `flarex:frame-cache-gate`
+necessary in the first place (DEBT-017's axis).
+
+**NOT chased, deliberately, and this is a scope call rather than an oversight.** It is a real
+regression with a real bisect ahead of it, on a branch whose commits are about something else. Folding
+that hunt into the 3b commit would make a moved pixel ambiguous between two unrelated claims — the
+exact thing CLAUDE.md's "never batch a 'nothing changed' claim" exists to prevent.
+
+**Where the next session should start.** The bar is `0.005`, tightened in v6 on three 0.000% sweeps,
+so the honest question is whether the renderers diverged or the bar was set on a lucky window. Bisect
+`render:compare:pixels` with `PIXEL_FIXTURES=flarex-generators` (seconds per step, narrowed) across
+the range since v6 — 2026-08-13 — and check the v6 readiness gate's TIMED-OUT line is absent in the
+failing runs, which would confirm this is a settled-frame disagreement rather than defect (2)
+returning. The generator nodes (`text`, `background`) route through the virtual-layer rasterizer, so
+any text/shape raster change in that window is a candidate; ADR-023's text programme is live in the
+same period and is the first place to look.

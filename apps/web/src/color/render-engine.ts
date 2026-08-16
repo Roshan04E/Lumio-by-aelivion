@@ -242,21 +242,30 @@ export function getRegionPassesEnabled(): boolean {
  * Composited-frame cache (ADR-021 step 3b) — the RAM-Preview cache that makes scrub-back and loop
  * over already-rendered ground instant. `?frameCache=1` turns it on; `?frameCache=0` off.
  *
- * DEFAULT OFF, and the default is the finding rather than caution.
+ * DEFAULT ON, flipped 2026-08-16 on the acceptance gate this comment named while it was off.
  *
- * `flarex:frame-cache-gate` proves the mechanism is correct and that its own gate can be made to fail
- * on a broken key. `flarex:frame-cache-field` then asks the different question — does the SHIPPED
- * HOST declare the right key on a real project — and the answer today is no. With every arm equally
- * warmed and a zero noise floor between two cache-off runs, the cache-on arm still diverges from
- * cache-off at real positions. Something changes the picture at a fixed `t` that this host's key does
- * not fold. See DEBT-024.
+ * WHAT IS CLAIMED, and it is narrow: **scrub-back and loop over ground already rendered.** Not
+ * playback. §7 of ADR-021 has not moved — composite is 20.9–855.2 ms against decode's 2.8–9.0 ms at
+ * every N measured, and a first pass over new ground is all misses. A frame is also cacheable only
+ * where every draw carries a content token, which today means a Flarex comp and nothing else; step 4
+ * is where the timeline earns the same identity.
  *
- * That is exactly the defect the field probe exists to catch, caught before the wiring reached anyone,
- * and it is the one class where shipping-and-watching is not an option: a stale serve presents as a
- * rendering bug, so the cost of being wrong is paid by whoever debugs the compositor for a day.
+ * WHAT THE EVIDENCE IS. `flarex:frame-cache-gate` proves the MECHANISM — warm-vs-cold parity, exact
+ * predicted hit counts, eviction — and both `FRAME_CACHE_SABOTAGE` modes make it fail, so it can.
+ * `flarex:frame-cache-field` then asks the different question, of the SHIPPED HOST on a real project:
+ * is the key this host declares COMPLETE? Green 3/3 on the deterministic fixture (six shape clips,
+ * each in its own comp, no decode anywhere in the frame): `eligible`, 6 of 6 frames served from cache
+ * with 0 misses and 0 declined, every one pixel-identical to a fresh render, a zero noise floor
+ * between two bypassed sweeps, and the same six hashes across all three runs and page loads.
  *
- * FLIP THIS TO `true` WHEN `flarex:frame-cache-field` IS GREEN, and not before. It is a one-line
- * change with a named acceptance gate, deliberately, so the decision is not re-derived.
+ * WHY THE FIXTURE HAS NO VIDEO IN IT, since that reads like a weaker test and is the opposite. Over
+ * live footage the picture at a fixed `t` does not reproduce — 1–2 unstable positions of 6, measured
+ * with disk free and instrument defects fixed, and NOT converging with a longer settle. That makes
+ * the ORACLE unreliable there, and an unreliable oracle can neither convict this cache nor acquit it;
+ * it is a question about the media path, registered as DEBT-027, and it does not gate this. What the
+ * deterministic arm removes is the confound, not the difficulty: the key is the same key.
+ *
+ * Escape hatch `?frameCache=0`, and `localStorage['orreris.frameCache']`.
  */
 export function getFrameCacheEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
@@ -270,7 +279,7 @@ export function getFrameCacheEnabled(): boolean {
       /* SSR / restricted storage — fall through */
     }
   }
-  return false;
+  return true;
 }
 
 /**
