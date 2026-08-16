@@ -471,3 +471,89 @@ browser gate in the repo), honours the override in both directions, ignores a ju
 rather than obeying it, and reports an unreadable reading as unreadable. The disk sibling — shipped
 earlier without a falsifier — is covered by the same file, because they are one precondition class and
 a reader wondering whether the disk check can fire should not have to look elsewhere.
+
+## v7 — `flarex-generators` is failing again, and this time it is NOT a flake (2026-08-16)
+
+**Problem:** `render:compare:pixels` fails one fixture — `flarex-generators: 0.691% > 0.500%`.
+
+**What is different from v3/v5/v6, and it is the whole reason this is a new entry.** Every prior
+episode was a READINESS RACE: the same fixture read 86.895% in ~40% of runs and 0.000% in the rest, so
+the reading was a coin toss and the repair was to make capture wait for a settled frame. That is not
+what is happening now. **Three consecutive isolated runs returned 14320/2073600 — the identical pixel
+count, to the pixel.** A race does not produce the same number three times. This is a stable
+divergence between the two renderers at a value the tightened 0.5% bar (set in v6) refuses.
+
+**It is not the ADR-021 3b frame cache, established on a single variable before anything else was
+looked at.** The frame-cache default flipped ON in the same working tree that produced the failure,
+which makes it the obvious suspect and the one worth eliminating first:
+
+| arm | reading |
+| --- | --- |
+| `getFrameCacheEnabled()` → `true` (the flip) | 0.691% (14320 px) |
+| `getFrameCacheEnabled()` → `false`, one line, nothing else changed | 0.691% (14320 px) |
+| committed HEAD, **no local changes at all** (`git stash`) | 0.691% (14320 px) |
+
+Identical three ways. The cache is inert when off, and the failure survives removing the entire
+session's work, so it predates it. There is also a structural reason it could not be the cache: the
+pixel harness renders ONE frame per fixture, so a frame cache is cold and can only miss — the case
+where it is trivially correct, and precisely the blindness that made `flarex:frame-cache-gate`
+necessary in the first place (DEBT-017's axis).
+
+**NOT chased, deliberately, and this is a scope call rather than an oversight.** It is a real
+regression with a real bisect ahead of it, on a branch whose commits are about something else. Folding
+that hunt into the 3b commit would make a moved pixel ambiguous between two unrelated claims — the
+exact thing CLAUDE.md's "never batch a 'nothing changed' claim" exists to prevent.
+
+**Where the next session should start.** The bar is `0.005`, tightened in v6 on three 0.000% sweeps,
+so the honest question is whether the renderers diverged or the bar was set on a lucky window. Bisect
+`render:compare:pixels` with `PIXEL_FIXTURES=flarex-generators` (seconds per step, narrowed) across
+the range since v6 — 2026-08-13 — and check the v6 readiness gate's TIMED-OUT line is absent in the
+failing runs, which would confirm this is a settled-frame disagreement rather than defect (2)
+returning. The generator nodes (`text`, `background`) route through the virtual-layer rasterizer, so
+any text/shape raster change in that window is a candidate; ADR-023's text programme is live in the
+same period and is the first place to look.
+
+## v8 — bisected: `fe4f77c`, the pinned-font await. The DEBT-021 inheritance does NOT hold (2026-08-16)
+
+**Bisected, 9 arms, `PIXEL_FIXTURES=flarex-generators` narrowed to ~2 min each.** v7's guess was right
+about the neighbourhood and that is the least interesting part of this entry.
+
+```
+first bad commit  fe4f77c  fix(text): a pinned font waited on a signal it had no right to expect
+      512a085  GOOD 0.000%     <- S6, its parent
+      fe4f77c  BAD  0.691%     <- the await lands
+      66185be  BAD  0.691%     <- and it is ALSO the render:baseline capture commit
+      067b749  BAD  0.691%
+      e443d4e  BAD  0.691%     (HEAD)
+```
+
+`fe4f77c` is DEBT-009 instance 4: `ensureOverlayFonts` now awaits the layer's own faces inside
+`rasterize`, before the measure, so text no longer draws in a fallback while waiting on a `loadingdone`
+liveness signal. **The fix is right and this entry is not an argument to revert it.** What it did not
+carry is renderer PARITY: its own evidence is `render:baseline 81/81 unchanged`, which compares the
+same renderer to itself across commits and is structurally incapable of seeing two renderers disagree
+(DEBT-017's axis, again). The differential gate was not run, and the fixture that would have spoken is
+the one text-heavy Flarex fixture in the set.
+
+**WHICH SIDE MOVED IS NOT ESTABLISHED** and is the next step, not a conclusion. The plausible reading —
+the await changes when the correct face reaches the raster, and the two renderers acquire fonts by
+different routes, so one now composites a face the other still hasn't — is a hypothesis with a cheap
+test: one narrowed run at `512a085` and one at `fe4f77c`, comparing `web-preview-flarex-generators.png`
+and `remotion-flarex-generators.png` separately rather than only their diff. Do that before touching
+anything.
+
+**THE INHERITED EXPLANATION IS FALSIFIED, which is the finding worth keeping.** DEBT-021 argued from
+`flarex.test.ts`'s own comment that the `pending` host soft-degrade was this fixture's parity backstop
+("went 0.000% → 86.895% when this was unscoped"), and therefore that the broken assertion PREDICTED
+these failures. Tested directly rather than inherited:
+
+| arm | `flarex-generators` |
+| --- | --- |
+| `15d615b` — parent of the commit that deleted the soft-degrade | 0.000% |
+| `366860c` — S7.2 (5/n), the deletion itself | 0.000% |
+
+Both arms carry an identical graft of `apps/web/src/playback/readahead-probe.ts` from `95e9286`,
+because that file was authored untracked and every checkout before it **cannot build** — a constant
+across the comparison, so it cannot explain a difference. The soft-degrade's removal moved this fixture
+by nothing at all. One symptom did not inherit the other's cause, and the 86.895% magnitude in the old
+comment never resembled 0.691% either.

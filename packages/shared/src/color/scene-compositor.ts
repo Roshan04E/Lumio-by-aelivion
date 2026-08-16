@@ -23,6 +23,11 @@
 
 import { BLEND_GLSL, BLEND_LIGHT_GLSL, blendModeIndex } from "./blend";
 import {
+  makeFrameCacheRandom,
+  planFrameCacheEviction,
+  type CompositedFrameCacheStats,
+} from "./composited-frame-cache";
+import {
   FULLSCREEN_TRI_VS,
   RenderTarget,
   bytesPerPixel,
@@ -304,6 +309,36 @@ export interface SceneLayerDraw {
   /** Content version of `mask` (same semantics as `sourceVersion`); `undefined` = always re-upload. */
   maskVersion?: number | undefined;
   /**
+   * ADR-021 3b — the ROOT `NodeContentHash` of the Flarex graph that produced this draw, stamped by
+   * `compileFlarexComp`. TRANSPORT ONLY: the renderer never reads it, and the host does not compute
+   * it. It exists so the frame cache's graph term can come from the hash the compiler already has
+   * rather than from the draw's own contents — a draw list IS the output of the computation the
+   * cache exists to skip, so keying on it would be keying on the answer.
+   *
+   * Merkle by construction (ADR-009 R1/R3), so it already folds every resolved param at t, the
+   * topology, and the font identity (ADR-023 T-8). Absent on any draw the compiler did not build,
+   * and a frame containing such a draw is not cacheable.
+   */
+  flarexContentToken?: string | undefined;
+  /**
+   * The media time these pixels ACTUALLY represent, carried up from `SceneTextureSource.servedTime`
+   * (ADR-012 T5) onto the draw. TRANSPORT AND DIAGNOSIS ONLY: the renderer never reads it.
+   *
+   * The producer has known this since S4.2 and the DRAW threw it away, which is a smaller version of
+   * the same mistake S4.2 fixed one layer down — a texture was modelled as pixels rather than as
+   * pixels-at-a-moment, and here a draw was. Two things need it and neither could ask: a re-render
+   * oracle over live footage cannot tell "the frame cache served a stale picture" from "the decoder
+   * served a different moment" without it (DEBT-027), and a media content token cannot be written at
+   * all, because `sourceVersion` answers "have these pixels changed" and a cache key needs "WHICH
+   * moment are these pixels of".
+   *
+   * Optional on the same terms as everything else in this family: absent means THIS PATH CANNOT SAY —
+   * honest for a still, a raster, or an export source with no decoder behind it — and absent is never
+   * "assume it is current".
+   */
+  servedTime?: ServedTime | undefined;
+
+  /**
    * Element-box half-extents in comp px (unscaled). Media's element IS the comp, so omit it (defaults
    * to comp/2). Text/shape content rasters pass their tight box so the composite quad places + tilts the
    * box about the layer center (the 3D-tilt translate(-50%,-50%) term needs the real box).
@@ -404,6 +439,19 @@ export interface SceneTransitionDraw {
  */
 export interface SceneGroupDraw {
   kind: "group";
+  /**
+   * ADR-021 3b — the ROOT `NodeContentHash` of the Flarex graph that produced this draw, stamped by
+   * `compileFlarexComp`. TRANSPORT ONLY: the renderer never reads it, and the host does not compute
+   * it. It exists so the frame cache's graph term can come from the hash the compiler already has
+   * rather than from the draw's own contents — a draw list IS the output of the computation the
+   * cache exists to skip, so keying on it would be keying on the answer.
+   *
+   * Merkle by construction (ADR-009 R1/R3), so it already folds every resolved param at t, the
+   * topology, and the font identity (ADR-023 T-8). Absent on any draw the compiler did not build,
+   * and a frame containing such a draw is not cacheable.
+   */
+  flarexContentToken?: string | undefined;
+
   /** Diagnostic-only source group id. Ignored by the renderer (matches debugLayerId/debugFromId/
    *  debugToId convention) — NOT used as a cache key; see `renderGroupInto`'s depth-indexed pool. */
   debugGroupId?: string | undefined;
@@ -531,6 +579,25 @@ export interface SceneFrameSpec {
    * it gets. A caller that forgets this field renders exactly what it rendered yesterday.
    */
   effectLight?: ColorEffectLight | undefined;
+  /**
+   * Composited-frame cache participation for THIS frame (ADR-021 step 3b). Absent = the cache is
+   * inert: no lookup, no store, and `frameCacheStats()` stays null. Absent stays absent — a caller
+   * that has not been taught about this field renders exactly what it rendered yesterday, which is
+   * also what makes the export path and every fixture provably unaffected.
+   *
+   * `key` is the caller's OPAQUE identity for "the picture this frame should be". The compositor
+   * never interprets it. It must fold everything that changes the composite; ADR-021 fixes its
+   * composition as `(graph content hash, t)`, and the honest way to obtain the graph term is the
+   * per-node `NodeContentHash` values the compiler already produces — NOT a hash of the draw list,
+   * which is a downstream artifact of exactly the computation being skipped.
+   *
+   * `storable` is the SETTLE gate and it is the safety property, not an optimization. A frame drawn
+   * while a source was stale or not yet ready is a picture the renderer would not have produced if
+   * it had waited; caching it would memoize a half-decoded frame under a key that claims to mean the
+   * finished one. Hosts pass their own "every source served" predicate here. A frame may still be
+   * SERVED from cache while `storable` is false — what was stored was, by this rule, complete.
+   */
+  frameCache?: { key: string; storable: boolean } | undefined;
 }
 
 /**
@@ -547,6 +614,12 @@ export interface SceneFrameSpec {
 export interface SceneCompositorOptions {
   contentCache?: boolean | undefined;
   contentCacheBudgetBytes?: number | undefined;
+  /** Kill switch for the composited-frame cache (ADR-021 3b), in the same spirit as `contentCache`:
+   *  a pure optimization must be switchable off without a deploy, and the A/B is how "does it pay
+   *  for its memory?" gets an answer instead of an assumption. */
+  frameCache?: boolean | undefined;
+  /** Raise/lower the frame cache's GPU budget. ~7.91 MB per 1080p frame; see §3.2(c′). */
+  frameCacheBudgetBytes?: number | undefined;
   /**
    * Render-target precision (plans/log-raw-source-color.md, Stage 0). Passed IN rather than read from
    * a flag here — `packages/shared` never reads `window`, so the app owns the flag and the cloud
@@ -1305,6 +1378,131 @@ class ContentArtifactCache {
   }
 }
 
+/**
+ * Default budget for the composited-frame cache (ADR-021 §3.2(c′)). 256 MB holds ~32 frames at 1080p
+ * RGBA8 (7.91 MB each) — about 1.1 s of work area at 30fps.
+ *
+ * Deliberately NOT the 1 GB the ADR measures at. 1 GB is the figure that makes "~4.3 s per GB" true
+ * and it is the right number for a desktop with VRAM to spare; the product target here is an
+ * integrated GPU where VRAM *is* system memory and this cache shares the budget with the
+ * accumulators, the source textures and the artifact cache's own 96 MB. Shipping the measured
+ * ceiling as the default would spend the whole headroom on the one subsystem that degrades most
+ * gracefully when it is small — a scrub-back miss costs a re-render, not a wrong picture. The host
+ * raises it (`frameCacheBudgetBytes`) where the memory is known to exist.
+ */
+const FRAME_CACHE_BUDGET_BYTES = 256 * 1024 * 1024;
+/** Backstop for small comps, where the byte budget alone would allow a very large entry count. */
+const FRAME_CACHE_MAX_ENTRIES = 512;
+
+interface FrameEntry {
+  frame: RenderTarget;
+  cacheKey: string;
+  lastAccessFrame: number;
+  bytes: number;
+}
+
+/**
+ * The GL-holding half of the composited-frame cache; the POLICY half is
+ * `composited-frame-cache.ts` (pure, and where the I-P9 argument lives). This class only owns render
+ * targets and counters.
+ *
+ * Note what it does NOT have: any notion of tiering, promotion or recency ranking. That is not an
+ * omission — `ContentArtifactCache` above has all three and is right to, because its access pattern
+ * is intra-frame fan-out. This cache's access pattern is a cycle across frames, where those same
+ * mechanisms are actively harmful (I-P9).
+ */
+class CompositedFrameCache {
+  private readonly entries = new Map<string, FrameEntry>();
+  private bytes = 0;
+  private hits = 0;
+  private misses = 0;
+  private stores = 0;
+  private evictions = 0;
+  private declined = 0;
+  private readonly random = makeFrameCacheRandom();
+  constructor(
+    private readonly gl: WebGL2RenderingContext,
+    private readonly budgetBytes: number = FRAME_CACHE_BUDGET_BYTES,
+    private readonly precision: RenderTargetPrecision = "rgba8",
+  ) {}
+
+  lookup(cacheKey: string, frame: number): FrameEntry | undefined {
+    const entry = this.entries.get(cacheKey);
+    if (!entry) {
+      this.misses += 1;
+      return undefined;
+    }
+    this.hits += 1;
+    entry.lastAccessFrame = frame;
+    return entry;
+  }
+
+  /** Get-or-create the target for a key; the caller copies the finished composite into `entry.frame`. */
+  store(cacheKey: string, width: number, height: number, frame: number): FrameEntry {
+    const w = Math.max(1, width);
+    const h = Math.max(1, height);
+    let entry = this.entries.get(cacheKey);
+    if (!entry) {
+      entry = {
+        frame: new RenderTarget(this.gl, w, h, this.precision),
+        cacheKey,
+        lastAccessFrame: frame,
+        bytes: w * h * bytesPerPixel(this.precision),
+      };
+      this.entries.set(cacheKey, entry);
+      this.bytes += entry.bytes;
+    } else {
+      entry.frame.resize(w, h);
+      this.bytes -= entry.bytes;
+      entry.bytes = w * h * bytesPerPixel(entry.frame.precision);
+      this.bytes += entry.bytes;
+      entry.lastAccessFrame = frame;
+    }
+    this.stores += 1;
+    return entry;
+  }
+
+  /** Count a frame the host rendered but declined to cache (unsettled picture). See `declined`. */
+  noteDeclined(): void {
+    this.declined += 1;
+  }
+
+  evictToBudget(frame: number): void {
+    const doomed = planFrameCacheEviction(
+      [...this.entries.values()],
+      { frame, bytes: this.bytes, entries: this.entries.size, budgetBytes: this.budgetBytes, maxEntries: FRAME_CACHE_MAX_ENTRIES },
+      this.random,
+    );
+    for (const cacheKey of doomed) {
+      const entry = this.entries.get(cacheKey);
+      if (!entry) continue;
+      this.entries.delete(cacheKey);
+      this.bytes -= entry.bytes;
+      this.evictions += 1;
+      entry.frame.dispose();
+    }
+  }
+
+  stats(): CompositedFrameCacheStats {
+    return {
+      entries: this.entries.size,
+      bytes: this.bytes,
+      budgetBytes: this.budgetBytes,
+      hits: this.hits,
+      misses: this.misses,
+      stores: this.stores,
+      evictions: this.evictions,
+      declined: this.declined,
+    };
+  }
+
+  dispose(): void {
+    for (const entry of this.entries.values()) entry.frame.dispose();
+    this.entries.clear();
+    this.bytes = 0;
+  }
+}
+
 
 /**
  * Wall clock for cache ageing (S5.3). `performance.now()` where it exists, `Date.now()` otherwise —
@@ -1360,6 +1558,9 @@ export class SceneCompositor {
   /** Kill switch (see SceneCompositorOptions): sealed groups render normally, they just never cache. */
   private readonly contentCacheDisabled: boolean = false;
   private readonly contentCacheBudgetBytes: number = CONTENT_CACHE_BUDGET_BYTES;
+  private compositedFrameCache: CompositedFrameCache | undefined;
+  private readonly frameCacheDisabled: boolean = false;
+  private readonly frameCacheBudgetBytes: number = FRAME_CACHE_BUDGET_BYTES;
   /** Resolved render-target precision for every target this compositor owns (see the constructor). */
   private readonly precision: RenderTargetPrecision;
   // 1×1 placeholder bound to the mask sampler when a layer has no mask (the shader won't sample it,
@@ -1737,6 +1938,8 @@ export class SceneCompositor {
     this.height = height;
     if (options?.contentCache === false) this.contentCacheDisabled = true;
     if (options?.contentCacheBudgetBytes !== undefined) this.contentCacheBudgetBytes = options.contentCacheBudgetBytes;
+    if (options?.frameCache === false) this.frameCacheDisabled = true;
+    if (options?.frameCacheBudgetBytes !== undefined) this.frameCacheBudgetBytes = options.frameCacheBudgetBytes;
     canvas.width = width;
     canvas.height = height;
     const gl = createGl(canvas, { kind: "scene-compositor", label: "scene-compositor" });
@@ -3414,6 +3617,19 @@ export class SceneCompositor {
     return (this.contentArtifactCache ??= new ContentArtifactCache(this.gl, this.contentCacheBudgetBytes, this.precision));
   }
 
+  private frameCache(): CompositedFrameCache {
+    return (this.compositedFrameCache ??= new CompositedFrameCache(this.gl, this.frameCacheBudgetBytes, this.precision));
+  }
+
+  /**
+   * Scorecard for the composited-frame cache (ADR-021 step 3b). Null until a caller has actually
+   * declared a frame key, so a compositor nobody opted in for reports nothing at all rather than a
+   * row of zeroes that looks like a cache doing badly.
+   */
+  frameCacheStats(): CompositedFrameCacheStats | null {
+    return this.compositedFrameCache?.stats() ?? null;
+  }
+
   /**
    * Reuse scorecard for the content-addressed artifact cache (Slice 2's stated deliverable). Null until
    * a materialized group has rendered, so a compositor that never touches Flarex reports nothing.
@@ -3636,7 +3852,50 @@ export class SceneCompositor {
   }
 
   private renderFrameUnchecked(spec: SceneFrameSpec): void {
+    // ADR-021 step 3b. A HIT skips `renderFrameCore` outright — the whole graph, every pass, the
+    // 20.9–855.2 ms of composite §7 measures — and presents the frame that was stored under this
+    // key. A MISS renders normally and stores the result IF the host says the picture was settled.
+    //
+    // Restored into `accumA` rather than straight to the default framebuffer, deliberately: `accumA`
+    // is what `readCompositeThumbnail` samples for the scopes and the node thumbnails, so presenting
+    // past it would leave those reading the last MISSED frame — a stale picture in a different
+    // surface, which is the same defect wearing a disguise.
+    const request = this.frameCacheDisabled ? undefined : spec.frameCache;
+    if (request) {
+      const cache = this.frameCache();
+      this.assertContextAlive();
+      this.ensureSize(spec.width, spec.height);
+      if (this.width > 0 && this.height > 0) {
+        this.frameCounter += 1;
+        const hit = cache.lookup(request.key, this.frameCounter);
+        if (hit && hit.frame.width === this.width && hit.frame.height === this.height) {
+          this.debugFrameTime = spec.debugFrameTime;
+          this.effectLight = spec.effectLight ?? "display";
+          this.copyTarget(hit.frame, this.accumA, this.width, this.height, this.width, this.height, this.gl.NEAREST);
+          // Ageing still has to happen on a hit, or a long cached scrub would stop reclaiming exactly
+          // while the caches are fullest — the I-21/I-33 shape `sweepIdleCaches` exists to prevent.
+          this.sweepIdleCaches();
+          cache.evictToBudget(this.frameCounter);
+          this.presentFrame();
+          return;
+        }
+        // `renderFrameCore` bumps the counter itself; undo ours so a miss counts one frame, not two.
+        this.frameCounter -= 1;
+      }
+    }
+
     if (!this.renderFrameCore(spec)) return;
+
+    if (request) {
+      const cache = this.frameCache();
+      if (request.storable) {
+        const entry = cache.store(request.key, this.width, this.height, this.frameCounter);
+        this.copyTarget(this.accumA, entry.frame, this.width, this.height, this.width, this.height, this.gl.NEAREST);
+        cache.evictToBudget(this.frameCounter);
+      } else {
+        cache.noteDeclined();
+      }
+    }
     this.presentFrame();
   }
 
@@ -4095,6 +4354,8 @@ export class SceneCompositor {
     this.groupTargets.length = 0;
     this.contentArtifactCache?.dispose();
     this.contentArtifactCache = undefined;
+    this.compositedFrameCache?.dispose();
+    this.compositedFrameCache = undefined;
     for (const pair of this.matteTargets) {
       pair.target.dispose();
       pair.scratch.dispose();

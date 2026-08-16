@@ -1299,7 +1299,10 @@ function flarexKeyerFold(m: number, garbage: number, holdOut: number): number {
     { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "r1", socket: "in" } },
     { id: "e3", from: { nodeId: "r1", socket: "out" }, to: { nodeId: "rr2_out", socket: "in" } },
   ];
-  const strip = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" || key === "debugGroupId" ? undefined : val));
+  const strip = (v: unknown) =>
+    JSON.stringify(v, (key, val) =>
+      key === "source" || key === "debugGroupId" || key === "flarexContentToken" ? undefined : val,
+    );
   const directOut = compileFlarexComp(direct, lowerCtx());
   const reroutedOut = compileFlarexComp(rerouted, lowerCtx());
   check("reroute lowers identically to a direct wire", strip(directOut) === strip(reroutedOut));
@@ -2365,13 +2368,20 @@ function flarexKeyerFold(m: number, garbage: number, holdOut: number): number {
     check("a RETIMED loader with no picture yet yields NOTHING, never the playhead frame",
       notLanded === null || (notLanded as SceneLayerDraw).debugLayerId !== "host");
 
-    // …but an UN-retimed unready loader keeps the host fall-back. The host draw is the same MOMENT
-    // there, so it is a real soft-degrade — and the two renderers do not become ready on the same
-    // frame, so dropping it turns a readiness race into a parity failure (flarex-generators went
-    // 0.000% → 86.895% when this was unscoped).
+    // …and an UN-retimed one is refused too, which is the OPPOSITE of what this line asserted until
+    // 2026-08-16. INVERTED, not repaired: `366860c` (S7.2 5/n) deleted the host-clip substitution for
+    // `pending` deliberately, under I-27 — "scarcity is never resolved by showing ANOTHER source's
+    // content" — and removed `allowHostSubstitution` from the compiler's surface so no caller can ask
+    // for it back. The assertion outlived the behaviour it described and then read as a regression
+    // (DEBT-021, registered 2026-08-14 on exactly that reading).
+    //
+    // Its old comment claimed this guard was what kept `flarex-generators` at parity ("went 0.000% →
+    // 86.895% when this was unscoped"). BISECTED 2026-08-16 and that inheritance does not hold:
+    // 366860c renders the fixture at 0.000% on BOTH sides, and the current reproducible 0.691% first
+    // appears at `fe4f77c`, three weeks later and in the text programme. Two symptoms, two causes.
     const plainPending = compileFlarexComp(createFlarexComp("mhq", "No retime"), { ...lowerCtx(), resolveSourceDraw: () => "pending" });
-    check("an UN-retimed unready loader still soft-degrades to the host (renderer parity)",
-      Boolean(plainPending) && (plainPending as SceneLayerDraw).debugLayerId === "host");
+    check("an UN-retimed unready loader is refused too — nobody can opt out of I-27",
+      plainPending === null || (plainPending as SceneLayerDraw).debugLayerId !== "host");
 
     // null is a DIFFERENT answer — "no loader owns this node" — and must keep the Phase-1 degrade,
     // which is the right picture wherever nothing is retimed and the only thing standing between a

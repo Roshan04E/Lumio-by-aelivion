@@ -81,6 +81,15 @@ export interface IncrementalStats {
   dirtyNodes: number;
   declaredNodes: number;
   frames: number;
+  /**
+   * DEBT-022 — reuses refused because the node's `NodeContentHash` moved while the axes read clean.
+   *
+   * Counted separately from `evaluated` because it is the ONLY reading that distinguishes "the content
+   * gate is doing work the axes could not do" from "the content gate is inert". A fix whose counter
+   * never moves is indistinguishable from one that never shipped, which is this register's own
+   * recurring lesson (DEBT-012: count the reasons, never infer which branch fired).
+   */
+  contentHashMisses: number;
 }
 
 const stats: IncrementalStats = {
@@ -91,6 +100,7 @@ const stats: IncrementalStats = {
   dirtyNodes: 0,
   declaredNodes: 0,
   frames: 0,
+  contentHashMisses: 0,
 };
 
 export function incrementalStats(): IncrementalStats {
@@ -159,9 +169,26 @@ function texturesAlive(value: unknown): boolean {
 }
 
 export interface IncrementalChannels {
-  readonly onEvaluated: (compId: string, nodeId: string, contextKey: string, value: unknown) => void;
-  readonly reuseValue: (compId: string, nodeId: string, contextKey: string) => FlarexValue | null;
+  readonly onEvaluated: (compId: string, nodeId: string, contextKey: string, value: unknown, contentHash?: string | undefined) => void;
+  readonly reuseValue: (compId: string, nodeId: string, contextKey: string, contentHash?: string | undefined) => FlarexValue | null;
 }
+
+/**
+ * DEBT-022 — the CONTENT identity a recorded value was produced under, keyed exactly like the record
+ * it shadows (`${scopedNodeId} ${contextKey}`).
+ *
+ * WHY A SECOND MAP RATHER THAN A FIELD ON THE RECORD. The record store is kernel-owned
+ * (`evaluation-records.ts`) and its `value` is deliberately `unknown` — "the kernel owns the lifetime
+ * and the identity, the caller owns the meaning". Wrapping the value to carry a hash would change what
+ * every other reader of `record.value` sees, including `texturesAlive`'s draw walk. A side map keyed
+ * identically costs one string key per live record and leaves the kernel's contract alone.
+ *
+ * Bounded by the same eviction: entries are dropped when their node's record is overwritten, and the
+ * whole map is cleared on reset. It cannot outgrow `MAX_EVALUATION_RECORDS` by more than the records
+ * that have since been evicted kernel-side, which the `staleHashKeys` reading below makes visible.
+ */
+const contentHashes = new Map<string, string>();
+const hashKey = (scopedNodeId: string, contextKey: string): string => `${scopedNodeId} ${contextKey}`;
 
 export interface BeginFrameInputs {
   readonly comps: Readonly<Record<string, FlarexComp>> | undefined;
@@ -242,11 +269,35 @@ export function beginIncrementalFrame(inputs: BeginFrameInputs): IncrementalChan
   state.started = true;
 
   return {
-    onEvaluated: (compId, nodeId, contextKey2, value) => {
+    onEvaluated: (compId, nodeId, contextKey2, value, contentHash) => {
       stats.recorded += 1;
-      noteEvaluation(defaultSession, scoped(compId, nodeId), contextKey2, value, inputs.frameId, inputs.nowMs);
+      const id = scoped(compId, nodeId);
+      noteEvaluation(defaultSession, id, contextKey2, value, inputs.frameId, inputs.nowMs);
+      // Record the content identity this value was produced under. `undefined` (a node the compiler
+      // could not hash) DELETES rather than stores, so a later hashed evaluation of the same node is a
+      // mismatch and re-evaluates — the safe direction, per `reuseValue`'s own asymmetry rule.
+      if (contentHash === undefined) contentHashes.delete(hashKey(id, contextKey2));
+      else contentHashes.set(hashKey(id, contextKey2), contentHash);
     },
-    reuseValue: (compId, nodeId, contextKey2) => {
+    reuseValue: (compId, nodeId, contextKey2, contentHash) => {
+      /**
+       * DEBT-022 GATE, ahead of the axis machinery and deliberately so.
+       *
+       * The axes below cannot see a keyframe edit: `signatureOf` reads `type | enabled | RAW params`
+       * and a Flarex keyframe lives in `comp.animations`. `contentHash` is ADR-009's `NodeContentHash`
+       * computed by THIS frame's compile at ITS comp-local time, so it folds every param resolved at t
+       * (R1) and every upstream hash (R3) — which makes both a keyframe edit and a rewire visible here
+       * without the host knowing anything about either.
+       *
+       * MISMATCH ⇒ EVALUATE, and so does ABSENT-on-either-side. A wrong `null` costs work; a wrong
+       * reuse is a stale pixel, and that asymmetry is the compiler's stated contract for this channel.
+       */
+      const previous = contentHashes.get(hashKey(scoped(compId, nodeId), contextKey2));
+      if (contentHash === undefined || previous === undefined || previous !== contentHash) {
+        if (previous !== undefined && contentHash !== undefined) stats.contentHashMisses += 1;
+        stats.evaluated += 1;
+        return null;
+      }
       const decision = reuseDecision(defaultSession, {
         nodeId: scoped(compId, nodeId),
         contextKey: contextKey2,
@@ -289,6 +340,7 @@ export function abortIncrementalFrame(): void {
 
 /** Test/teardown, and the flag flipping off mid-session. */
 export function resetIncrementalEvaluation(): void {
+  contentHashes.clear();
   state.signatures.clear();
   state.contextKey = "";
   state.frameTime = Number.NaN;

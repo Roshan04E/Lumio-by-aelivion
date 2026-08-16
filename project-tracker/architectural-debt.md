@@ -3639,7 +3639,11 @@ mechanism that produced two bugs in two slices is still in place and still silen
 
 ### DEBT-021 — the un-retimed pending soft-degrade regressed, and its guard is a known-flaky fixture's only backstop
 
-- Status: **open**, unowned, and NOT attributable to the text programme
+- Status: **RESOLVED 2026-08-16 — there was no regression.** The behaviour was DELETED ON PURPOSE by
+  `366860c` (S7.2 5/n) under I-27, and the assertion outlived it. Bisected; see the closing update at
+  the end of this entry, which also falsifies the `flarex-generators` inheritance below.
+- **Header updated 2026-08-16:** Status was "open, unowned, and NOT attributable to the text
+  programme". (`README.md`, "State fields vs. history.")
 - Registered: 2026-08-14, by the auditor, on a report from the ADR-023 S4b session
 - Symptom: `pnpm --filter @orreris/shared flarex:test` fails one assertion at HEAD —
 
@@ -3676,3 +3680,581 @@ mechanism that produced two bugs in two slices is still in place and still silen
   test that runs in seconds, so the bisect is cheap — which is the opposite of the usual situation
   here and is the reason to do it before the next full sweep rather than after a flaky failure sends
   someone hunting.
+
+**CLOSED 2026-08-16 — bisected. The guard did not break; the BEHAVIOUR was deleted, on purpose, and
+the assertion was left behind.**
+
+The instruction above was followed exactly and it was the right instruction: 8 arms, seconds each,
+grepping for the assertion by NAME rather than trusting the suite's exit code — necessary, because
+other assertions in the range fail for unrelated reasons and older commits predate this one, so an
+exit code would have mixed three different answers together.
+
+```
+first bad commit  366860c  refactor(kernel): S7.2 (5/n) — one coherence mechanism, and the
+                           fallback that hid the race is gone
+```
+
+That commit's own message says what it did: *"The host-clip substitution for `pending`. I-27 forbids
+resolving scarcity by showing ANOTHER source's content, and only `pending` does that. Now refused
+unconditionally; `allowHostSubstitution` is gone from the compiler's surface and from
+`build-scene-draws`, so no caller can ask for the old behaviour."* The neighbouring cases still pass
+because they were never in scope — `null` means "no loader owns this node", a different answer that
+correctly keeps the Phase-1 degrade.
+
+So the assertion had been asserting the exact thing an accepted invariant forbids, for twelve days,
+and reading as a regression the whole time. **Repaired by INVERTING it to S7.2's own claim** ("an
+UN-retimed unready loader is refused too — nobody can opt out of I-27"), which is what conformance
+note I-34 in that commit already says in prose. `flarex:test` is now green in full.
+
+**THE `flarex-generators` INHERITANCE IS FALSIFIED, and that half mattered more than the assertion.**
+This entry argued, from `flarex.test.ts`'s own comment, that the guard was that fixture's parity
+backstop and that its breakage PREDICTED pixel failures there. The prediction appeared to land — the
+fixture began failing reproducibly at 0.691%. It was tested rather than believed:
+
+| arm | `flarex-generators` |
+| --- | --- |
+| `15d615b`, parent of the deletion | 0.000% |
+| `366860c`, the deletion itself | 0.000% |
+
+The deletion moves that fixture by nothing. A separate 9-arm bisect puts the pixel failure at
+`fe4f77c` (2026-08-15, the pinned-font await), three weeks later and in a different programme —
+`project-tracker/infrastructure.md` v8. **Two symptoms, two causes, and the plausible story joining
+them was wrong.** Worth keeping as a pattern: a comment recording *why* an assertion was added is
+evidence about the past, not a live causal claim, and this one had already been made obsolete by a
+commit nobody connected to it.
+
+### DEBT-022 — a weaker cache key sits ABOVE the correct one and short-circuits it, so a keyframe edit does not invalidate
+
+- Status: **RETIRED 2026-08-16** — fixed the same day it was registered, by founder decision to repair
+  it before building 3b. See the closing update at the end of this entry.
+- Registered: 2026-08-16
+- **Header updated 2026-08-16:** Status was "open — USER-VISIBLE DEFECT, found 2026-08-16 closing out
+  ADR-021 step 3a" — see the closing update below. (`README.md`, "State fields vs. history.")
+- Reason: `incremental-evaluation.ts` decides node reuse from a hand-rolled per-node signature,
+  `signatureOf` = `type | enabled | RAW params` (`:116`). A Flarex node's keyframes do **not** live in
+  `node.params` — they live in `comp.animations` — and nothing else marks the node. With the playhead
+  stationary the node is clean on content, context, time and source, so `reuseValue` returns the
+  previous value and `compile-flarex.ts:1394` skips the node's **entire upstream subtree** (that call is
+  "placed BEFORE lowering", deliberately, which is what makes the skip worth having and also what makes
+  this defect total rather than partial). The viewer keeps the previous picture.
+- **The correct key already exists one layer down and is never consulted.** ADR-009's
+  `NodeContentHash` resolves every param to its value at `t` (R1) — so it *does* see a keyframe edit —
+  and `SceneCompositor.contentCacheKey` keys the content-addressed cache on exactly
+  `(ContractVersion, ContextVersion, NodeContentHash, dependencyVersions)`. That is I-P7's key, correct
+  and shipped. It cannot help here because the weaker check runs first and returns before reaching it.
+  **This is the defect's shape and the reason it is registered as a class, not a typo: a cache whose key
+  is right can be defeated by a cheaper guard placed in front of it.**
+- Invariant affected: ADR-021 **I-P7** in substance (the node-output cache's identity), and the same
+  class as retired **DEBT-016** — "a cache key omitted an input the cached value depended on". DEBT-016
+  was one cache keyed on `(layerId, comp.version, renderScale)`; this one omits `comp.animations`.
+- Owner: unassigned
+- Expiry condition: an edit that changes what a param RESOLVES TO at the current time invalidates the
+  node, for every route the editor can write one — asserted by `flarex:incremental-gate`, which must be
+  green in both directions (the unchanged-comp counterweight must keep REUSING)
+- Planned slice: none accepted. The obvious repair is to make the signature fold what
+  `NodeContentHash` folds — params resolved at `t` — and `compile-flarex.ts:570` already computes
+  `computeFlarexContentHashes(comp, ctx.timeSeconds)` on every compile, so the value exists; the cost
+  question is that `beginIncrementalFrame` runs BEFORE the compile and would either recompute the
+  hashes or need them threaded to it. A cheaper stopgap is to fold `comp.version` (documented as "THE
+  dirty/invalidation key") into the signature, at the price of invalidating every node in a comp on
+  any edit — which would drop the param-drag reuse measured below to 0%. **Neither is chosen here.**
+- Tracking issue: —
+- Detection: any reuse/skip guard whose key is assembled by hand rather than taken from
+  `computeFlarexContentHashes`. Concretely: a `signatureOf`-style string built from `node.params` while
+  the value being cached depends on `comp.animations`.
+
+**Reproduced through the PRODUCT'S OWN WRITE PATH, not a simulation of it.**
+`applyNodeParamValueAtTime`'s documented four-way rule says that for an ALREADY ANIMATED param it
+updates or inserts a keyframe and "never touch[es] the base". `flarex:incremental-gate` asserts exactly
+that and then asks the mechanism:
+
+```
+PASS  BASELINE: an unchanged comp at an unchanged time REUSES     <- the counterweight
+PASS  param drag invalidates
+PASS  rewire invalidates
+PASS  source change invalidates a downstream node
+FAIL  KEYFRAME VALUE edit invalidates
+FAIL  KEYFRAME MOVE invalidates
+FAIL  KEYFRAME DELETE invalidates
+PASS  editor's write path leaves node.params untouched for an animated param   -- 0 -> 0
+FAIL  SLIDER DRAG on an ANIMATED param invalidates
+```
+
+The baseline check is load-bearing: without it a mechanism that reported "dirty" unconditionally would
+pass every other line and prove nothing.
+
+**User-visible statement of it:** *with the playhead parked, drag a slider on a Flarex node param that
+already has keyframes — the value is written, and the viewer does not change.* It recovers as soon as
+anything else invalidates (move the playhead, touch a non-animated param, a source decodes a frame),
+which is why it would read as flakiness rather than as a stuck cache.
+
+**Why it was not found earlier, recorded so the next audit starts from the right place.** Every gate
+that covers this area covers a *different* cache. `flarex:cache-gate` asserts warm-vs-cold parity for
+the content-addressed materialization cache — the one whose key is correct — and it is a SEQUENCE gate
+over frames at MOVING time, where the time axis dirties everything anyway and this defect cannot
+reproduce. The stationary playhead is the only regime it appears in, and no gate held it still.
+
+
+**FIXED AND ACCEPTED 2026-08-16 — the hash is THREADED, not recomputed, and the decision is a
+correctness one that a cost measurement could not have made.**
+
+The repair: `compileFlarexComp` already computes every node's `NodeContentHash` on every compile
+(`compile-flarex.ts:570`, `computeFlarexContentHashes(comp, ctx.timeSeconds, …)`), and now hands it to
+the host alongside the question — `reuseValue(nodeId, contextKey, contentHash)` and
+`onEvaluated(nodeId, contextKey, value, contentHash)`. `incremental-evaluation.ts` stores the hash a
+value was produced under and refuses reuse when it moves, **ahead of** the axis machinery. Mismatch OR
+absent-on-either-side ⇒ evaluate, which is the compiler's own stated asymmetry for this channel ("the
+failure mode of a wrong `null` is wasted work and the failure mode of a wrong value is a stale pixel").
+
+**Why THREAD rather than RECOMPUTE, and it is not the cost.** `build-scene-draws.ts` calls the compiler
+with `timeSeconds: Math.max(0, t - layer.startSeconds)` — comp-local time, **different per referencing
+layer** — while `beginIncrementalFrame` knows only the timeline `t`. A host-side recompute would sample
+the animation curve at the WRONG time for any Flarex clip that does not start at 0, and would therefore
+miss exactly the keyframe edits this entry is about. It would also be a second full hash pass on top of
+the one the compile already runs; priced on the real captured graph for the record:
+
+| nodes | one hash pass | share of a 33.3 ms frame |
+|---|---|---|
+| 61 | 0.999 ms | 3.0% |
+| 122 | 1.595 ms | 4.8% |
+| 244 | 3.159 ms | 9.5% |
+
+Threading adds no hashing at all — one `Map.get` per node per compile — and `f?.(args)` short-circuits,
+so a caller that supplies no channels (export, worker, fixtures) does not even evaluate the lookup.
+**Export output is byte-identical by construction**, which is why no pixel gate was run for it.
+
+**Acceptance: `flarex:incremental-gate` is GREEN, 9/9**, including the counterweight (an unchanged comp
+at an unchanged time still REUSES) — without which a repair that simply always invalidated would pass
+every other line. The three keyframe classes and the slider-drag-on-an-animated-param case all now
+invalidate.
+
+**The cost of the repair, stated as a number rather than a hope.** Re-running `flarex:reuse-measure`
+over the same captured 61-node graph, before → after:
+
+| edit | before | after |
+|---|---|---|
+| none (counterweight) | 100.0% | **100.0%** |
+| param drag @ HEAD source | 75.4% | **75.4%** |
+| param drag @ TAIL source | 91.8% | **91.8%** |
+| rewire one edge | 78.7% | **78.7%** |
+| source change | 0.0% | **0.0%** |
+| slider drag on an ANIMATED param | 100.0% *(stale)* | **75.4%** |
+
+**No edit class lost reuse.** The only row that moved is the one that was wrong, and it moved to
+exactly the figure its non-animated twin already had — the same node, the same closure — which is the
+result that says the fix is precise rather than merely conservative. This is the outcome the rejected
+stopgap could not have produced: folding `comp.version` would have taken every row to 0%.
+
+Regression surface checked: `kernel:conform` green (including **I-15**, "the lowering layer owns no
+clock, no kernel dependency and no module state" — the invariant a new compiler out-channel parameter
+could plausibly have broken), and `flarex:test` fails exactly one assertion, the pre-existing
+**DEBT-021** one, verified by stashing this change and re-running at the merge base to get the
+identical single failure.
+
+
+---
+
+### DEBT-023 — `mediaEpoch` is a global SUM, so ANY decode dirties EVERY MediaIn
+
+**Registered 2026-08-16, deliberately NOT built** (founder instruction, during ADR-021 3b).
+
+**Status:** open. **Expiry:** when the ADR-021 seam gives each source its own identity, or sooner if a
+live reuse rate above zero becomes load-bearing for a performance claim.
+
+The incremental evaluator's `source` axis is driven by `mediaEpoch`, a single number summed over every
+media-pool content version. One frame arriving on one source moves the sum, which marks the axis
+dirty, which dirties every `mediaIn`, which propagates through the merge chain to the whole graph.
+
+**What it costs, measured** (`flarex:reuse-measure`, 61-node/12-source comp on real footage): live
+steady-state reuse is **0** — not because the mechanism fails, but because on a video comp the only
+thing that WAKES the compositor is a decode, and a decode invalidates globally. Every non-zero figure
+in that harness's table is an EDIT-triggered recomposite. So the node-output cache's real-world value
+today is confined to editing, exactly as ADR-021 §3.2(c) says, and this is the reason.
+
+**The fix is per-source epochs** — a decode on source A dirties the `mediaIn` nodes bound to A and
+nothing else. It is the only change that would make the live reuse rate non-zero.
+
+**Why it is registered rather than done.** It is a behaviour change to shipped ADR-012 code with its
+own risk, and it is not on the critical path of anything currently claimed: ADR-021 3b's win is
+scrub-back and loop, which is a FRAME cache and independent of this axis. Doing it opportunistically
+inside a cache commit would also make any resulting stale-picture report ambiguous between two layers
+— the precise mistake DEBT-022 was fixed ahead of 3b to avoid.
+
+**Do not fix this by exempting `mediaIn` from the source axis.** That is the DEBT-009 shape (proving
+liveness by a signal the consumer never emits) wearing the opposite sign, and it would trade a
+conservative invalidation for a stale one.
+
+---
+
+### DEBT-024 — ADR-021 3b's host wiring is UNVERIFIED, and every field reading taken so far is VOID
+
+**RESOLVED 2026-08-16** — the wiring is verified and the default is **ON**; see the closing update at
+the end of this entry. The reasoning trail below is kept in full, because two of its three "findings"
+were instrument error and the sequence of how that was established is the useful part.
+
+~~**Open 2026-08-16.** The 3b host wiring ships **DEFAULT OFF** (`getFrameCacheEnabled()` returns false;
+`?frameCache=1` opts in). **Expiry:** when `flarex:frame-cache-field` returns a non-VOID verdict on a
+machine with free disk.~~
+
+**Not in doubt: the MECHANISM.** `flarex:frame-cache-gate` is green on every arm and provably
+falsifiable — `FRAME_CACHE_SABOTAGE=drop-t` gives 16 failures, `drop-graph` 2. That gate hosts its own
+experiment, has no load-to-load axis, and writes nothing large. Nothing below touches it.
+
+**VOID, AND NOT TO BE CITED AS FACTS ABOUT THE RENDERER.** Every `flarex:frame-cache-field` reading
+was taken while C: ran down to **zero bytes free** (DEBT-025: 195.8 GB of leaked browser profiles).
+Specifically void, and *not* to be repeated as findings:
+- run 1's apparent **stale serve**;
+- the cross-load noise floor of **0-to-6-of-6**;
+- the same-load **2-of-6** bypass disagreement;
+- and the conclusion drawn from it, that **I-P8 does not hold in the live editor**.
+
+**Why these are facts about a machine, not a renderer.** A full disk does not announce itself. Chrome
+cannot write its cache, a screenshot returns partial or fails, a decoder fails — and what the harness
+observes is *the picture at a fixed `t` did not reproduce*. That is indistinguishable by inspection
+from genuine renderer nondeterminism, which is exactly the conclusion that was nearly recorded here as
+established. The moment the condition became visible (a heredoc failing with "No space left on
+device") was **not** when it began; it had been corrupting runs silently for an unknown stretch before
+that, so no reading in the window can be rescued by arguing it "looked fine".
+
+**What survives, and it is not a measurement.** The instrument REDESIGN stands on its own merits and
+is not in question: runtime bypass via `__rfFrameCacheBypass`, five sweeps inside a single load over
+warmed decoders, and a noise floor treated as a **precondition that VOIDs the run** rather than a
+quantity to subtract. Re-run that instrument; do not rebuild it.
+
+**RE-RUN ON A CLEAN MACHINE, 2026-08-16 (238 GB free). The disk was necessary but not sufficient:
+the probe had TWO defects of its own hiding underneath it, and both are now fixed.**
+
+1. **The stops sampled past the end of the composition.** Fixed fractions `[0.12 … 0.42]` assumed the
+   ruler's span matched the comp's; the ruler ran ~70s wide over a ~22s comp. A click past the end is
+   **ignored, not clamped** (measured: `t(0.92)` read back 0, the initial value), so the playhead simply
+   stayed where the previous stop left it and four of six stops re-measured ONE frame. **That single
+   defect produced both earlier "findings"** — the 4-position stale serve and the 3-position unstable
+   oracle were each confined entirely to the dead stops, while the two in-range stops agreed perfectly
+   across every sweep of both runs. The probe now binary-searches for the real end and **VOIDs unless
+   the stops land on distinct playhead times**.
+2. **The seed clip was selected to be static.** `defaultClipPath` takes the *smallest* mp4 ≥20s — the
+   lowest-bitrate, least-moving file present. The first clean run VOIDed on the probe's own
+   one-distinct-picture guard. Use `PROBE_CLIP` with real motion.
+
+**What the fixed instrument says.** With both corrected, the good runs are unambiguous: **6 distinct
+pictures at 6 distinct times, `attributable = 0`, 16/17 of 17 frames served from cache and every one
+pixel-identical to a fresh render.** That is the first real evidence the shipped host's key is
+COMPLETE.
+
+**But the oracle still does not reproduce reliably, and a longer settle no longer buys anything:**
+
+| `FIELD_SETTLE_MS` | noise floor per run (of 6) |
+| --- | --- |
+| 900 | 2, 3 |
+| 2500 | 1, 1, 2 |
+| 6000 | 2, 1 (a third run died at browser launch) |
+
+900 → 2500 helps; **2500 → 6000 does not.** It plateaus at 1–2 of 6 unstable positions, which is the
+**NONDETERMINISTIC** branch of the fork, not the converging one. The settle predicate being too eager
+is real and worth fixing, but it is not the whole story: a residual irreproducibility survives any
+wait tested.
+
+**So I-P8 is now a genuine open question about the media path** — properly isolated at last from the
+disk (fixed) and from instrument error (two defects found and fixed). It is not established as a
+renderer defect; it is established that a re-render oracle cannot currently certify this path to 3/3.
+
+**KEEP THE DEFAULT OFF.** Two of three clean runs passing is not the bar for flipping a default that
+decides whether the editor shows a stale frame. The remaining work is to make the oracle deterministic
+— or to find an oracle that does not depend on re-rendering — not to re-run this one hoping for three.
+
+**CLOSED 2026-08-16 — DEFAULT ON, by SPLITTING the question rather than by re-running the same one.**
+
+The paragraph above asked for a deterministic oracle and then looked for it in the wrong place: in a
+longer settle over live footage. The two questions tangled together here are not one question.
+
+- **Is the host's KEY complete?** That is the cache's question and the only one that can decide the
+  default.
+- **Does the picture at a fixed `t` reproduce over the LIVE MEDIA PATH?** That is a property of decode
+  and settle, it is real, and it is **not** a frame-cache defect. Registered as **DEBT-027**.
+
+A Flarex comp is eligible because the **compiler** stamps a content token — it does not need a MediaIn
+to be eligible. So the first question can be asked on content that has no decode in it at all. New
+fixture (`FIELD_FIXTURE=deterministic`, `buildDeterministicFlarexFixture`): the seeded video clip is
+**deleted**, six SHAPE clips are tiled 3s apart along the timeline, each wrapped in its own Flarex comp,
+and each stop is a different shape. No decode anywhere in the frame, so `storable`
+(`staleIds`/`notReadyIds` both empty) is trivially true and the oracle is sound.
+
+**Result, 4 runs (3 + 1 confirming), every one green and every hash identical across runs AND across
+page loads:**
+
+```
+eligible=true · A-FILL hits=1 · A-SERVE hits=6 misses=0 · stores=8 declined=0 entries=8 · 63.3MB
+attributable 0 [] · noise floor 0 []      (budget 0 — see below)
+6 distinct pictures at 6 exact times: 1.0s 4.0s 7.0s 10.0s 13.0s 16.0s
+```
+
+**The noise budget in this arm is ZERO, not 1.** Nothing decodes, so there is no mechanism by which a
+bypassed re-render could differ from the previous one; a single unstable position would be an
+unexplained result, not tolerable noise. The media arm keeps a budget of 1 because its instability is
+the question it is asking.
+
+**And the probe was made to prove it could FAIL, from the run's own data.** "A equals B at every
+position" is also what an instrument that cannot tell frames apart reports. So the comparison is
+re-run SHIFTED — `A-SERVE[i]` against `B[i+1]`, the frame a key that lost `t` would have collided
+with — and every position must disagree. All 5 comparisons disagree. A wrong-`t` serve would be seen.
+
+**Two defects the fixture found on its way in, both worth the entry on their own.**
+
+1. **The shape dropdown's `onChange` ADDS the layer** (`TimelineStrip.tsx:3176`); it does not merely
+   arm the button beside it. Clicking both put a second, un-comped clip at every start time, and a
+   frame is cacheable only if EVERY draw carries a token — so the twin made every frame **ineligible**
+   and the first run reported "the 3b wiring is inert in the product". A true statement about a
+   fixture with a stowaway in it. The guard was `after > before`; it is now `after === before + 1`.
+2. **`eligible: false` was unactionable observability.** It is true of every uncacheable frame there
+   is and cannot tell a plain clip (expected — step 4's job) from a Flarex comp that silently lowered
+   to nothing (a defect). `__rfFrameCache` now also reports `draws` and `blockedBy` (the first
+   token-less draw's `debugLayerId`), which is what turned the run above from a dead end into a
+   one-line diagnosis.
+
+**What the default is claimed for, narrowly: scrub-back and loop over ground already rendered.** Not
+playback — ADR-021 §7 has not moved, and a first pass over new ground is all misses. And only where
+every draw carries a content token, which today means a Flarex comp; step 4 is where the timeline
+earns the same identity. Escape hatch `?frameCache=0`.
+
+Green at the flip: `flarex:frame-cache-gate` all arms, `flarex:frame-cache-field` 4/4, web + worker
+typecheck, `render:compare:pixels`.
+
+---
+
+### DEBT-027 — the picture at a fixed `t` does not reproduce over the live media path
+
+**Open 2026-08-16.** **Status:** **CAUSE NAMED the same day — it is DECODER SUPPLY, not renderer
+nondeterminism.** See the update at the end of this entry. Still not being chased from here.
+**Expiry:** when a `FIELD_FIXTURE=media` run reaches a zero noise floor three times running.
+**Header updated 2026-08-16:** Status was "registered, deliberately NOT being chased", and the Expiry
+clause "or when the cause is named" is now discharged. (`README.md`, "State fields vs. history.")
+
+**The finding.** `flarex:frame-cache-field` renders the same six playhead positions twice in one page
+load, with the frame cache bypassed on both sweeps, over a Flarex comp on real footage. Two such
+sweeps should be identical. They are not: **1–2 of 6 positions differ**, and a longer settle does not
+converge:
+
+| `FIELD_SETTLE_MS` | unstable positions per run (of 6) |
+| --- | --- |
+| 900 | 2, 3 |
+| 2500 | 1, 1, 2 |
+| 6000 | 2, 1 (a third run died at browser launch) |
+
+900 → 2500 helps. **2500 → 6000 does not.** That is the *nondeterministic* branch, not the
+*converging* one: the settle predicate being too eager is real, but a residual survives every wait
+tested.
+
+**These numbers are trustworthy in a way the earlier ones were not**, and that is why this is a
+finding rather than another void. Taken with 238 GB free (DEBT-025 fixed), after the probe's two own
+defects were found and fixed (stops past the end of the comp; a seed clip selected for being static),
+and with the ruler calibrated at runtime plus a hard VOID unless the stops land on distinct times.
+
+**Why it is NOT a frame-cache defect, and must not gate one.** The same host, the same key and the
+same compositor are exercised by `FIELD_FIXTURE=deterministic` — six shape clips, no decode — and
+there the identical instrument returns a **zero** noise floor, four runs running, with hashes stable
+across page loads. The variable that moves is the media path, not the cache. What this costs is an
+ORACLE: over live footage a re-render cannot certify a frame, so questions of this shape have to be
+asked on deterministic content until it is fixed.
+
+**Where to start when it is picked up.** `settledRef` (`ScenePreviewCanvas.tsx`) is
+`staleIds.length === 0 && notReadyIds.length === 0` — the settle predicate the 900 → 2500 improvement
+implicates. That it improves but does not converge says there are (at least) two terms: one the
+predicate can see and one it cannot. The obvious suspect for the second is a decode whose output
+differs between two seeks to the same `t` (GOP position, reset timing — the ~34 ms reset cost of
+ADR-021 §3.3 and OQ1 is the same subsystem). **Do not chase it from the frame-cache side.**
+
+**UPDATE 2026-08-16 — the cause is named, and it took a fact rather than a longer wait.**
+
+The suspicion above was right about the subsystem and wrong about the shape. It is not "a decode whose
+output differs between two seeks to the same `t`". **It is a decoder that stops supplying altogether
+partway through a sweep**, which is a coarser and much more visible failure than the one being looked
+for — and it was invisible only because nothing downstream of the grade published WHICH MOMENT the
+pixels were of. ADR-021 4b's served-time carry (`SceneLayerDraw.servedTime`, published per draw as
+`__rfFrameCache.served`) makes the probe print it, and the two bypassed sweeps separate immediately:
+
+```
+stop    B (fresh)                    C (fresh)
+0.248   media_1@5.0000               media_1@4.9333
+0.387   media_1@7.8000               media_1@4.9333
+0.526   media_1@10.6000              media_1@4.9333
+0.665   media_1@13.3000              media_1@-          <- no served time at all
+0.804   media_1@16.1000              media_1@-
+```
+
+Two readings fall out, and the second is the more useful one:
+
+1. **The renderer is exonerated.** In sweep B the served moment tracks the request EXACTLY at every
+   stop — 5.0000 for t=5.000, 7.8000 for t=7.800, 16.1000 for t=16.100. Given its input the renderer
+   is deterministic and on time. Sweep C's pictures differ because its INPUT differed: the source
+   pinned at 4.9333 and then lost its frame entirely. Two renders of different material were never
+   going to agree, and every settle-length in the table above was waiting for something that had
+   already stopped arriving.
+2. **`served == requested`, to four decimals, whenever supply works.** That is the fact ADR-021 4b's
+   media content token needs — a token folding `servedTime` would HIT across two visits to one `t`,
+   rather than being a term that can never repeat. 4b is viable in principle and still not
+   acceptable, because its gate would have to run on this fixture and this fixture voids.
+
+**So the remaining question is narrower and belongs to the decoder**: what makes a source stop
+supplying during a repeated scrub sweep in the same page load, and why does it report `-` (no served
+time) rather than an error. `awaitReason` / `elementTime` / `wcBusy` are already on the snapshot and
+already published to `__rfSourceMap`; the next session on this can read them at the failing stop
+without building anything. **Still not the frame cache's, and still not to be chased from that side.**
+
+---
+
+### DEBT-025 — every headless browser launch leaks a Chrome profile directory, and nothing reaps them
+
+**Found 2026-08-16, while a browser gate failed for a reason that had nothing to do with the gate.**
+
+**Status:** open. **Expiry:** when `browser-preflight.ts` reaps stale profile directories as well as
+stale processes, or the launcher passes a user-data-dir it cleans up.
+
+**The measurement.** `%LOCALAPPDATA%\Temp` had grown to **239.7 GB across 13,843 directories** and the
+disk reached **0 bytes free on C:**. Of those, **13,813 are `puppeteer_dev_chrome_profile-*`** —
+oldest 2026-08-09 09:18, newest 2026-08-16 11:24 (i.e. still being created during this session),
+**totalling a measured 195.8 GB** — essentially the entire tail, at ~14 MB each. A further 16.5 GB sits in
+`debt019-profile-120s`, itself a leftover Chrome user-data-dir from a finished investigation, and 24
+`playwright_chromiumdev_profile-*` dirs (0.25 GB) were reaped by hand during this session.
+
+**Why it matters beyond disk.** A full disk does not fail a gate honestly. It **silently truncated a
+probe's output mid-write** (`grep: write error`; one full run lost) while every other part of the run
+looked normal. Browser gates write profiles, screenshots and vite caches continuously, so a run near
+zero free space produces numbers that look like measurements and are not. Generations 3–4 of
+`flarex:frame-cache-field` were taken in that state and are marked for re-taking in DEBT-024.
+
+**This is the disk half of a hazard the repo already knows.** `browser-preflight.ts` exists because
+leftover browser PROCESSES corrupt gates, and the memory note about stray Chrome trees says the same.
+Nobody was watching the directories those processes leave behind. One launch leaks one profile; a week
+of gate runs leaks fourteen thousand.
+
+**The fix has two halves. Half one SHIPPED 2026-08-16; half two is DEBT-026.**
+1. **DONE.** `reapStaleBrowserProfiles` in `browser-preflight.ts` deletes `puppeteer_dev_chrome_profile-*`
+   / `playwright_*` dirs older than 2h (`GATE_PROFILE_REAP_HOURS`), running before `assertFreeDisk`
+   measures, so the refusal is never triggered by garbage the gates themselves produce. Age is the only
+   safety guard available for a directory and it is sufficient: a live run's profile is minutes old.
+2. **DEBT-026.** Have the renderer share one browser rather than opening one per API call, so the
+   garbage is never produced. That is the durable fix; the reaper only makes it non-urgent.
+
+**Reaped by hand 2026-08-16 (founder go-ahead):** 13,813 dirs older than 2h plus
+`debt019-profile-120s`, leaving the 190 younger than 2h alone — **8.63 GB → 238.45 GB free**.
+
+**Add free disk space to the measurement preconditions.** Alongside "prove the subsystem ran", "prove
+the flag applied" and "prove the machine is clean", there is now "prove the machine can still write".
+
+---
+
+### DEBT-026 — the Remotion renderer opens a browser per call, and every one of them leaks its profile
+
+**Open 2026-08-16.** **Expiry:** when `remotion-renderer.ts` shares one browser across a render, and
+`%TEMP%` stops growing by a profile directory per Remotion API call.
+
+**The measurement.** 13,995 `puppeteer_dev_chrome_profile-*` directories, **195.8 GB**, oldest 7 days,
+which filled C: to zero bytes free and voided a night of readings (DEBT-025, DEBT-024). That count is
+not an incident. It is approximately *every browser this repo has ever launched*.
+
+**The cause.** `remotion-renderer.ts` calls `selectComposition`, `renderMedia` and `renderStill`
+without ever passing a shared `puppeteerInstance`, so **each call opens and closes its own browser** —
+two or more per fixture, ~23 fixtures, every gate run. Our code does close them; what fails is
+puppeteer's cleanup of its own temp profile, which on Windows cannot remove a tree Chrome still holds
+handles under, and fails silently. The directory name is puppeteer's default, which is what identifies
+Remotion rather than our Playwright gates as the source.
+
+**Why it is not urgent, and what makes it worth doing anyway.** `assertQuietBrowserMachine` now reaps
+profile dirs older than 2h before it measures free space, so the disk no longer fills. The reason to
+fix the source is speed, not space: a browser launch dominates gate startup (the whole basis of the
+gate-cost-discipline rule in CLAUDE.md), and this launches one per API call rather than one per run.
+Sharing an instance should measurably cut every Remotion-driven gate.
+
+**Why it needs a session rather than a patch.** `selectComposition` and `renderMedia` must then agree
+on browser lifetime, cancellation (`cancelSignal`) has to stay correct across a shared instance, and
+`chromiumOptions: { gl: "angle" }` — load-bearing for the in-composition WebGL2 colour engine — has to
+apply to the shared browser rather than per call. That is a render-correctness change, and it must be
+proven byte-neutral with `render:baseline` at zero tolerance, which per CLAUDE.md is the one claim that
+must never be batched with another.
+
+**Do NOT "fix" this by raising the reap frequency.** The reaper is the collector, not the cure; it
+exists so this item can wait for a proper session.
+
+### DEBT-028 — `render:baseline` was cited as T-9 evidence, and it cannot be: it never runs the other renderer
+
+- Status: **open**, unowned. Registered 2026-08-16, no fix proposed here by design (see below).
+- **Renumbered from DEBT-022 to DEBT-028 on merge (2026-08-16).** This entry was drafted independently
+  on `method-3-gpu-compositor` while `artifact/adr021-step3` registered an unrelated DEBT-022 through
+  DEBT-027 of its own ("a weaker cache key sits ABOVE the correct one and short-circuits it", retired
+  the same day). Two branches assigning the same number is now the expected shape, not a mistake — see
+  the tracker-convention addendum below.
+- Symptom: `fe4f77c` ("a pinned font waited on a signal it had no right to expect") adds
+  `await ensureOverlayFonts(layer, t, this.styleOptions)` inside `SceneTextRasterizer.rasterize()`
+  (`packages/shared/src/scene/scene-text-raster.ts`), a function consumed verbatim by both renderers.
+  Its commit message asserts **"One change in packages/shared serves both renderers (T-9)"** and cites
+  as evidence: `render:baseline 81/81 unchanged at zero tolerance versus 71457b8`. `render:baseline`
+  renders the SAME renderer (Remotion) at two commits and diffs Remotion against itself — it never
+  invokes the web preview at all. It is structurally incapable of detecting the two renderers
+  disagreeing with EACH OTHER, which is exactly what T-9's obligation ("with a `render:compare:pixels`
+  fixture") exists to check. `render:compare:pixels` was not run before the claim was made.
+- The gap is not hypothetical. `flarex-generators` — a text-over-media fixture — measured a real,
+  non-zero divergence between the two renderers after this commit (~0.691% in the auditor's bisect).
+  `tmp/render-comparison/diff-flarex-generators.png` in this tree shows the differing pixels sitting
+  **exactly on the two text layers** ("FLAREX", "New Drop") and nowhere else in the frame — not on the
+  media rectangle, not on the background gradient. That shape is the discriminating fact: a general
+  renderer divergence would touch anything; a text-settling race touches only text.
+- Mechanism, established by reading the consumers, not by guessing:
+  - Remotion (`apps/worker/src/remotion/SceneStage.tsx`) always calls `rasterizer.ensure(...)` — fully
+    AWAITED, one raster in flight per layer, gated by the frame's own `delayRender`. The new
+    `ensureOverlayFonts` await simply makes that per-frame wait longer; Remotion's output is unaffected.
+  - The web preview's draw path (`buildSceneDraws` → `rasterizer.get(...)`, `build-scene-draws.ts:628`)
+    is fire-and-forget BY DESIGN — a cache miss returns the previous (possibly empty) raster while the
+    real one resolves in the background and repaints later via `onReady`. That was always true; it is
+    tolerable for a live, playing preview because the next rAF frame corrects it.
+  - Whether an unsettled text raster is allowed to reach the SCREEN — as opposed to a future frame — is
+    gated by `decideSceneReadiness` (`apps/web/src/playback/scene-readiness.ts:100`):
+    `const heldIds = inputs.playing ? inputs.notReadyIds : inputs.notReadyIds.filter(inputs.isMediaLayerId);`
+    While **paused**, only media-layer not-readiness holds the frame; text/shape not-readiness is
+    filtered out and composites immediately regardless. `PreviewFixturePage.tsx` — the page
+    `render:compare:pixels` screenshots — always mounts with `isPlaying={false}`. So text-raster
+    completion was never part of the capture-readiness contract on the preview side, paused or not.
+  - Before `fe4f77c`, this rarely bit a fixture that also had a media layer, because the media layer's
+    own decode/settle dwell time incidentally gave whatever ambient font-loading was already in flight
+    (CSS `@font-face`, an unrelated `document.fonts.load()` elsewhere on the page) time to land before
+    the harness's fixed capture wait (`document.fonts.ready` + a 250ms sleep, `render-pixel-comparison.ts:540-566`)
+    ran out. `fe4f77c` adds a NEW, explicit `fonts.load()` call inside the previously-unwaited `get()`
+    path — a genuinely new timing dependency that neither `decideSceneReadiness` nor the capture harness
+    was built to see.
+- **Which side moved: the web-preview capture, not Remotion.** Remotion's `ensure()` + `delayRender`
+  path fully absorbs the new await every frame and stays correct. The preview's `get()` path has no
+  readiness gate for text at all while paused, and the fix added a real thing for that gap to be blind
+  to. This is not a "both renderers drifted" bug — it is one renderer (export) doing the work correctly
+  and the other's CAPTURE INSTRUMENT never having promised to wait for it.
+- **Related — DEBT-021, and it matters here, but read the correction below before trusting the
+  "CURRENTLY regressed" clause.** DEBT-021 was the standing backstop for `flarex-generators`' *other*
+  known readiness race (0.000% → 86.895%, an un-retimed MediaIn soft-degrade timing gap). At the time
+  this entry was drafted, DEBT-021's own guard assertion looked regressed with no cause established.
+  **That has since been resolved on the merged history: DEBT-021 was closed 2026-08-16 as "no
+  regression" — the behaviour was deleted on purpose under I-27 (`366860c`), and the assertion had
+  simply outlived it. DEBT-021's own closing update also bisected and FALSIFIED the inheritance this
+  paragraph originally warned about**: it tested `15d615b`/`366860c` directly and found `flarex-generators`
+  at 0.000% on both, i.e. the deleted soft-degrade moved that fixture by nothing. The 0.691% divergence
+  this entry (DEBT-028) is about has an independent cause — `fe4f77c`, three weeks later, per
+  `project-tracker/infrastructure.md` v8. **So DEBT-021 is not this entry's backstop, was never
+  attributable to it, and any earlier cross-reference implying the two share a mechanism was pointing
+  at a phantom.** They remain two distinct defects that happened to share a victim fixture; DEBT-021
+  is now closed and this one (DEBT-028) is still open.
+- **The rule, stated so the next commit doesn't repeat it:** a zero-tolerance `render:baseline` proves
+  a renderer is unchanged relative to ITSELF. It is not, and cannot be, evidence that two renderers
+  AGREE — that is a different comparison, against a different renderer, and only
+  `render:compare:pixels` performs it. A commit that touches shared draw code in `packages/shared` and
+  invokes T-9 must run `render:compare:pixels` (narrowed to the affected fixtures via `PIXEL_FIXTURES=`
+  is sufficient and cheap) before the claim stands. Citing `render:baseline` in its place is a category
+  error, not a lighter form of the same proof.
+- What is deliberately NOT established here: a fix. The auditor's brief for this round was to establish
+  which side moved before proposing anything, and that is what this entry does. Also not established:
+  the exact diff magnitude on an uncontended machine — this session's own `render:compare:pixels` run
+  was refused by `assertFreeMemory` (a parallel session held the machine below the 5 GB floor), so the
+  mechanism above is corroborated from the diff artifact already in the tree plus static reading of both
+  consumers, not from a fresh measurement. Re-running the narrowed gate
+  (`PIXEL_FIXTURES=flarex-generators`) on a quiet machine is the natural next step for whoever takes the
+  fix.
+- Expiry condition: `render:compare:pixels` (or an equivalent differential check) becomes a required
+  step — not merely available — for any commit touching `packages/shared`'s scene/text draw path and
+  claiming T-9; or `decideSceneReadiness`/the capture harness is extended to gate on text/shape
+  settlement so a paused capture cannot land mid-raster.

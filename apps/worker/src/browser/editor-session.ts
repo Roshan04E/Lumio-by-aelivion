@@ -519,6 +519,215 @@ export async function importAssets(page: Page, files: readonly string[]): Promis
 }
 
 /**
+ * The timeline's x↔time mapping, MEASURED rather than derived.
+ *
+ * Zoom, scroll and composition duration all move it, and no probe should reimplement that arithmetic —
+ * `seekBeforeCut` already learned this one subsystem along. Two ruler clicks, two `__rfClock` reads, and
+ * the slope between them is what the app is applying right now.
+ */
+export interface RulerCalibration {
+  readonly rulerY: number;
+  readonly xAt: number;
+  readonly tAt: number;
+  readonly pixelsPerSecond: number;
+}
+
+export async function calibrateRuler(page: Page): Promise<RulerCalibration | null> {
+  const geometry = await page.evaluate(() => {
+    const ruler = document.querySelector(".timeline-ruler");
+    if (!(ruler instanceof HTMLElement)) return null;
+    const r = ruler.getBoundingClientRect();
+    if (r.width < 120) return null;
+    return { y: r.top + r.height / 2, left: r.left, width: r.width };
+  });
+  if (!geometry) return null;
+
+  const readAt = async (x: number): Promise<number | null> => {
+    await page.mouse.click(x, geometry.y);
+    await page.waitForTimeout(250);
+    return page.evaluate(() => (window as unknown as { __rfClock?: { committed: number } }).__rfClock?.committed ?? null);
+  };
+
+  const xA = geometry.left + geometry.width * 0.15;
+  const xB = geometry.left + geometry.width * 0.35;
+  const tA = await readAt(xA);
+  const tB = await readAt(xB);
+  if (tA == null || tB == null || !(tB > tA)) return null;
+  return { rulerY: geometry.y, xAt: xA, tAt: tA, pixelsPerSecond: (xB - xA) / (tB - tA) };
+}
+
+/** Screen x for a playhead time, under a measured calibration. */
+export function rulerXForTime(cal: RulerCalibration, seconds: number): number {
+  return cal.xAt + (seconds - cal.tAt) * cal.pixelsPerSecond;
+}
+
+/**
+ * Park the playhead at a time and CONFIRM where it landed. Returns the committed time, or null if the
+ * click did not move it there — a scrub past the end of the composition is IGNORED, not clamped, so a
+ * caller that trusts the request rather than the read-back can sample one frame repeatedly and never
+ * know (measured 2026-08-16; it manufactured two "findings").
+ */
+export async function parkPlayhead(page: Page, cal: RulerCalibration, seconds: number, toleranceSeconds = 0.2): Promise<number | null> {
+  let landed: number | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const target = attempt === 0 ? seconds : seconds + (seconds - (landed ?? seconds));
+    await page.mouse.click(rulerXForTime(cal, target), cal.rulerY);
+    await page.waitForTimeout(250);
+    landed = await page.evaluate(() => (window as unknown as { __rfClock?: { committed: number } }).__rfClock?.committed ?? null);
+    if (landed == null) return null;
+    if (Math.abs(landed - seconds) <= toleranceSeconds) return landed;
+  }
+  return landed;
+}
+
+/** Delete every clip on the timeline. Returns how many remain — non-zero means the caller should VOID. */
+export async function clearTimelineClips(page: Page, maxDeletes = 24): Promise<number> {
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(600);
+  for (let i = 0; i < maxDeletes; i += 1) {
+    const clips = page.locator(".timeline-clip");
+    if ((await clips.count().catch(() => 0)) === 0) break;
+    await clips.first().click({ timeout: 5_000 }).catch(() => undefined);
+    await page.waitForTimeout(200);
+    await page.keyboard.press("Delete").catch(() => undefined);
+    await page.waitForTimeout(350);
+  }
+  return page.locator(".timeline-clip").count().catch(() => -1);
+}
+
+/** Which step of the deterministic fixture stopped, when one did. A boolean would name none of them. */
+export type DeterministicFixtureGate =
+  | "ok"
+  | "no-ruler"
+  | "clips-not-cleared"
+  | "shape-tool-missing"
+  | "shape-not-added"
+  | "playhead-not-parked"
+  | "comp-not-created";
+
+export interface DeterministicFixture {
+  readonly ok: boolean;
+  readonly gate: DeterministicFixtureGate;
+  readonly detail?: string | undefined;
+  /** Playhead times, in seconds, at which each shape clip is the whole picture. */
+  readonly stopSeconds: readonly number[];
+}
+
+/** Distinct shapes, so consecutive stops cannot possibly hash the same. Labels are the select's own. */
+const FIXTURE_SHAPES = ["Rectangle", "Ellipse", "Triangle", "Diamond", "Pentagon", "Line"] as const;
+
+/**
+ * A Flarex fixture with NO DECODE IN IT — N shape clips tiled along the timeline, each wrapped in its
+ * own Flarex comp.
+ *
+ * WHY THIS EXISTS, and it is the whole point of it. `addAssetSourceMediaIn` builds the fixture that
+ * answers "does the frame cache work over live footage", and that fixture cannot answer the question
+ * the cache is actually on trial for. A Flarex comp on live footage does not re-render byte-identically
+ * at a fixed `t` — measured, with disk free and the instrument's own defects fixed, at 1–2 unstable
+ * positions of 6 and NOT converging with a longer settle. So the ORACLE is unreliable there, and an
+ * unreliable oracle can neither convict the cache nor acquit it.
+ *
+ * Those are two questions, and only one of them is the cache's. A Flarex comp is eligible because the
+ * COMPILER stamps a content token; it does not need a MediaIn to be eligible. A shape layer rasterizes
+ * deterministically, so:
+ *
+ *   · the picture at a fixed `t` is genuinely reproducible → the oracle is sound;
+ *   · `storable` (`staleIds`/`notReadyIds` both empty) is trivially true → no settle race;
+ *   · every stop is a DIFFERENT shape → a frame served for the wrong `t` is visible, not silent.
+ *
+ * The last one is not decoration. A frame cache's characteristic failure is serving the right-looking
+ * picture for the wrong moment, and a fixture whose frames all look alike is trivially "correct" — the
+ * defect the mechanism gate found in its own edit fixture, one layer up.
+ *
+ * The seeded video clip is DELETED, not merely left off screen: a frame is eligible only if EVERY draw
+ * in it carries a content token, so one plain clip anywhere in the frame makes the whole run measure a
+ * switched-off cache and report a flawless pass.
+ */
+export async function buildDeterministicFlarexFixture(
+  page: Page,
+  count = 6,
+  spacingSeconds = 3,
+  /**
+   * Wrap each shape clip in a Flarex comp. FALSE is the ADR-021 step-4a fixture: the very same six
+   * clips with no comp on any of them, so the only thing that can make a frame eligible is the
+   * TIMELINE layer's own content token. It is the smallest possible difference between "the compiler
+   * stamps the identity" and "the timeline stamps it", which is what makes it an acceptance gate for
+   * 4a rather than a second test of 3b.
+   */
+  withComps = true,
+): Promise<DeterministicFixture> {
+  const fail = (gate: DeterministicFixtureGate, detail?: string): DeterministicFixture => ({ ok: false, gate, detail, stopSeconds: [] });
+
+  const remaining = await clearTimelineClips(page);
+  if (remaining !== 0) return fail("clips-not-cleared", `${remaining} clip(s) still on the timeline`);
+
+  // AFTER the clear, never before: removing the seeded clip can rescale the ruler, and a calibration
+  // taken on the old scale would place every shape somewhere else.
+  const cal = await calibrateRuler(page);
+  if (!cal) return fail("no-ruler");
+
+  const stops: number[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const start = i * spacingSeconds;
+    const landed = await parkPlayhead(page, cal, start);
+    if (landed == null || Math.abs(landed - start) > 0.35) {
+      return fail("playhead-not-parked", `wanted ${start}s, landed ${landed ?? "null"}`);
+    }
+
+    // PICKING THE SHAPE *IS* THE ADD (`TimelineStrip.tsx:3176` — the select's `onChange` calls
+    // `onAddLayer`, it does not merely arm the button beside it). Clicking the repeat button as well
+    // adds a SECOND clip at the same start, and the pair then overlaps for its whole 2s: two draws in
+    // one frame where the fixture promised one. That is not cosmetic here — a frame is cacheable only
+    // if EVERY draw carries a content token, so the un-comped twin made every frame ineligible and the
+    // first run of this fixture reported the 3b wiring inert in the product. The clip COUNT is what
+    // caught it; `after > before` was too weak to, so this now demands exactly one.
+    const shape = FIXTURE_SHAPES[i % FIXTURE_SHAPES.length]!;
+    const before = await page.locator(".timeline-clip").count().catch(() => 0);
+    const trigger = page.locator(".timeline-shape-select .themed-select-trigger").first();
+    if (!(await trigger.count().catch(() => 0))) return fail("shape-tool-missing");
+    await trigger.click().catch(() => undefined);
+    await page.waitForTimeout(300);
+    const option = page.locator('.themed-select-menu [role="option"]', { hasText: new RegExp(`^${shape}$`) }).first();
+    if (!(await option.count().catch(() => 0))) return fail("shape-tool-missing", shape);
+    await option.click().catch(() => undefined);
+    await page.waitForTimeout(900);
+    const after = await page.locator(".timeline-clip").count().catch(() => 0);
+    if (after !== before + 1) return fail("shape-not-added", `${shape} at ${start}s took the count ${before} → ${after}, wanted ${before + 1}`);
+
+    // A shape clip is 2s long (`createEditorLayer`), so its own middle is the one time at which it — and
+    // nothing else — is the picture.
+    stops.push(start + 1);
+  }
+
+  // One comp per clip. Every clip needs one: a stop over a comp-less shape is an INELIGIBLE frame, and
+  // the probe's eligibility read would then depend on which stop happened to be last.
+  for (let i = 0; withComps && i < count; i += 1) {
+    await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+    await page.waitForTimeout(400);
+    const clip = page.locator(".timeline-clip").nth(i);
+    if (!(await clip.count().catch(() => 0))) return fail("comp-not-created", `no clip at index ${i}`);
+    await clip.click({ timeout: 5_000 }).catch(() => undefined);
+    await page.waitForTimeout(400);
+
+    await page.getByRole("tab", { name: /flarex/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+    await page.waitForTimeout(900);
+    const create = page.getByRole("button", { name: /create flarex comp/i }).first();
+    if (await create.count().catch(() => 0)) {
+      await create.click().catch(() => undefined);
+      await page.waitForTimeout(1_200);
+    }
+    // The button is gone once the comp exists — that, not a sleep, is the confirmation.
+    if (await page.getByRole("button", { name: /create flarex comp/i }).first().count().catch(() => 0)) {
+      return fail("comp-not-created", `clip ${i}`);
+    }
+  }
+
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(1_500);
+  return { ok: true, gate: "ok", stopSeconds: stops };
+}
+
+/**
  * Add ONE MediaIn bound to the asset-bin tile at `assetIndex`, on a comp that already exists.
  *
  * Split from {@link addAssetSourceMediaIn} rather than folded into it because that helper is written to

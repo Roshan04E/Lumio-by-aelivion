@@ -81,7 +81,11 @@
     "rulerjump:pausealone": "tsx src/ruler-jump-pause-alone-probe.ts",
     "rulerjump:recoveryaccept": "tsx src/ruler-jump-recovery-acceptance-probe.ts",
     "preset:sheet": "tsx src/preset-sheet.ts",
-    "text:s9-precedence": "tsx src/text-s9-precedence.ts"
+    "text:s9-precedence": "tsx src/text-s9-precedence.ts",
+    "flarex:incremental-gate": "tsx src/flarex-incremental-invalidation-gate.ts",
+    "flarex:reuse-measure": "tsx src/flarex-reuse-measure.ts",
+    "flarex:frame-cache-gate": "tsx src/flarex-frame-cache-gate.ts",
+    "flarex:frame-cache-field": "tsx src/flarex-frame-cache-field-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

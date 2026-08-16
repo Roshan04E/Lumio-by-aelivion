@@ -54,7 +54,13 @@ Iterate narrowed (`render-pixel-comparison.ts:220`, `render-baseline-gate.ts:74`
 
 **The one thing never to batch:** a commit whose claim *is* "nothing else changed" (a legacy/compat path, a refactor asserted byte-neutral). `render:baseline` at zero tolerance is the only instrument that can say so, and folding it in with another change makes a moved byte ambiguous between them - then you pay the full gate again per bisect step, which costs more than the per-commit run you skipped.
 
-**Most lost hours are void runs, not slow runs.** A stray Chrome tree or a leftover vite child from an interrupted run burns a full sweep for nothing. Run `apps/worker/src/browser-preflight.ts` before any gate, and treat the first run in a fresh worktree as a throwaway (see the vite pre-bundle note above).
+**Most lost hours are void runs, not slow runs.** A stray Chrome tree or a leftover vite child from an interrupted run burns a full sweep for nothing. Run `apps/worker/src/browser/browser-preflight.ts` before any gate, and treat the first run in a fresh worktree as a throwaway (see the vite pre-bundle note above).
+
+**FREE DISK IS A PRECONDITION, and it is enforced.** `assertFreeDisk` refuses below a 5 GB floor (`GATE_MIN_FREE_GB` overrides) and `reapStaleBrowserProfiles` clears leaked profile dirs older than 2h (`GATE_PROFILE_REAP_HOURS`) before it measures - both in `browser-preflight.ts`, both reached from `assertQuietBrowserMachine`. Know why: on 2026-08-16 a full C: voided a night of field-probe readings and very nearly put a false renderer-nondeterminism finding into the tracker, while a second session the same night had a partial `render:baseline` column read as a verdict and written into a commit message. **A full disk does not fail honestly** - Chrome cannot write its cache, screenshots come back partial, decoders fail, and what you SEE is "the same frame did not reproduce". The cause is self-inflicted: every Remotion API call opens a browser and leaks its profile (13,995 dirs / 195.8 GB measured - DEBT-025, root cause DEBT-026). The reaper keeps it in check; if you ever need the manual count:
+
+```bash
+powershell -NoProfile -Command "(Get-ChildItem $env:TEMP -Directory -Filter 'puppeteer_dev_chrome_profile*').Count"
+```
 
 ## Architecture
 

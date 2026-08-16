@@ -388,10 +388,267 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > **3b is unaffected and is genuinely absent** — a search for a composited-output cache finds nothing.
 > It remains the real remaining half of step 3, with I-P9's eviction ruling attached.
 
+> **3a CLOSED-OUT 2026-08-16 — no cache is to be built, and the step's CLAIMED WIN does not survive
+> measurement. Both halves of the scoping note above are now settled, and one of them the other way.**
+>
+> **(1) I-P7's key is IMPLEMENTED, verbatim — the scoping note compared it against the wrong object.**
+> `SceneCompositor.contentCacheKey` (`scene-compositor.ts:3443`) is
+> `` `${CONTENT_CACHE_CONTRACT_VERSION}|${nestW}x${nestH}|r${RENDERER_REVISION}|el:${effectLight}|${draw.contentHash}|${draw.dependencyVersions}` `` —
+> ContractVersion, ContextVersion (its own comment: "the SINGLE site that builds the ContextVersion"),
+> NodeContentHash, plus the ADR-010 opaque dependency tokens. `content-hash.ts`'s header states the
+> formula it implements as "ADR-009: CacheKey = (ContractVersion, ContextVersion, NodeContentHash)".
+> The note's caveat measured I-P7 against the *incremental evaluator*, which is a different object.
+>
+> **(2) The difference IS material anyway, and what breaks is now measured.** The incremental evaluator
+> runs FIRST and short-circuits the whole upstream subtree (`compile-flarex.ts:1394`, deliberately
+> "placed BEFORE lowering"), so when it reuses, the correct key is never consulted. Its own content
+> signature is hand-rolled — `type | enabled | RAW params` (`incremental-evaluation.ts:116`) — and a
+> Flarex keyframe lives in `comp.animations`, which that signature does not read. So the stronger key
+> is present in the tree and is bypassed by a weaker one sitting above it. Registered as **DEBT-022**;
+> falsified both ways by `pnpm --filter @orreris/worker flarex:incremental-gate`.
+>
+> **(3) The 92–95% figure is NOT reproduced on a real graph with real footage.** Re-measured by
+> `flarex:reuse-measure` — a comp built through the product's own import and add-MediaIn flow (12 real
+> renders, 61 nodes over 12 asset sources), captured from the live editor, then driven through the real
+> `dependency-graph.ts` closure:
+>
+> | edit | reusable | §3.2(c) said |
+> |---|---|---|
+> | none (counterweight) | 100.0% | — |
+> | param drag @ HEAD source | **75.4%** | 92.6% |
+> | param drag @ TAIL source | **91.8%** | 92.6% |
+> | rewire one edge | **78.7%** | 95.0% |
+> | source change (media epoch) | **0.0%** | 91.7% |
+> | slider drag on an ANIMATED param | 100.0% | *should invalidate* — DEBT-022 |
+>
+> Two corrections follow. **The param figure is a property of graph SHAPE, not a constant**: the same
+> edit reuses 75.4% at the head of a merge chain and 91.8% at the tail, because a head edit flows
+> through every merge below it. A single number for "param drag" is an artifact of which node the
+> harness picked, and §3.2(c)'s synthetic graph picked a kinder one. **And a source change dirties
+> EVERYTHING, not 8.3%**: `mediaEpoch` is a SUM over all pool entries, so any one source decoding a new
+> picture marks the `source` axis and dirties every `mediaIn` — documented as deliberate conservatism
+> ("ANY new picture invalidates every MediaIn"), but it means the 8.3% figure does not describe a comp
+> with live video at all.
+>
+> **(4) In the live editor the mechanism registered ZERO reuse.** `__rfIncremental` after settle:
+> `reused=0 · evaluated=7140 · frames=282`, with `dirtyNodes 61/61`; a steady-state delta sampled 8 s
+> apart caught exactly one composite, which evaluated all 60 nodes and reused none. That is not a
+> broken cache — it is (3) restated: on a video comp the only thing that WAKES the compositor is a
+> decode, and a decode invalidates globally. The cache can only pay off on a recomposite triggered by
+> an EDIT, which is what the table measures.
+>
+> **DEBT-022 FIXED 2026-08-16**, by founder decision, before 3b — because 3b sits ON TOP of it: a
+> frame cache recomputes on a miss, and the recompute runs through this evaluator, so 3b would have
+> inherited the staleness and any stale-picture report would then have had two candidate causes in two
+> layers. The compiler now hands its `NodeContentHash` to the host's reuse check (threaded, not
+> recomputed — the host cannot compute it correctly, because this compile's time is
+> `t − layer.startSeconds` and the host knows only `t`). `flarex:incremental-gate` is green 9/9 and no
+> edit class lost reuse; the full before/after table is in DEBT-022's closing update.
+>
+> **RULING. Do not build a third cache — I-P7's cache exists and is correct.** What §6 called step 3a
+> is therefore not construction work; it is two defects and a corrected claim. **§6's "measured 92–95%
+> reuse" line should be read as superseded by the table above.** The remaining work is DEBT-022 (an
+> invalidation term, not a cache) and, optionally, narrowing the `source` axis from a global sum to
+> per-source epochs — which is the only change that would make the live reuse rate non-zero, and which
+> is NOT proposed here because it is a behaviour change to shipped ADR-012 code with its own risk.
+
 > ~~Claimed for editing only; §3.2(c) forbids claiming it for playback.~~ — the blanket form of this
 > is superseded; it holds for 3a and not for 3b. See §3.2(c′).
 
+> **3b SHIPPED 2026-08-16 — the composited-frame cache, its gate, and its host wiring.**
+>
+> **The gate was built before the cache**, on founder instruction, and the ordering earned itself
+> immediately. A frame cache's characteristic failure is a STALE SERVE, which does not present as a
+> caching bug — it presents as a rendering bug, and `render:compare:pixels` is structurally blind to
+> it (one frame per fixture is the only case where a frame cache is trivially correct).
+> `flarex:frame-cache-gate` renders every scenario WARM (cache on) against COLD (fresh compositor per
+> frame, cache off) and compares frame by frame, plus exact predicted HIT COUNTS, the settle gate, and
+> eviction. `FRAME_CACHE_SABOTAGE=drop-t|drop-graph` breaks the key on purpose and both must make it
+> fail — they do, 16 failures and 2 respectively. The first sabotage run caught a defect in the GATE:
+> its edit fixture moved the content hash without moving pixels, so the oracle was comparing two
+> identical pictures and could not fail. Fixed; both arms now fire.
+>
+> **The key is `(graph content hash, t)`, with the graph term taken from the ADR-009 hashes and NOT
+> from the draw list** — a draw list is the output of the computation the cache exists to skip.
+> `compileFlarexComp` stamps the root `NodeContentHash` onto the draw it emits (`flarexContentToken`,
+> transport only); `build-scene-draws` appends the layer's own identity digest, because the graph hash
+> is total over the GRAPH and blind to everything the TIMELINE decides — where the clip sits, its trim,
+> its wrapping effects. The layer is folded WHOLE rather than field by field: an enumerated list of
+> "the fields that matter" is the shape of DEBT-016, and it is memoized on object identity, so an
+> immutable layer is serialized once.
+>
+> **The matte vector/raster tag was CHECKED, not assumed, and needs no term of its own.** Enumerating
+> its producers: mask nodes always yield vector; `matteInput` yields raster when the socket is fed by
+> an image (topology); `matteControl` degrades to raster only when an input already is one, and its
+> feather/invert route reads node params via `num(at, node, …)`. Every term is node type, topology or a
+> resolved param — exactly what R1+R3 fold. The one exception is a 2D-context allocation failure, an
+> environment degrade rather than a content variable.
+>
+> **I-P9 is satisfied, and note the inversion.** This cache evicts at RANDOM; its sibling
+> `ContentArtifactCache` uses LRU and is right to — access pattern decides, not consistency, because
+> node artifacts are intra-frame fan-out while frames are a cycle. On a 20-frame cycle at capacity 8:
+> **LRU 0.0%, shipped random 8.3%** in simulation, and the real GL cache measured 5 hits in 60 — 8.3%,
+> agreeing with the simulation to the frame.
+>
+> **SCOPE, and it is narrower than the ADR's framing suggests.** A frame is cacheable only if EVERY
+> draw in it carries a content token, and today only the Flarex compiler stamps one. So a frame
+> containing a plain clip, a text layer, a transition, or a comp proxy is NOT cacheable and renders
+> exactly as before. That is this ADR's own sequencing — step 4 is where the timeline earns the same
+> identity — and widening the predicate earlier would mean inventing an identity for draws that do not
+> have one, where the failure surfaces as a wrong picture rather than a miss.
+>
+> **THE HOST WIRING IS VERIFIED AND THE DEFAULT IS ON (2026-08-16).** `compileFlarexComp` stamps the
+> token, `build-scene-draws` completes it with the layer's identity digest, `ScenePreviewCanvas`
+> declares the key, and `getFrameCacheEnabled()` now returns true. Escape hatch `?frameCache=0`.
+>
+> **The default was decided by SPLITTING the question, because two questions were tangled in one
+> fixture and only one of them is the cache's.** A Flarex comp is eligible because the COMPILER stamps
+> a content token — it does not need a MediaIn to be eligible. So "is this host's key COMPLETE" can be
+> asked on content with no decode in it: `FIELD_FIXTURE=deterministic` deletes the seeded video clip
+> and tiles six SHAPE clips along the timeline, each in its own comp, each stop a different shape.
+> Result, four runs: `eligible`, **6 of 6 frames served from cache with 0 misses and 0 declined, every
+> one pixel-identical to a fresh render, noise floor 0 against a budget of 0**, and the same six hashes
+> across all four runs and across page loads. The probe also re-runs its own comparison SHIFTED by one
+> position and requires every shifted pair to differ, so a green run cannot be the report of an
+> instrument that could not tell two frames apart in the first place.
+>
+> **I-P8 over the LIVE MEDIA PATH is a separate, real, registered question — DEBT-027.** Two bypassed
+> sweeps in one load over real footage differ at 1–2 of 6 positions, and a longer settle does not
+> converge (900→2500 ms helps, 2500→6000 ms does not). Measured with disk free and with the probe's own
+> two defects fixed, so these numbers stand — unlike the readings taken on a full disk, which are void
+> (DEBT-024, DEBT-025). What that costs is an ORACLE, not this cache: the identical instrument returns a
+> zero noise floor on deterministic content through the same host, the same key and the same
+> compositor. It does not gate 3b, and it must not be chased from the frame-cache side.
+>
+> **NOT a playback win, and §7 has not moved:** composite 20.9–855.2 ms against decode's 2.8–9.0 ms at
+> every N. A first pass over new ground is all misses. The claim is scrub-back and loop.
+>
+> **Registered, not built (founder instruction):** narrowing `mediaEpoch` from a global sum to
+> per-source epochs. It is the only change that would make the live steady-state reuse rate non-zero,
+> and it is a behaviour change to shipped ADR-012 code with its own risk.
+
 **Step 4 — The timeline last**, once the seam is proven on the harder case.
+
+> **Step-4 obligation carried forward from 3b:** the resolved text DIRECTION (ADR-023 D6a) is a
+> property of a timeline TEXT LAYER, not of a Flarex text node — it does not exist in `node-defs.ts`.
+> It was briefly specified as a 3b key term and withdrawn by founder correction: 3b has no business
+> carrying it, and there is no coupling to the parallel ADR-023 programme. When the timeline moves onto
+> the seam and its layers earn content tokens, direction must be one of the terms those tokens fold.
+
+> **STEP-4 SCOPING, 2026-08-16. The step has two independent halves and they are NOT equally ready.
+> Recorded before implementation, because the second half turns out to be blocked on something that
+> reads like a solved problem and is not.**
+>
+> **(A) Timeline layers earn content tokens** — what widens frame-cache eligibility from "a Flarex comp
+> and nothing else" to ordinary frames. `layerIdentityDigest` (`build-scene-draws.ts:323`) already folds
+> a `TimelineLayer` WHOLE, memoized on object identity, so the placement half is done and total by
+> construction. What a token additionally needs is everything the PICTURE depends on that the layer
+> object does not describe.
+>
+> **(B) Timeline media acquisition moves onto the byte-budgeted provider seam** — the loader-ceiling,
+> I-P6 and burst-admission work step 2 did for Flarex, done for the timeline's `preview-frame-pool`.
+> This is a decoder-topology change and therefore carries ADR-012's binding rule: **every decoder
+> topology change requires a decoder soak, and must be bisectable.** Expect the burst-admission defect
+> again — N constructions judged against a budget that starts empty is a property of any admission
+> authority, not of the Flarex page.
+>
+> **THE BLOCKER IN (A), AND IT IS SPECIFIC. A media layer's `sourceVersion` is a WALL CLOCK, not a
+> content identity.** `gl-context.ts:278` stamps `updatedAt: nowMs()` on every producer draw, and
+> `build-scene-draws.ts:746` reads it as the media draw's version. That is exactly right for what it
+> was built for — skip a redundant texture upload when nothing redrew — and it is useless as a cache
+> key term: two visits to the same `t` produce two different values, so a token folding it would never
+> hit, and a token IGNORING it would serve whatever picture the decoder happened to have. There is no
+> third option available today, because the decode path does not report WHICH source time the frame it
+> served actually is.
+>
+> Non-media layers do not have this problem: text and shape carry `rasterizer.versionOf(layer.id)`, a
+> real content version (`build-scene-draws.ts:679`), dropped to `undefined` only under a non-identity
+> colour pipeline — a correct, conservative refusal that a token can simply honour.
+>
+> **So the honest sequence is 4a → 4b → (B), and 4b shares an instrument with DEBT-027.** "Which source
+> time is this frame" is the same missing fact that makes a re-render oracle unusable over live footage.
+> Building it once serves both, and building the frame token on media before it exists would put a
+> wrong picture behind a cache key — the one failure mode 3b's whole gate order was arranged to prevent.
+>
+> - **4a — non-media timeline layers earn content tokens** (text, shape, image/graphic, adjustment),
+>   including the D6a direction obligation above. Win on its own: frames whose every layer is non-media
+>   — title cards, lower-thirds, motion-graphics sequences — become scrub-and-loop cacheable.
+> - **4b — media layers earn tokens**, once a provider can name the served source time.
+> - **(B) — timeline acquisition onto the seam**, with a decoder soak and one change per commit.
+
+> **4a SHIPPED 2026-08-16 — a TEXT or SHAPE layer now stamps its own content token, and the D6a
+> obligation turned out to be already discharged.**
+>
+> `stampNonMediaContentToken` (`build-scene-draws.ts`) runs at the same seam `applyFlarex` does — the
+> end of `buildLayerDrawWithPasses`, so every consumer path gets it uniformly — and folds
+> `layerIdentityDigest(layer)`, the raster's content version, every mask version present, and a track
+> matte's own token. **Scoped to `text` and `shape`**, because those are the two whose `sourceVersion`
+> is a real content version (`rasterizer.versionOf` bumps on every completed rasterization, and a
+> rasterization happens on every change of the raster's own key — so the picture cannot move without
+> the version moving). Over-approximate and therefore safe: it costs a miss, never a wrong frame.
+>
+> **DECLINING IS THE DEFAULT.** No raster version (the graded-overlay path erases it deliberately),
+> region-pass clones present, a group draw, a track matte whose source has no token, or a fragment
+> pass carrying a mask with no version — each returns no token. The failure modes are not symmetric: a
+> missing token loses a cache hit, a wrong token shows the user the wrong picture.
+>
+> **THE ADR-023 D6a OBLIGATION IS DISCHARGED, WITHOUT A TERM FOR IT, and the reason is the interesting
+> part.** `resolveTextDirection(declared, textSource)` is a pure function of `layer.direction` and the
+> layer's own text/runs, and `layerIdentityDigest` folds the layer WHOLE. So direction is in the key
+> because the fold is total, not because anyone remembered it — which is precisely the argument 3b
+> made for whole-object folding over an enumerated field list (the DEBT-016 shape), now paying for
+> itself on a term specified two ADRs away.
+>
+> **Accepted on `FIELD_FIXTURE=timeline`: the same six shape clips as 3b's fixture with NO COMP ON ANY
+> OF THEM**, so the only thing that can make a frame eligible is the timeline layer's own token. One
+> variable between the two arms and nothing else. Green 3/3 — `eligible`, 6 of 6 served, 0 misses,
+> 0 declined, all pixel-identical, noise floor 0 — and **falsified**: with only
+> `build-scene-draws.ts` stashed, the same arm reads `eligible=false` with `blockedBy` naming the
+> shape layer and 0 hits.
+
+> **THE SERVED-SOURCE-TIME FACT — SHIPPED 2026-08-16, AND IT CORRECTS THE 4b BLOCKER RECORDED ABOVE.**
+>
+> The scoping note says "there is no third option available today, because the decode path does not
+> report WHICH source time the frame it served actually is". **That is wrong, and it was wrong when
+> written.** The decode path has reported it since ADR-012 S4.2: `ScenePreviewMediaSnapshot`
+> `.servedSourceTime` reaches `SceneTextureSource.servedTime` (`scene-compositor.ts`), whose own doc
+> says the thing in as many words — "the producer already knows this, and the grade stage threw it
+> away, because a texture was modelled as pixels rather than as pixels-at-a-moment".
+>
+> What was actually missing is one hop further up, and it is the same mistake one layer higher: the
+> **DRAW** threw it away. `buildLayerPreFlarexDraw`'s media branch read `.version` off the texture and
+> not `.servedTime`, so every consumer downstream of the scene build — the frame cache's key, any
+> probe, any oracle — was reasoning about media with no access to a fact the object in its hand was
+> already carrying. Fixed by carrying it: `SceneLayerDraw.servedTime`, spread so that "cannot say"
+> stays ABSENT rather than becoming `undefined`, plus the same carry on the comp-proxy draw (T7's "a
+> proxy is a source; it carries a time", the half that was still missing at the draw level).
+>
+> The second correction is narrower but matters for anyone reading the blocker: the wall clock is the
+> **legacy** path's value, not the default path's. `sourceVersion` prefers
+> `(mediaSource as SceneTextureSource).version` — a real S6.2 content version — whenever the source is
+> a same-context texture, which the single-context path (default since 2026-07-07) always produces.
+> `getTexImageSourceProducerInfo(...).updatedAt` is the fallback for uploaded canvases only.
+>
+> **USED TWICE, AS SCOPED, AND ONLY ONE OF THE TWO CLOSED.**
+>
+> *Use one — DEBT-027 is now attributable, and the answer is not what the debt assumed.* Published as
+> `__rfFrameCache.served` beside `targetTime`, the field probe prints, for every position where two
+> bypassed renders disagree, whether the served moment MOVED. Over live footage it moves at five of
+> six: sweep B tracks the request exactly (`5.0000` for t=5.000 … `16.1000` for t=16.100) while sweep C
+> pins at `4.9333` and then reports `-`. **The renderer is deterministic given its input; the decoder
+> stopped supplying.** DEBT-027's "a decode whose output differs between two seeks to the same t" is
+> falsified — it is a supply failure, which is why no settle length ever converged.
+>
+> *Use two — 4b is viable and still not acceptable, and the distinction is the point.* `served ==
+> requested` to four decimals whenever supply works, so a media token folding `servedTime` would HIT
+> across two visits to one `t` rather than being a term that can never repeat. That answers the
+> question the wall clock could not. **The token is still not written**, because accepting it requires
+> a gate on the media fixture and that fixture VOIDS on supply — and shipping a cache-key term with no
+> arm that can accept it is the one thing 3b's whole gate order was arranged against. 4b is now
+> blocked on DEBT-027's decoder, not on a missing fact, which is a different and much smaller problem.
+>
+> Green: shared + web + worker typecheck; `FIELD_FIXTURE=deterministic` unchanged and green (the carry
+> is inert where nothing decodes, as designed).
 
 **Not in the sequence, and newly ordered ahead of the all-intra proxy by §3.3:** reducing the cost
 and the frequency of decoder resets. Provider-local (§4.2), needs no seam change, and worth more

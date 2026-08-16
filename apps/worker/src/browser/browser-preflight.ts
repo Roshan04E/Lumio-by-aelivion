@@ -45,12 +45,137 @@
  * also refuses on a live process running THIS gate's own script, excluding this process and its
  * ancestors (the `pnpm`/`tsx` chain that launched it carries the script name in its command line too,
  * and a preflight that fails on its own launcher is worse than no preflight).
+ *
+ * AND IT REAPS LEAKED PROFILE DIRS (2026-08-16), which is the same lesson a third time. "The machine
+ * is clean" had meant no stray browser and no stale harness; it now also means the machine can still
+ * WRITE. A full disk is the quietest member of this family: it surfaces as frames that do not
+ * reproduce, which reads as a renderer defect rather than an environment one -- 195.8 GB of leaked
+ * profiles voided a night of field readings and nearly put a false I-P8 finding in the tracker
+ * (DEBT-024/025). The free-disk REFUSAL is `assertFreeDisk`; this file also has to COLLECT, because a
+ * precondition the tooling violates by design every single run is one nobody can satisfy by hand.
+ *
+ * THE PATTERN, for whoever adds the fourth. Each entry here was paid for by a run whose OUTPUT LOOKED
+ * LIKE DATA -- negative memory deltas, a 25-minute hang, an irreproducible frame. If a precondition
+ * can only be noticed after the fact by disbelieving a plausible number, it belongs in this file as a
+ * hard refusal, not in a checklist someone reads afterwards.
  */
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 
 const isWindows = process.platform === "win32";
+
+/**
+ * Leaked headless-browser profile directories, and why the reaper below is not optional.
+ *
+ * 13,995 of these had accumulated (195.8 GB, oldest 7 days). That is not an incident -- it is very
+ * nearly EVERY browser this repo has ever launched. `remotion-renderer.ts` calls `selectComposition`,
+ * `renderMedia` and `renderStill` without a shared `puppeteerInstance`, so each call opens and closes
+ * its own browser; the close runs, but puppeteer's cleanup of its temp profile fails silently on
+ * Windows when Chrome still holds handles under it. Two-plus profiles per fixture, ~23 fixtures, every
+ * gate run, for a week.
+ *
+ * WITHOUT REAPING, THE FREE-DISK CHECK IS A TRAP. `assertFreeDisk` would refuse to run gates because
+ * of garbage the gates themselves produced, and the operational answer would become "delete 14,000
+ * directories by hand every few days", which nobody does -- so `GATE_MIN_FREE_GB` would get set to 0
+ * and the guard would be worth nothing. A precondition that the tooling routinely violates by design
+ * has to come with its own collector, which is why this sits in the same file and runs FIRST.
+ *
+ * The real fix is a shared browser instance in the renderer (DEBT-026): fewer launches, faster gates,
+ * and no garbage to collect. This reaper makes that non-urgent rather than replacing it.
+ */
+const PROFILE_DIR_PATTERNS = [/^puppeteer_dev_chrome_profile/i, /^playwright[_-]/i, /^\.org\.chromium\.Chromium\./i];
+
+const DEFAULT_REAP_AGE_MS = 2 * 60 * 60 * 1000;
+/** Preflight must stay a preflight. Leftover garbage beyond this budget is caught by the next run. */
+const REAP_TIME_BUDGET_MS = 20_000;
+
+export interface ProfileReapResult {
+  removed: number;
+  failed: number;
+  skippedYoung: number;
+  timedOut: boolean;
+}
+
+/**
+ * Best-effort delete of stale browser profile directories in the temp dir.
+ *
+ * AGE IS THE ONLY SAFETY GUARD, and it is the right one. A live run's profile is minutes old, so a
+ * 2-hour threshold cannot touch it; and unlike the process checks in this file there is no way to ask
+ * a directory who owns it. Deliberately NOT gated on "no automation browser alive" -- gates run
+ * concurrently with each other and with the user's own work, and a reaper that only fires on a
+ * perfectly idle machine would never fire at all.
+ *
+ * Never throws. This is housekeeping: a failed delete (Chrome still holding a handle) is normal, and
+ * a preflight that dies while tidying up would be worse than the mess.
+ */
+export function reapStaleBrowserProfiles(maxAgeMs = DEFAULT_REAP_AGE_MS, dir?: string): ProfileReapResult {
+  const result: ProfileReapResult = { removed: 0, failed: 0, skippedYoung: 0, timedOut: false };
+  if (maxAgeMs <= 0) return result;
+  const startedAt = Date.now();
+  const cutoff = startedAt - maxAgeMs;
+  let entries: fs.Dirent[];
+  // `dir` is for the self-test only. Without it the test shares the machine's real temp backlog, and
+  // a large backlog eats the time budget on alphabetically-earlier names before reaching the test's
+  // own fixtures -- which presents as a failing reaper (measured: two false failures while 195.8 GB
+  // was being cleared). A guard's own test must not depend on how dirty the machine happens to be.
+  const tmp = dir ?? os.tmpdir();
+  try {
+    entries = fs.readdirSync(tmp, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !PROFILE_DIR_PATTERNS.some((p) => p.test(entry.name))) continue;
+    if (Date.now() - startedAt > REAP_TIME_BUDGET_MS) {
+      result.timedOut = true;
+      break;
+    }
+    const full = path.join(tmp, entry.name);
+    try {
+      // birthtime is unreliable across filesystems; mtime is what actually tracks last use here.
+      const stat = fs.statSync(full);
+      if (Math.max(stat.mtimeMs, stat.birthtimeMs) > cutoff) {
+        result.skippedYoung += 1;
+        continue;
+      }
+      fs.rmSync(full, { recursive: true, force: true, maxRetries: 1 });
+      result.removed += 1;
+    } catch {
+      result.failed += 1;
+    }
+  }
+  return result;
+}
+
+/**
+ * Refuse to run when either volume a browser gate writes to is below the floor.
+ *
+ * BOTH volumes are checked because the writes are split: the browser's profile, its cache and its
+ * crash dumps go to the TEMP volume (that is where the 195.8 GB of leaked profiles accumulated),
+ * while screenshots, fixture output and the vite dep cache go to the REPO volume. On this machine
+ * they are both C:, but the check must not assume that -- a gate is just as void when the drive it
+ * writes screenshots to is the full one.
+ *
+ * Exported separately from `assertQuietBrowserMachine` so a measurement ladder can re-assert it
+ * between rungs: a long ladder can EXHAUST the disk partway through, and the rungs after that point
+ * are void while the rungs before are fine. That is the same reason `assertZeroBrowserFloor` exists.
+ */
+export function reapProfilesForPreflight(): void {
+  const raw = Number(process.env.GATE_PROFILE_REAP_HOURS);
+  const hours = Number.isFinite(raw) && raw >= 0 ? raw : 2;
+  const reaped = reapStaleBrowserProfiles(hours * 60 * 60 * 1000);
+  if (reaped.removed > 0 || reaped.timedOut) {
+    process.stdout.write(
+      `[preflight] reaped ${reaped.removed} stale browser profile dir(s)` +
+        (reaped.skippedYoung ? `, kept ${reaped.skippedYoung} younger than ${hours}h` : "") +
+        (reaped.failed ? `, ${reaped.failed} in use` : "") +
+        (reaped.timedOut ? ` — hit the ${REAP_TIME_BUDGET_MS / 1000}s budget, more will go next run` : "") +
+        "\n"
+    );
+  }
+}
 
 /**
  * FREE DISK IS A PRECONDITION, NOT A SYMPTOM (added 2026-08-16).
@@ -486,15 +611,19 @@ export function assertQuietBrowserMachine(options: BrowserPreflightOptions): voi
   if (preflightDone) return;
   preflightDone = true;
   const { label, reap = false, scriptMarker } = options;
+  // FIRST, and before any free-disk check: collect this tooling's own garbage, so a gate is never
+  // refused for space that 14,000 dead profile dirs are holding (DEBT-025/026).
+  reapProfilesForPreflight();
   /**
-   * FIRST, before either process check. Deliberately the cheapest and earliest of the three: it is a
-   * single `statfs` and it is the one whose failure has most recently corrupted a night's evidence in
-   * two unrelated subsystems at once. Ordering it first also means the message a founder sees on a
-   * full disk is about the disk, rather than about whichever process check happened to trip on it.
+   * SECOND, before either process check. Deliberately the cheapest and earliest of the remaining
+   * checks: it is a single `statfs` and it is the one whose failure has most recently corrupted a
+   * night's evidence in two unrelated subsystems at once. Ordering it right after the reap also means
+   * the message a founder sees on a full disk is about the disk, rather than about whichever process
+   * check happened to trip on it.
    */
   assertFreeDisk(label, options.minFreeBytes);
   /**
-   * SECOND, and for the same reason the disk check is first: it is a single `os.freemem()` and its
+   * THIRD, and for the same reason the disk check comes early: it is a single `os.freemem()` and its
    * failure mode is the one that most recently cost this repo eighty minutes across two sweeps. It
    * sits next to the disk check because they are the same KIND of precondition — a shared resource
    * the gate will consume, measured before the gate spends anything, rather than discovered when the

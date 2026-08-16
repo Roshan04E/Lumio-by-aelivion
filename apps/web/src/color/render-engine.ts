@@ -239,6 +239,50 @@ export function getRegionPassesEnabled(): boolean {
 }
 
 /**
+ * Composited-frame cache (ADR-021 step 3b) — the RAM-Preview cache that makes scrub-back and loop
+ * over already-rendered ground instant. `?frameCache=1` turns it on; `?frameCache=0` off.
+ *
+ * DEFAULT ON, flipped 2026-08-16 on the acceptance gate this comment named while it was off.
+ *
+ * WHAT IS CLAIMED, and it is narrow: **scrub-back and loop over ground already rendered.** Not
+ * playback. §7 of ADR-021 has not moved — composite is 20.9–855.2 ms against decode's 2.8–9.0 ms at
+ * every N measured, and a first pass over new ground is all misses. A frame is also cacheable only
+ * where every draw carries a content token, which today means a Flarex comp and nothing else; step 4
+ * is where the timeline earns the same identity.
+ *
+ * WHAT THE EVIDENCE IS. `flarex:frame-cache-gate` proves the MECHANISM — warm-vs-cold parity, exact
+ * predicted hit counts, eviction — and both `FRAME_CACHE_SABOTAGE` modes make it fail, so it can.
+ * `flarex:frame-cache-field` then asks the different question, of the SHIPPED HOST on a real project:
+ * is the key this host declares COMPLETE? Green 3/3 on the deterministic fixture (six shape clips,
+ * each in its own comp, no decode anywhere in the frame): `eligible`, 6 of 6 frames served from cache
+ * with 0 misses and 0 declined, every one pixel-identical to a fresh render, a zero noise floor
+ * between two bypassed sweeps, and the same six hashes across all three runs and page loads.
+ *
+ * WHY THE FIXTURE HAS NO VIDEO IN IT, since that reads like a weaker test and is the opposite. Over
+ * live footage the picture at a fixed `t` does not reproduce — 1–2 unstable positions of 6, measured
+ * with disk free and instrument defects fixed, and NOT converging with a longer settle. That makes
+ * the ORACLE unreliable there, and an unreliable oracle can neither convict this cache nor acquit it;
+ * it is a question about the media path, registered as DEBT-027, and it does not gate this. What the
+ * deterministic arm removes is the confound, not the difficulty: the key is the same key.
+ *
+ * Escape hatch `?frameCache=0`, and `localStorage['orreris.frameCache']`.
+ */
+export function getFrameCacheEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has("frameCache")) return truthy(params.get("frameCache"));
+      const stored = window.localStorage?.getItem("orreris.frameCache");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return true;
+}
+
+/**
  * Viewer-capture proxy generation (todo.md Phase 6B P1a — "the proxy IS the viewer"): background spans are
  * rendered through the VISIBLE preview's own SceneCompositor (offscreen, no present) with pooled `<video>`
  * decode + shared-context grading, instead of the second WebCodecs pipeline in the export Worker. Faithful

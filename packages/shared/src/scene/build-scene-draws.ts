@@ -259,8 +259,8 @@ export interface BuildSceneDrawsInputs {
    * frame MUST namespace by comp or two comps' node `n0` would share a record. The comp id is attached
    * here rather than trusted to the host for the same reason `onFlarexDegrade` attaches it.
    */
-  flarexOnEvaluated?: ((compId: string, nodeId: string, contextKey: string, value: unknown) => void) | undefined;
-  flarexReuseValue?: ((compId: string, nodeId: string, contextKey: string) => FlarexValue | null) | undefined;
+  flarexOnEvaluated?: ((compId: string, nodeId: string, contextKey: string, value: unknown, contentHash: string | undefined) => void) | undefined;
+  flarexReuseValue?: ((compId: string, nodeId: string, contextKey: string, contentHash: string | undefined) => FlarexValue | null) | undefined;
   /**
    * Cross-frame cache for Flarex asset-source draws (perf: `resolveSourceDraw` rebuilt a full per-clip
    * draw every frame, ~54% of compile time — profiler-measured). A BARE virtual loader's draw structure
@@ -300,6 +300,40 @@ function parseCssColor(input: string): [number, number, number] {
  * renderers for layers/junctions no longer present) so live WebGL contexts stay bounded. Pure w.r.t. its
  * inputs otherwise — the same `(layers, t)` produces the same list.
  */
+/**
+ * ADR-021 3b, the PLACEMENT half of the frame key.
+ *
+ * `compileFlarexComp` stamps the graph's root `NodeContentHash` on the draw it emits. That token is
+ * total over the GRAPH — every resolved param, the topology, the font identity — and blind to
+ * everything the TIMELINE decides: where the clip sits, what it is trimmed to, what effects wrap it,
+ * which asset it points at. Those live on the `TimelineLayer`, and a frame key that omitted them
+ * would serve the pre-drag picture after the user moved the clip. That is the stale serve, arriving
+ * through the one door the compiler cannot see.
+ *
+ * So the layer is folded WHOLE rather than field by field. An enumerated list of "the fields that
+ * matter" is exactly the shape of DEBT-016 — a key omitting an input the value depends on — and the
+ * omission would be found as a rendering bug months later. `TimelineLayer` is plain serializable
+ * data, so stringifying it is total by construction and stays total as fields are added.
+ *
+ * The obvious objection is cost, and the WeakMap answers it: layers are immutable in the editor's
+ * state, so a given object is stringified ONCE and every later frame is a pointer lookup. An edit
+ * produces a new object, which is precisely when the digest must be recomputed anyway.
+ */
+const layerIdentityDigests = new WeakMap<TimelineLayer, string>();
+function layerIdentityDigest(layer: TimelineLayer): string {
+  let digest = layerIdentityDigests.get(layer);
+  if (digest === undefined) {
+    // FNV-1a over the serialization: the token is opaque and only ever compared for equality, so a
+    // 32-bit digest keeps the key short without the cache ever interpreting it.
+    const text = JSON.stringify(layer);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i += 1) h = ((h ^ text.charCodeAt(i)) * 16777619) >>> 0;
+    digest = h.toString(16);
+    layerIdentityDigests.set(layer, digest);
+  }
+  return digest;
+}
+
 export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   const {
     layers: inputLayers,
@@ -710,6 +744,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       sourceVersion: isSceneTextureSource(mediaSource as never)
         ? (mediaSource as unknown as SceneTextureSource).version
         : getTexImageSourceProducerInfo(mediaSource as unknown as TexImageSource)?.updatedAt,
+      // WHICH MOMENT these pixels are, as distinct from whether they changed (ADR-021 step 4b). The
+      // single-context path (default since 2026-07-07) hands us a `SceneTextureSource` that has
+      // carried `servedTime` since ADR-012 S4.2 and nothing downstream ever read it. Spread rather
+      // than assigned so "cannot say" stays ABSENT under `exactOptionalPropertyTypes` — the uploaded
+      // path genuinely cannot say, and `servedTime: undefined` would be a different claim.
+      ...(isSceneTextureSource(mediaSource as never) && (mediaSource as unknown as SceneTextureSource).servedTime !== undefined
+        ? { servedTime: (mediaSource as unknown as SceneTextureSource).servedTime }
+        : {}),
     };
   };
 
@@ -831,6 +873,79 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   };
 
   /**
+   * ADR-021 STEP 4a — a NON-MEDIA timeline layer earns a content token, so a frame made of text and
+   * shapes becomes frame-cacheable instead of being disqualified by the first draw with no identity.
+   *
+   * WHY TEXT AND SHAPE FIRST, and why not "all layers": a token is a promise that the same token means
+   * the same picture, and for MEDIA that promise cannot be made today. A media draw's `sourceVersion`
+   * is `updatedAt: nowMs()` (`gl-context.ts:278`) — a wall clock stamped on every producer draw. That
+   * is exactly right for its purpose (skip a redundant upload when nothing redrew) and useless as an
+   * identity: two visits to the same `t` produce two different values, so a token folding it can never
+   * hit, and a token IGNORING it would serve whatever picture the decoder happened to be holding. The
+   * missing fact is WHICH SOURCE TIME the served frame is — the same fact DEBT-027's oracle needs — and
+   * step 4b is where it gets built. A text/shape raster has no such gap: `versionOf` bumps on every
+   * completed rasterization and a rasterization happens on every change of the raster's own key, so the
+   * picture cannot move without the version moving. Over-approximate (a re-raster of identical content
+   * bumps too) and therefore SAFE: it costs a miss, never a wrong frame.
+   *
+   * THE RESOLVED TEXT DIRECTION (ADR-023 D6a) IS ALREADY IN HERE, and it is worth stating why rather
+   * than adding a term for it. §6's step-4 obligation requires direction to be folded. It is:
+   * `resolveTextDirection(declared, textSource)` is a pure function of `layer.direction` and the
+   * layer's own text/runs, and `layerIdentityDigest` folds the layer WHOLE. A field-by-field key would
+   * have had to remember direction; folding the whole object means it could not have been forgotten —
+   * which is the argument 3b made for whole-layer folding, now paying for itself on a term specified
+   * two ADRs away.
+   *
+   * DECLINING IS THE DEFAULT AND COSTS ONLY A MISS. Everything below returns `undefined` rather than
+   * guessing, because the failure modes are not symmetric: a missing token loses a cache hit, a wrong
+   * token shows the user the wrong picture.
+   */
+  const stampNonMediaContentToken = <T extends SceneLayerDraw | SceneGroupDraw | null>(layer: TimelineLayer, draw: T): T => {
+    if (!draw) return draw;
+    // A comp already stamped one; a group draw is nesting, which folds children whose own tokens this
+    // function has not been asked to compose yet.
+    if ((draw as { flarexContentToken?: string }).flarexContentToken !== undefined) return draw;
+    if ((draw as { kind?: string }).kind === "group") return draw;
+    if (layer.type !== "text" && layer.type !== "shape") return draw;
+
+    const d = draw as SceneLayerDraw;
+    // No raster version → the graded-overlay path deliberately erased it ("a keyframed pipeline changes
+    // it every frame, it must always re-upload"). That is a declaration that the surface has no stable
+    // identity, and it is honoured rather than worked around.
+    if (d.sourceVersion === undefined) return draw;
+    // Region-pass clones are OTHER layers folded into this draw; until their identities are composed in
+    // (they are `TimelineLayer`s, so it is tractable — just not this slice) a base carrying them cannot
+    // speak for the picture.
+    if (d.regionPasses && d.regionPasses.length > 0) return draw;
+
+    // A track matte's source is built through this same function, so it either carries a token or is
+    // uncacheable — compose rather than refuse. `draw: null` is the compositor's EMPTY matte, a
+    // constant, and folds as itself.
+    let matte = "";
+    if (d.matteFrom) {
+      const source = d.matteFrom.draw;
+      if (source) {
+        const token = (source as { flarexContentToken?: string }).flarexContentToken;
+        if (token === undefined) return draw;
+        matte = `${token}/${d.matteFrom.mode}/${d.matteFrom.invert ? 1 : 0}`;
+      } else matte = `empty/${d.matteFrom.mode}/${d.matteFrom.invert ? 1 : 0}`;
+    }
+
+    // Mask rasters live in `matteCache`, keyed by layer and comp-local time and versioned there. Every
+    // pass that carries one contributes its version; a pass with a mask but NO version is a mask whose
+    // freshness the cache cannot describe, so the whole draw declines.
+    let masks = d.maskVersion === undefined ? "" : `m${d.maskVersion}`;
+    for (const pass of d.fragmentPasses ?? []) {
+      if (!pass.mask) continue;
+      if (pass.maskVersion === undefined) return draw;
+      masks += `/f${pass.maskVersion}`;
+    }
+
+    d.flarexContentToken = `tl1|${layer.type}|${layerIdentityDigest(layer)}|r${d.sourceVersion}|${masks}|${matte}`;
+    return draw;
+  };
+
+  /**
    * Flarex hook (FLAREX.md): the finished layer draw becomes the comp's MediaIn and the lowered graph
    * replaces it. Applied at the END of `buildLayerDrawWithPasses` so every consumer path (top-level,
    * transition sides, nested children, track-matte sources) gets comp output uniformly. A comp that
@@ -857,6 +972,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
         blendMode: "normal",
         ...(proxy.sourceVersion === undefined ? {} : { sourceVersion: proxy.sourceVersion }),
+        // T7: "a proxy is a source; it carries a time". The frame has carried one since S4.2 and the
+        // draw dropped it, so the one participant standing in for a whole comp was the one a
+        // per-draw coherence read could not evaluate.
+        ...(proxy.servedTime === undefined ? {} : { servedTime: proxy.servedTime }),
       };
     }
     // Profiler-only: isolate compile-only time from the rest of buildSceneDraws (the gate metric — is the
@@ -883,10 +1002,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       onDegrade: inputs.onFlarexDegrade ? (degradation) => inputs.onFlarexDegrade!(comp.id, degradation) : undefined,
       // S6.4/S6.6 — comp id attached here, so a node id is never ambiguous across comps in one frame.
       onEvaluated: inputs.flarexOnEvaluated
-        ? (nodeId, contextKey, value) => inputs.flarexOnEvaluated!(comp.id, nodeId, contextKey, value)
+        ? (nodeId, contextKey, value, contentHash) => inputs.flarexOnEvaluated!(comp.id, nodeId, contextKey, value, contentHash)
         : undefined,
       reuseValue: inputs.flarexReuseValue
-        ? (nodeId, contextKey) => inputs.flarexReuseValue!(comp.id, nodeId, contextKey)
+        ? (nodeId, contextKey, contentHash) => inputs.flarexReuseValue!(comp.id, nodeId, contextKey, contentHash)
         : undefined,
       // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
       // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its
@@ -909,6 +1028,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         return cachedPreFlarexDraw(virtual, dims, comp.version ?? 0) ?? "pending";
       },
     }));
+    // ADR-021 3b: complete the frame-key token. The compiler supplied the graph half; the timeline
+    // half is this layer's identity (see `layerIdentityDigest`). Only ever appended to a token the
+    // compiler actually stamped, so a draw that lowered to nothing — or a comp served from its proxy,
+    // which returns early above and carries no token — stays uncacheable rather than acquiring an
+    // identity it cannot honour.
+    if (lowered?.flarexContentToken !== undefined) {
+      lowered.flarexContentToken = `${lowered.flarexContentToken}~${layerIdentityDigest(layer)}`;
+    }
     return lowered ?? draw;
   };
 
@@ -1055,7 +1182,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
   ): SceneLayerDraw | SceneGroupDraw | null {
-    return applyFlarex(layer, buildLayerPreFlarexDraw(layer, dims), dims);
+    const drawn = applyFlarex(layer, buildLayerPreFlarexDraw(layer, dims), dims);
+    return stampNonMediaContentToken(layer, drawn);
   }
 
   // ─── Nesting: fold __nest_ children into compound-clip GROUP draws (NESTING.md Phase C) ─────────────

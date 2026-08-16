@@ -3021,3 +3021,78 @@ probe's history.
 TRANSPORT rather than the decoder. WebCodecs *was* engaged, `__rfWcMode` *did* read `wc-sw`, and the
 build-identity check *did* pass — every precondition the probe knew to assert was green, and the run
 was still about a different machine than the one it named.
+
+## v36 — a frame cache's failure is a RENDERING bug, so the arm went in before the cache (2026-08-16)
+
+**Problem.** ADR-021 3b adds a composited-frame cache — the RAM-Preview object that makes scrub-back
+and loop instant. Its characteristic failure is a **stale serve**, and a stale serve does not look
+like a caching bug. The picture is wrong, or frozen, or a frame late, and every instinct sends you
+into the compositor. The gate we already have for this class, `render:compare:pixels`, is
+structurally blind to it: one frame per fixture, and one frame is the only situation in which a frame
+cache is trivially correct.
+
+**Solution.** Build the arm first. `flarex:frame-cache-gate` renders each scenario WARM (one
+compositor, cache on, keys declared as a host must declare them) against COLD (a fresh compositor per
+frame, cache off) and compares frame by frame — cold is the oracle. Parity alone is not the bar,
+because a cache that never hits passes it trivially, so it also asserts exact **predicted hit counts**,
+the **settle gate** (an unsettled frame must be declined, not stored), and eviction under a squeezed
+budget.
+
+**And prove the arm can fire.** `FRAME_CACHE_SABOTAGE=drop-t` collides every frame onto one key (16
+failures, picture frozen at 1 distinct frame against cold's 24); `drop-graph` makes an edit invisible
+(the pre-edit picture served for 8 frames). Both gate-side, no product code touched.
+
+**The sabotage caught a defect in the GATE, not the cache.** `drop-graph` first failed only on the hit
+COUNT while the divergence check reported a clean sweep — because the edit fixture changed a param
+that moved the content hash without moving any pixels, so the oracle was comparing two identical
+pictures and *could not fail*. An arm that cannot fire is not an arm. The fixture now drives exposure
+on a colour node and `drop-graph` fails on both the pixels and the count.
+
+**Generalisable rule.** When a gate's oracle is a comparison, the fixture must be chosen so the two
+sides genuinely differ when the defect is present. A pixel oracle over a pixel-invisible edit is a
+green light with nothing behind it — the same class as v34a's never-deleted diagnostic row, and the
+same cost if believed.
+
+**Second instrument: four generations, and NO VERDICT — every reading is VOID.**
+`flarex:frame-cache-field` asks what the mechanism gate cannot: does the SHIPPED HOST declare the
+right key on a real project. It has not answered, and the readings must not be quoted as if it had.
+
+**All of it was measured while C: ran down to ZERO bytes free** (195.8 GB of leaked headless-browser
+profiles — see architectural-debt DEBT-025). Void, and specifically not to be repeated as facts about
+the renderer: run 1's apparent stale serve; the 0-to-6-of-6 cross-load noise floor; the same-load
+2-of-6 bypass disagreement; and the conclusion drawn from it that **I-P8 does not hold in the live
+editor**.
+
+**A full disk is the most dangerous environment fault this tracker has recorded, because of HOW it
+presents.** Chrome cannot write its cache, a screenshot comes back partial, a decoder fails — and what
+the harness observes is *the picture at a fixed `t` did not reproduce*. That is indistinguishable by
+inspection from a real renderer finding. The moment it became visible ("No space left on device") was
+not the moment it began, so nothing in the window can be rescued by arguing it looked fine at the time.
+
+**What survives is the instrument design, and it is worth keeping.** Gens 1-3 compared cache-on and
+cache-off across separate page LOADS, with ARM A running first against cold proxies and decoders; gen
+4 replaced that with runtime bypass (`__rfFrameCacheBypass`), five sweeps inside ONE load over warmed
+decoders, and a noise floor treated as a **precondition that VOIDs** rather than a quantity to
+subtract. Re-run that instrument on a clean machine; do not rebuild it.
+
+**Two design rules, independent of any reading:**
+1. A differential instrument's arms must differ in EXACTLY the variable under test. Order-of-execution
+   is a variable; so is warmth.
+2. **A noise floor is a PRECONDITION, not a subtraction.** Gen 3 printed `ok` on a pass whose floor was
+   6 of 6 — every position unstable, so "no divergence above the floor" was arithmetically guaranteed.
+
+**And the durable output, which outlives the cache question: FREE DISK IS NOW A HARD PRECONDITION.**
+Two halves, and they were built by two sessions on the same night without knowing it — which is its own
+evidence about how sharply this bites.
+
+- **The refusal**, `assertFreeDisk` (sibling session, `browser-preflight.ts`): 5 GB floor,
+  `GATE_MIN_FREE_GB` overrides, checks both the temp and repo volumes, called first in
+  `assertQuietBrowserMachine`, from `assertZeroBrowserFloor`, and per-fixture in `render-baseline-gate`
+  — because a sweep can start with headroom and run out three fixtures in.
+- **The collector**, `reapStaleBrowserProfiles` (this session, same file): deletes leaked
+  `puppeteer_dev_chrome_profile-*` / `playwright_*` dirs older than 2h (`GATE_PROFILE_REAP_HOURS`)
+  before the refusal measures anything. Without it the refusal is a trap — it would block gates over
+  garbage the gates themselves produce every run, and the operational answer would become "delete
+  14,000 directories by hand", which nobody does, so the floor would just get set to 0.
+
+"The machine is clean" now means: no stray browser, no stale harness, **and it can still write.**
