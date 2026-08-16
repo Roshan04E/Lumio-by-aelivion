@@ -1001,7 +1001,17 @@ working API unsupported. Written into `font-variation.ts` and the falsifier's fa
 with `wght` 400–700), subject (400 vs 700 differ), D1a (absent == the file's own default, in pixels),
 the arc surface (curved 400 vs 700 differ), refusal (system ref + axis is byte-identical to system
 ref). `textstyle:golden` 103 cases with **4 added and 0 changed**. `textstyle:schema` 33 fields swept.
-`render:baseline` 86/86 unchanged. Stills read, not just hashed: the 700 is the same Arimo letterform
+`font:install-gate`, `text:s5-falsifier`, `font:face-test`, `font:index-test`, `font:catalogue-test`
+all unchanged.
+
+**`render:baseline` is INCOMPLETE and that is stated rather than rounded up.** The sweep died at
+`ENOSPC` — the host volume reached 0 bytes free of 465G — after `scaled-text` reported `unchanged`,
+and a partial earlier run had reported `unchanged` for every fixture it reached (through
+`stylize-subject`) before dying the same way. **No fixture has reported CHANGED at any point.** But
+"no failure observed" over an unknown fraction of the sweep is not the zero-tolerance statement this
+gate exists to make, and the D1a claim for this stage rests on `textstyle:golden` (0 of 103 emitted
+styles moved) and on the falsifier's absent-==-default arm in pixels, both of which DID complete.
+**Re-run `render:baseline` once the volume has room.** Stills read, not just hashed: the 700 is the same Arimo letterform
 with interpolated stems, not a faux-bold smear or a substituted face.
 
 ### S9b — ANIMATING the axis. **Not started.**
