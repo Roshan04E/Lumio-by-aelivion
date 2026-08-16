@@ -43,8 +43,21 @@ import { chromium, type Page } from "playwright";
 import { assertQuietBrowserMachine } from "./browser/browser-preflight";
 import { addAssetSourceMediaIn, awaitWebCodecsEngaged, defaultClipPath, reachEditor } from "./browser/editor-session.js";
 
-/** Ruler positions, as fractions of its width. */
-const STOPS = [0.12, 0.18, 0.24, 0.3, 0.36, 0.42];
+/**
+ * Ruler positions, as fractions of its width — CALIBRATED at runtime, never hardcoded.
+ *
+ * WHY, measured 2026-08-16. Fixed fractions [0.12 … 0.42] assumed the ruler's span matched the
+ * composition's. It does not: the ruler ran ~70s wide over a ~16.8s comp, so every stop from 0.24 up
+ * CLAMPED to t=16.800 — the last frame. Scrubbing repeatedly past the end is not a measurement of the
+ * cache; it samples whatever the decoder happened to leave on screen, and the results said exactly
+ * that. One run reported a 4-position STALE SERVE and the next a 3-position unstable ORACLE, both
+ * confined entirely to the clamped stops, while the two in-range stops (t=8.4, 12.6) were identical
+ * across every sweep of both runs.
+ *
+ * That is the instrument failing the rule it exists to enforce: it must be able to tell the answers
+ * apart. Sampling one frame six times cannot distinguish a stale serve from a correct one.
+ */
+let STOPS: number[] = [];
 /** Settle after each scrub. A Flarex comp on live footage needs a decode to land before the picture
  *  is the picture; screenshotting early would compare two half-drawn frames and blame the cache.
  *  `FIELD_SETTLE_MS` raises it — the instrument for telling "the picture at this t is still
@@ -84,6 +97,54 @@ async function setBypass(page: Page, on: boolean): Promise<void> {
   await page.evaluate((v: boolean) => {
     (window as unknown as { __rfFrameCacheBypass?: boolean }).__rfFrameCacheBypass = v;
   }, on);
+}
+
+async function scrubTo(page: Page, geometry: { y: number; left: number; width: number }, fraction: number): Promise<number | null> {
+  await page.mouse.click(geometry.left + geometry.width * fraction, geometry.y);
+  await page.waitForTimeout(400);
+  return page.evaluate(() => (window as unknown as { __rfClock?: { committed: number } }).__rfClock?.committed ?? null);
+}
+
+/**
+ * Find the fractions that actually land INSIDE the composition, and spread the stops across them.
+ *
+ * The ruler is linear in t, so one in-range reading gives seconds-per-fraction, and a deliberately
+ * over-far scrub gives the composition duration (it clamps to the end). Everything past that fraction
+ * is the same frame, which is the trap this replaces.
+ */
+async function calibrateStops(page: Page, geometry: { y: number; left: number; width: number }, count: number): Promise<number[] | null> {
+  const near = await scrubTo(page, geometry, 0.1);
+  if (near == null || near <= 0) {
+    console.log(`  calibration           : t(0.10)=${near ?? "null"} — no usable reference scrub`);
+    return null;
+  }
+  const secondsPerFraction = near / 0.1;
+
+  // A click PAST the composition is IGNORED, not clamped -- the playhead simply stays where it was
+  // (measured: t(0.92) read back 0, the initial value, rather than the comp duration). So the end
+  // cannot be found by scrubbing far and reading the clamp; it has to be searched for. A stop is
+  // "in range" when the playhead actually arrives near where the ruler's linear mapping says it should.
+  let lo = 0.1;
+  let hi = 0.92;
+  for (let i = 0; i < 7; i++) {
+    const mid = (lo + hi) / 2;
+    const t = await scrubTo(page, geometry, mid);
+    const expected = mid * secondsPerFraction;
+    if (t != null && Math.abs(t - expected) < Math.max(0.5, expected * 0.05)) lo = mid;
+    else hi = mid;
+  }
+  const endFraction = lo;
+  console.log(
+    `  calibration           : ${secondsPerFraction.toFixed(1)}s per ruler-fraction, comp ends at ~${endFraction.toFixed(3)} ` +
+      `(~${(endFraction * secondsPerFraction).toFixed(1)}s)`,
+  );
+  if (!Number.isFinite(endFraction) || endFraction <= 0.05) return null;
+  // Stay clear of both ends: t=0 is often a different code path, and the last frame is where a scrub
+  // past the end leaves the playhead.
+  const first = endFraction * 0.12;
+  const last = Math.min(endFraction * 0.88, 0.98);
+  if (last <= first) return null;
+  return Array.from({ length: count }, (_, i) => first + ((last - first) * i) / (count - 1));
 }
 
 async function sweep(page: Page, geometry: { y: number; left: number; width: number }): Promise<Sample[]> {
@@ -133,6 +194,15 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+  const calibrated = await calibrateStops(page, geometry, 6);
+  if (!calibrated) {
+    console.error("\n⚠ VOID — could not calibrate ruler stops against the composition duration.");
+    await browser.close();
+    process.exit(2);
+  }
+  STOPS = calibrated;
+  console.log(`  ruler stops           : ${STOPS.map((s) => s.toFixed(3)).join(", ")} (calibrated to the comp duration)`);
+
   await setBypass(page, true);
   await sweep(page, geometry); // WARM-UP, discarded.
 
@@ -174,6 +244,23 @@ async function main(): Promise<void> {
 
   if (afterServe.eligible !== true) fail("the host never declared a frame key on a Flarex comp — the 3b wiring is inert in the product");
   else ok("the shipped host declares a frame key for a Flarex comp frame");
+
+  // THE STOPS MUST LAND ON DISTINCT TIMES, or this probe is comparing one frame against itself.
+  // Not a soft warning: with fixed fractions the ruler ran past the end of the comp and FOUR of six
+  // stops clamped to the same t, which produced a 4-position "STALE SERVE" in one run and a
+  // 3-position unstable "ORACLE" in the next -- both entirely inside the clamped region, while the
+  // in-range stops agreed perfectly. An instrument that cannot tell the answers apart must VOID.
+  const times = aServe.map((s) => (s.time == null ? null : Math.round(s.time * 1000)));
+  const distinctTimes = new Set(times.filter((t) => t != null)).size;
+  if (distinctTimes < STOPS.length) {
+    console.error(
+      `\n⚠ VOID — the ${STOPS.length} stops produced only ${distinctTimes} distinct playhead time(s) ` +
+        `[${times.map((t) => (t == null ? "?" : (t / 1000).toFixed(3))).join(", ")}]. The scrub is clamping at the ` +
+        `end of the composition, so the repeated stops sample one frame and prove nothing about the cache.`,
+    );
+    process.exit(2);
+  }
+  ok(`the ${STOPS.length} stops land on ${distinctTimes} distinct playhead times`);
 
   const signal: number[] = [];
   const noise: number[] = [];

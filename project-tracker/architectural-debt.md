@@ -3871,16 +3871,46 @@ is not in question: runtime bypass via `__rfFrameCacheBypass`, five sweeps insid
 warmed decoders, and a noise floor treated as a **precondition that VOIDs the run** rather than a
 quantity to subtract. Re-run that instrument; do not rebuild it.
 
-**The open question is untouched — it was never answered, not even wrongly.** On a machine with disk:
-1. Re-run the same-load probe **three times**.
-2. If the oracle is reproducible, decide the default on that evidence.
-3. If it is **still** not reproducible with disk free, the I-P8 finding is real *then*, and
-   `FIELD_SETTLE_MS` splits the fork already framed: **converging** (a longer settle stabilises it →
-   the settle predicate is too eager, and the fix belongs there) versus **nondeterministic** (no settle
-   does → 3b's ceiling is set by the media path, and no re-render oracle can ever verify a frame cache
-   on this path).
+**RE-RUN ON A CLEAN MACHINE, 2026-08-16 (238 GB free). The disk was necessary but not sufficient:
+the probe had TWO defects of its own hiding underneath it, and both are now fixed.**
 
-**Keep the default OFF until that probe answers on a clean machine.**
+1. **The stops sampled past the end of the composition.** Fixed fractions `[0.12 … 0.42]` assumed the
+   ruler's span matched the comp's; the ruler ran ~70s wide over a ~22s comp. A click past the end is
+   **ignored, not clamped** (measured: `t(0.92)` read back 0, the initial value), so the playhead simply
+   stayed where the previous stop left it and four of six stops re-measured ONE frame. **That single
+   defect produced both earlier "findings"** — the 4-position stale serve and the 3-position unstable
+   oracle were each confined entirely to the dead stops, while the two in-range stops agreed perfectly
+   across every sweep of both runs. The probe now binary-searches for the real end and **VOIDs unless
+   the stops land on distinct playhead times**.
+2. **The seed clip was selected to be static.** `defaultClipPath` takes the *smallest* mp4 ≥20s — the
+   lowest-bitrate, least-moving file present. The first clean run VOIDed on the probe's own
+   one-distinct-picture guard. Use `PROBE_CLIP` with real motion.
+
+**What the fixed instrument says.** With both corrected, the good runs are unambiguous: **6 distinct
+pictures at 6 distinct times, `attributable = 0`, 16/17 of 17 frames served from cache and every one
+pixel-identical to a fresh render.** That is the first real evidence the shipped host's key is
+COMPLETE.
+
+**But the oracle still does not reproduce reliably, and a longer settle no longer buys anything:**
+
+| `FIELD_SETTLE_MS` | noise floor per run (of 6) |
+| --- | --- |
+| 900 | 2, 3 |
+| 2500 | 1, 1, 2 |
+| 6000 | 2, 1 (a third run died at browser launch) |
+
+900 → 2500 helps; **2500 → 6000 does not.** It plateaus at 1–2 of 6 unstable positions, which is the
+**NONDETERMINISTIC** branch of the fork, not the converging one. The settle predicate being too eager
+is real and worth fixing, but it is not the whole story: a residual irreproducibility survives any
+wait tested.
+
+**So I-P8 is now a genuine open question about the media path** — properly isolated at last from the
+disk (fixed) and from instrument error (two defects found and fixed). It is not established as a
+renderer defect; it is established that a re-render oracle cannot currently certify this path to 3/3.
+
+**KEEP THE DEFAULT OFF.** Two of three clean runs passing is not the bar for flipping a default that
+decides whether the editor shows a stale frame. The remaining work is to make the oracle deterministic
+— or to find an oracle that does not depend on re-rendering — not to re-run this one hoping for three.
 
 ---
 
