@@ -79,6 +79,8 @@ import {
   getLayerAnimations,
   hasTextWarp,
   getCompositionFontRef,
+  collectFlarexGeneratorTextLayers,
+  type CompositionLayerStyleInput,
   isPinnedFontRef,
   isTextVisualOrderUnavailable,
   normalizeTextWarp,
@@ -116,7 +118,14 @@ import { WebglColorView } from "./WebglColorView";
 import { WebglVideoOverlay } from "./WebglVideoOverlay";
 import { WebglMediaLayer, requestLiveReprime } from "./WebglMediaLayer";
 import { ProxyPlaybackLayer, type ProxyPlaybackHit } from "./ProxyPlaybackLayer";
-import { fontInstallState, fontInstallVersion, installCompositionFonts, resolveFontFaceCss, subscribeFontInstalls } from "../lib/font-install";
+import {
+  fontInstallFailureMessage,
+  fontInstallState,
+  fontInstallVersion,
+  installCompositionFonts,
+  resolveFontFaceCss,
+  subscribeFontInstalls
+} from "../lib/font-install";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { getGlGovernorEnabled, getRegionPassesEnabled, getSingleCtxPreviewEnabled, useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
 import type { SceneMediaSink, ScenePreviewMediaSource } from "./scene-media-source";
@@ -758,8 +767,16 @@ function VideoPreviewImpl({
    * loaded a moment later, or — worse — never show it for one that failed after mount.
    */
   useEffect(() => {
-    installCompositionFonts(composition.tracks.flatMap((track) => track.layers));
-  }, [composition]);
+    // A Text+ node's pin lives in the Flarex comp graph, not in `composition.tracks` — its virtual
+    // layer is synthesized later, deep inside scene-building. Without this concat its font would
+    // never reach `installCompositionFonts`'s scan and `ensureOverlayFonts` would have nothing
+    // registered to wait on (DEBT-028's `flarex-generators` divergence).
+    const fontScanLayers: CompositionLayerStyleInput[] = [
+      ...composition.tracks.flatMap((track) => track.layers),
+      ...collectFlarexGeneratorTextLayers(graph.flarexComps)
+    ];
+    installCompositionFonts(fontScanLayers);
+  }, [composition, graph.flarexComps]);
   useSyncExternalStore(subscribeFontInstalls, fontInstallVersion, fontInstallVersion);
   const phoneFrameRef = useRef<HTMLDivElement | null>(null);
   // Merge internal ref with optional external frameRef prop (for color scopes).
@@ -3710,6 +3727,11 @@ const PreviewLayer = memo(function PreviewLayer({
     // again: wrong pixels that look like a working feature. Export is blocked separately.
     const pinnedRef = getCompositionFontRef(layer);
     const fontSubstituted = isPinnedFontRef(pinnedRef) && fontInstallState(pinnedRef) === "missing";
+    // The WHY, not just the THAT — see font-install.ts's `FontInstallFailureReason`. A blanket
+    // "missing" collapsed a 401 on the mirror, a token-less session, and a corrupt file into one
+    // sentence that told nobody what to do next (founder testing, 2026-08-16: the real cause was an
+    // expired session, and "missing font" sent the search in the wrong direction entirely).
+    const fontSubstitutedMessage = fontSubstituted && isPinnedFontRef(pinnedRef) ? fontInstallFailureMessage(pinnedRef) : undefined;
     // Clip mask (text): the comp-px mask must live on a comp-sized, transform-less wrapper (text is
     // content-sized) so it aligns + stays comp-fixed like the GPU scene path. `null` when unmasked → no
     // wrapper, byte-identical to before. The inner button re-enables pointer events (wrapper is none).
@@ -3737,7 +3759,7 @@ const PreviewLayer = memo(function PreviewLayer({
     const textRunSpans = visibleRuns.map((run, index) => (
       <span
         key={`${layer.id}_run_${index}`}
-        style={{ ...(getCompositionTextRunStyle(run, style) as CSSProperties), visibility: warpReady ? "hidden" : undefined }}
+        style={{ ...(getCompositionTextRunStyle(run, style, pinnedRef) as CSSProperties), visibility: warpReady ? "hidden" : undefined }}
       >
         {run.text}
       </span>
@@ -3752,7 +3774,7 @@ const PreviewLayer = memo(function PreviewLayer({
           <span
             key={`${layer.id}_ring_${index}`}
             style={{
-              ...(toOuterStrokeRunStyle(getCompositionTextRunStyle(run, style)) as CSSProperties),
+              ...(toOuterStrokeRunStyle(getCompositionTextRunStyle(run, style, pinnedRef)) as CSSProperties),
               visibility: warpReady ? "hidden" : undefined
             }}
           >
@@ -3839,7 +3861,7 @@ const PreviewLayer = memo(function PreviewLayer({
             data-testid="preview-font-substituted"
             style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
           >
-            Missing font — showing a substitute
+            {fontSubstitutedMessage ?? "Missing font — showing a substitute"}
           </span>
         ) : null}
         {selected ? (

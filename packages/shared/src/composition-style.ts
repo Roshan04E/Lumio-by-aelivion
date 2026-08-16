@@ -60,6 +60,14 @@ export interface CompositionLayerStyleInput {
    */
   text?: string | undefined;
   textRuns?: TextRun[] | undefined;
+  /**
+   * ADR-023 S10 — so a pinned RUN font authored only inside a source-text keyframe entry is still
+   * reachable by `collectPinnedFontInstances`/`collectPinnedFontRefs` (font-install.ts). Those walk
+   * this interface's fields, not `TimelineLayer`'s wider one, and a pinned font the export's abort
+   * check cannot see is exactly the silent "hope the render box has this font" case D1 exists to
+   * remove — reachable for the first time once a run (not just a layer) can carry a `FontRef`.
+   */
+  sourceTextKeyframes?: SourceTextKeyframe[] | undefined;
   textWarp?: TextWarp | undefined;
   fit?: "cover" | "contain" | "fill" | string | undefined;
   blendMode?: BlendMode | undefined;
@@ -1346,7 +1354,18 @@ export function getCompositionTextRunStyle(
     /** ADR-023 S8 — present when the layer has a concentric outer ring, which the run must paint
      *  above for the same reason and by the same mechanism as the pill. */
     textOuterStroke?: string | undefined;
-  }
+  },
+  /**
+   * ADR-023 S10 — the layer's own resolved font, so a run's `fontRef` has something to normalize
+   * against and `fontRefCss` can be asked for the run's own family/weight/style.
+   *
+   * NOT read off `baseStyle`: that object is what `text-style-css.golden.json` pins byte-for-byte
+   * (`text-style-resolution.test.ts`), and a structured `FontRef` riding along inside it would move
+   * every one of those goldens for a value only THIS function needs. Passed explicitly instead —
+   * every call site already holds the `layer` `getCompositionTextStyle` was built from, so this is
+   * one more (cheap, pure) call to `getCompositionFontRef`, not a new lookup.
+   */
+  layerFontRef: FontRef
 ): Record<string, unknown> {
   const baseFontSize = numberOr(baseStyle.fontSize, compositionTextDefaults.fontSize);
   // ADR-023 D7 (S5). `background-clip: text` belongs on the run span rather than the layer box, and
@@ -1354,16 +1373,33 @@ export function getCompositionTextRunStyle(
   // paint, because that is what "gradient-filled title" means. Keys are appended, and only when a
   // gradient exists, so a layer without one emits exactly the object it emitted before S5.
   const gradient = baseStyle.textFillGradient;
+  /**
+   * ADR-023 S10. A run's OWN pinned/system font, resolved through the same normalization the layer
+   * gets (`getCompositionRunFontRef`), and consulted for CSS ONLY when the run actually diverges from
+   * the layer (`hasOwnFont`). A flagless run therefore emits EXACTLY what it emitted before S10:
+   * `baseStyle.fontFamily`/`fontWeight`/`fontStyle` untouched, byte-identical.
+   *
+   * Once a run diverges, `fontRefCss` decides weight/style the same way it already does for a pinned
+   * LAYER (S2.6/S2.7): a PINNED run's weight/style come from the FILE and override
+   * `run.bold`/`run.italic`; a SYSTEM run (a raw `fontFamily` string — legacy, or freshly picked from
+   * the picker's own "System" rows, which write no ref either) returns only a family, so
+   * `run.bold`/`run.italic` keep deciding weight/style exactly as they always have.
+   *
+   * No axis support at the run level — S9a stays layer-only, stated rather than silently absent: a
+   * run can ask for a static pinned file or a system stack, not a variable-axis instance.
+   */
+  const hasOwnFont = Boolean(run.fontRef || run.fontFamily);
+  const runFontCss = hasOwnFont ? fontRefCss(getCompositionRunFontRef(run, layerFontRef)) : undefined;
   return {
-    fontWeight: run.bold ? 900 : baseStyle.fontWeight,
+    fontWeight: runFontCss?.fontWeight ?? (run.bold ? 900 : baseStyle.fontWeight),
     // Like fontWeight above, the run only OVERRIDES the layer style — it must not zero it out.
     // This used to force "normal" whenever the run had no italic flag, which silently discarded
     // the layer-level Italic toggle in EVERY renderer (plain text = one flagless run).
-    fontStyle: run.italic ? "italic" : baseStyle.fontStyle ?? "normal",
+    fontStyle: runFontCss?.fontStyle ?? (run.italic ? "italic" : baseStyle.fontStyle ?? "normal"),
     color: run.color ?? baseStyle.color,
     // Per-run highlight (marker). Distinct from the layer's background pill.
     backgroundColor: run.backgroundColor,
-    fontFamily: run.fontFamily ?? baseStyle.fontFamily,
+    fontFamily: runFontCss?.fontFamily ?? baseStyle.fontFamily,
     fontSize: run.fontSizeMultiplier ? baseFontSize * run.fontSizeMultiplier : baseStyle.fontSize,
     ...(gradient
       ? {
@@ -1574,6 +1610,28 @@ export function getCompositionFontRef(layer: CompositionLayerStyleInput | Timeli
 }
 
 /**
+ * ADR-023 S10 — a RUN's font identity, mirroring `getCompositionFontRef`'s rule at one layer down.
+ *
+ * THE ONE PLACE a run's `fontRef`/`fontFamily` pair is read. Three cases, and only three (D1a):
+ *
+ *  1. `run.fontRef` present → the S10 pinned path. Normalized (never trusted raw — the same care
+ *     `getCompositionFontRef` gives the layer), falling back to `run.fontFamily` only if the ref
+ *     itself is malformed, exactly like the layer's own normalization.
+ *  2. `run.fontRef` absent, `run.fontFamily` present → a raw CSS stack. This is BOTH "authored before
+ *     S10" (the rich-text toolbar used to write nothing else) AND a fresh pick from the picker's own
+ *     "System" rows (which also write no ref — a system stack never needed one). Either way it
+ *     resolves as `{ source: "system" }` FOREVER. Never name-matched onto a catalogue family: "Anton"
+ *     typed as a system stack and "Anton" pinned by hash are different renders, and T-17 is what makes
+ *     that distinction testable rather than asserted.
+ *  3. Both absent → inherit the layer's own resolved font, unchanged from every render before S10.
+ */
+export function getCompositionRunFontRef(run: TextRun, layerFontRef: FontRef): FontRef {
+  if (run.fontRef) return normalizeFontRef(run.fontRef, run.fontFamily ?? "");
+  if (run.fontFamily) return { source: "system", fontFamily: run.fontFamily };
+  return layerFontRef;
+}
+
+/**
  * ADR-023 S9a — the ONE place the axis fields are read off a layer, for `getCompositionFontRef`'s
  * reason: the install plan and the CSS emission must agree about which instance exists, and they are
  * in different packages. Two independent `layer.x ?? style.x` reads is how the family token comes to
@@ -1699,10 +1757,16 @@ export function getCompositionTextWarp(layer: CompositionLayerStyleInput | Timel
  * `text`/`textRuns` (S0c) joined this list because the style resolver reads the layer's content to
  * resolve `direction: "auto"`. Copying them into the style bag as well would give the same string
  * two homes that can disagree.
+ *
+ * `sourceTextKeyframes` (S10) is the same shape as `text`/`textRuns`: `RenderManifestLayer`
+ * (`packages/render-templates`) carries it at its own top level, not inside the style bag, so it
+ * belongs here rather than in `MANIFEST_LAYER_STYLE_KEYS` — it is on `CompositionLayerStyleInput`
+ * only so `collectPinnedFontInstances`/`collectPinnedFontRefs` (font-install.ts) can reach a run's
+ * pinned font when it is authored inside a keyframe entry rather than in `textRuns` directly.
  */
 type NonStyleBagKey =
   | "id" | "startSeconds" | "transform" | "keyframes" | "animations" | "style" | "effects" | "masks" | "blendMode"
-  | "text" | "textRuns";
+  | "text" | "textRuns" | "sourceTextKeyframes";
 
 /** Every style field the manifest's `style` bag is obliged to carry. */
 export type ManifestLayerStyleKey = Exclude<keyof CompositionLayerStyleInput, NonStyleBagKey>;
@@ -1895,7 +1959,18 @@ export function isTextVisualOrderUnavailable(layer: {
   if (!detectTextScript(runs.map((run) => run.text).join("")).shapingDependent) return false;
   const signatures = new Set(
     runs.map((run) =>
-      JSON.stringify([run.bold ?? false, run.italic ?? false, run.color ?? "", run.backgroundColor ?? "", run.fontFamily ?? "", run.fontSizeMultiplier ?? 1])
+      // ADR-023 S10: `fontRef` joins the signature alongside `fontFamily`. Two runs can share a
+      // family STRING (the alias both a bundled pick and a legacy stack might use) while naming
+      // different FILES, and that is still two styles on one line for this rule's purposes.
+      JSON.stringify([
+        run.bold ?? false,
+        run.italic ?? false,
+        run.color ?? "",
+        run.backgroundColor ?? "",
+        run.fontFamily ?? "",
+        run.fontSizeMultiplier ?? 1,
+        run.fontRef ?? null
+      ])
     )
   );
   return signatures.size > 1;

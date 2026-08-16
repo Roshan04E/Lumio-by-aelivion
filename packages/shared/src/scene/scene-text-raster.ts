@@ -100,12 +100,20 @@ export class SceneTextRasterizer {
   // At most one raster in flight per layer, so the pooled canvas is never drawn into concurrently.
   private readonly inFlight = new Set<string>();
   /**
-   * A re-raster wave for fonts that arrive from somewhere else mid-session — an OPTIMIZATION, and
-   * deliberately no longer load-bearing. It used to be the only thing that got a pinned font onto the
-   * glyphs, which made correctness rest on a debounced notification (DEBT-009, instance 4): a
-   * composition with no media layer had nothing slow enough in it to outlast the 150ms, and rendered
-   * a fallback. `ensureOverlayFonts` in `rasterize` now establishes readiness on the consumer's own
-   * path, so this can be late, coalesced, or never fire at all without the picture being wrong.
+   * A re-raster wave for fonts that arrive from somewhere else mid-session — a version bump so
+   * `keyFor` misses the cache, PROVEN correct by `ensureOverlayFonts` in `rasterize`, not by this
+   * listener (DEBT-009, instance 4): a composition with no media layer had nothing slow enough in it
+   * to outlast the old 150ms debounce, and rendered a fallback forever. That half is fixed.
+   *
+   * What is NOT an optimization is the `onReady` call below. `SCENE_SETTLE_MS` (600ms,
+   * `ScenePreviewCanvas.tsx`) stops the draw loop from calling `get()` at all once nothing has
+   * requested a redraw for 600ms — a paused editor goes idle on purpose. A font mirror round trip or
+   * an OPFS read routinely outlasts 600ms, so by the time `loadingdone` fires and this debounce
+   * elapses, the loop has already stopped looking at `fontsVersion`. Bumping the counter without
+   * re-arming the loop is invisible: the cache key changed, but nothing calls `get()` again to notice
+   * — the stale raster (fallback glyphs, or the pre-upload font) sits on screen until an unrelated
+   * redraw (scrub, resize, reload) happens to ask. `onReady` is `requestDraw` (see the constructor
+   * doc): calling it here is what turns "a font arrived" into "the loop wakes up and looks."
    */
   private fontsVersion = 0;
   private fontsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -116,6 +124,10 @@ export class SceneTextRasterizer {
     this.fontsTimer = setTimeout(() => {
       this.fontsVersion += 1;
       this.fontsTimer = null;
+      // Re-arm the settle window so the idle loop calls `get()` again and actually sees the bump —
+      // see the doc above. Safe to call even when the loop is already active (requestDraw just
+      // extends the window) and even when no layer's key actually changed (a no-op re-raster wave).
+      this.onReady?.();
     }, 150);
   };
 
@@ -155,7 +167,10 @@ export class SceneTextRasterizer {
     if (layer.type === "text") {
       // EVERY run field that changes drawn pixels must key the cache (bold/italic/highlight/font
       // were missing — a rich-text edit or a source-text keyframe crossing wouldn't re-raster).
-      const runs = getVisibleTextRuns(layer, t).map((r) => [r.text, r.color, r.backgroundColor, r.bold, r.italic, r.fontFamily, r.fontSizeMultiplier]);
+      // ADR-023 S10: `fontRef` joins `fontFamily` — two pinned run fonts can share a family ALIAS
+      // (both a bundled Anton and a re-mirrored Anton register under "Anton") while naming different
+      // FILES, and without this a raster picked for one would be silently reused for the other.
+      const runs = getVisibleTextRuns(layer, t).map((r) => [r.text, r.color, r.backgroundColor, r.bold, r.italic, r.fontFamily, r.fontRef ?? null, r.fontSizeMultiplier]);
       const style = contentStyleForKey(getCompositionTextStyle(layer, { currentTimeSeconds: t, ...this.styleOptions }) as Record<string, unknown>);
       // textWarp is NOT part of getCompositionTextStyle (it's a vector overlay, not a CSS style), so it
       // MUST be in the key explicitly — otherwise applying/changing warp doesn't invalidate the cached

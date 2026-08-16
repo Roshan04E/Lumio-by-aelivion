@@ -45,6 +45,7 @@ import {
   createMockToolRun,
   createCaptionTrack,
   createCaptionInterchangeArtifact,
+  getCompositionFontRef,
   getCompositionTextRunStyle,
   getCompositionTextRuns,
   getCompositionTextStyle,
@@ -2783,7 +2784,7 @@ function AutoCaptionMediaPreview({
       {textLayer && scaledTextStyle && textStyle ? (
         <div className="caption-media-preview-text" style={scaledTextStyle}>
           {getCompositionTextRuns(textLayer).map((run, index) => (
-            <span key={`${textLayer.id}_run_${index}`} style={getScaledCaptionRunStyle(run, textStyle, composition.width)}>
+            <span key={`${textLayer.id}_run_${index}`} style={getScaledCaptionRunStyle(run, textStyle, composition.width, textLayer)}>
               {run.text}
             </span>
           ))}
@@ -2803,8 +2804,14 @@ function getScaledCaptionTextStyle(layer: TimelineLayer, style: ReturnType<typeo
   };
 }
 
-function getScaledCaptionRunStyle(run: ReturnType<typeof getCompositionTextRuns>[number], baseStyle: ReturnType<typeof getCompositionTextStyle>, compositionWidth: number): CSSProperties {
-  const runStyle = getCompositionTextRunStyle(run, baseStyle);
+function getScaledCaptionRunStyle(
+  run: ReturnType<typeof getCompositionTextRuns>[number],
+  baseStyle: ReturnType<typeof getCompositionTextStyle>,
+  compositionWidth: number,
+  /** ADR-023 S10 — see `getCompositionTextRunStyle`'s own doc for why this travels separately. */
+  layer: TimelineLayer
+): CSSProperties {
+  const runStyle = getCompositionTextRunStyle(run, baseStyle, getCompositionFontRef(layer));
   const fontSize = typeof runStyle.fontSize === "number" ? runStyle.fontSize : Number(runStyle.fontSize) || 72;
   return {
     ...(runStyle as CSSProperties),

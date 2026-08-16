@@ -18,13 +18,29 @@
  * store for itself.
  */
 import type { CompositionLayerStyleInput } from "./composition-style";
-import { getCompositionFontAxesSource, getCompositionFontRef } from "./composition-style";
+import { getCompositionFontAxesSource, getCompositionFontRef, getCompositionRunFontRef, getCompositionTextRuns } from "./composition-style";
 import {
   fontVariationSettingsCss,
   resolveFontVariationAxes,
   type FontVariationAxes
 } from "./font-variation";
 import { cssFamilyToken, isPinnedFontRef, type FontRef, type PinnedFontRef } from "./fonts";
+import type { TextRun } from "./types";
+
+/**
+ * ADR-023 S10 — every run a layer might ever show, independent of the current playhead.
+ *
+ * Both collectors below need this to be TIME-INDEPENDENT: a pinned run font used only inside one
+ * source-text keyframe entry still has to abort a render that starts on a different one, or T-2's
+ * "abort BEFORE the first frame" guarantee has a gap sized exactly to "whichever entry the playhead
+ * was not on." `getVisibleTextRuns` (composition-style.ts) answers a DIFFERENT question — "what
+ * shows right now" — and is the wrong tool here for the same reason `getCompositionTextRuns` alone
+ * would be: it only sees `layer.textRuns`, never the keyframe entries.
+ */
+function everyRunFor(layer: CompositionLayerStyleInput): readonly TextRun[] {
+  if (layer.sourceTextKeyframes?.length) return layer.sourceTextKeyframes.flatMap((key) => key.runs);
+  return getCompositionTextRuns(layer);
+}
 
 /** One `@font-face` the render page must have before it draws. */
 export interface InstalledFontFace {
@@ -64,15 +80,28 @@ export interface PinnedFontInstance {
  * a layer at 620 gets its own. That is also the shape S9b will meter: a continuously animated axis
  * turns this list from "a handful" into "one per sampled value", which is why S9b's first job is to
  * measure the registration cost rather than assume it.
+ *
+ * ADR-023 S10 — a RUN can now carry its OWN pinned font too, and it is collected alongside the
+ * layer's: the layer's ref is always registered (harmless even if every run overrides it — one extra
+ * unused `@font-face` costs nothing next to a missed abort), and each run that diverges
+ * (`run.fontRef`/`run.fontFamily` present) adds its own resolved ref on top. A run's own pinned font
+ * registers with NO axis instance — S9a stays layer-only, a decision stated at
+ * `getCompositionTextRunStyle`'s doc, not an oversight here.
  */
 export function collectPinnedFontInstances(layers: CompositionLayerStyleInput[]): PinnedFontInstance[] {
   const byKey = new Map<string, PinnedFontInstance>();
-  for (const layer of layers) {
-    const ref: FontRef = getCompositionFontRef(layer);
-    if (!isPinnedFontRef(ref)) continue;
-    const axes = resolveFontVariationAxes(getCompositionFontAxesSource(layer));
+  const add = (ref: FontRef, axes: FontVariationAxes | undefined) => {
+    if (!isPinnedFontRef(ref)) return;
     const key = `${ref.source}|${ref.fileHash}|${ref.weight}|${ref.style}|${fontVariationSettingsCss(axes) ?? ""}`;
     if (!byKey.has(key)) byKey.set(key, { ref, axes });
+  };
+  for (const layer of layers) {
+    const layerRef = getCompositionFontRef(layer);
+    add(layerRef, resolveFontVariationAxes(getCompositionFontAxesSource(layer)));
+    for (const run of everyRunFor(layer)) {
+      if (!run.fontRef && !run.fontFamily) continue; // inherits the layer, already added above
+      add(getCompositionRunFontRef(run, layerRef), undefined);
+    }
   }
   return [...byKey.values()];
 }
@@ -103,14 +132,25 @@ export class FontResolutionError extends Error {
  * platform font and has no bytes to install (D1a). It is also the only ref a legacy project has, so
  * this returning empty for every pre-`FontRef` project is exactly what keeps this whole path
  * inert for them.
+ *
+ * ADR-023 S10 — same run-level reach as {@link collectPinnedFontInstances}, restated here rather than
+ * built on top of it: this function's dedupe key is coarser (no axis-settings component), which is
+ * the whole reason it exists as a second function instead of `collectPinnedFontInstances(...).map()`.
  */
 export function collectPinnedFontRefs(layers: CompositionLayerStyleInput[]): PinnedFontRef[] {
   const byHash = new Map<string, PinnedFontRef>();
-  for (const layer of layers) {
-    const ref: FontRef = getCompositionFontRef(layer);
-    if (!isPinnedFontRef(ref)) continue;
+  const add = (ref: FontRef) => {
+    if (!isPinnedFontRef(ref)) return;
     const key = `${ref.source}|${ref.fileHash}|${ref.weight}|${ref.style}`;
     if (!byHash.has(key)) byHash.set(key, ref);
+  };
+  for (const layer of layers) {
+    const layerRef = getCompositionFontRef(layer);
+    add(layerRef);
+    for (const run of everyRunFor(layer)) {
+      if (!run.fontRef && !run.fontFamily) continue;
+      add(getCompositionRunFontRef(run, layerRef));
+    }
   }
   return [...byHash.values()];
 }

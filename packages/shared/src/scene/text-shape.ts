@@ -144,16 +144,24 @@ export function ensureOverlayFonts(layer: TimelineLayer, t: number, styleOptions
   const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
   const baseSize = num(style.fontSize, 72);
   const specs = new Set<string>();
+  // ADR-023 S10: the layer's ref, read once and handed to every run — a run's OWN pinned font
+  // (`run.fontRef`) needs it to normalize against, same as `getCompositionTextRunStyle`'s other
+  // callers below.
+  const layerFontRef = getCompositionFontRef(layer);
   // Every RUN's font, not just the layer's: a rich-text run can carry its own family/weight/size, and
   // a run-level face left unawaited is the same defect scoped to one word.
   for (const run of getVisibleTextRuns(layer, t)) {
     if (!run.text) continue;
-    const runStyle = getCompositionTextRunStyle(run, {
-      fontSize: baseSize,
-      fontWeight: style.fontWeight,
-      fontFamily: style.fontFamily,
-      fontStyle: style.fontStyle
-    } as never) as { fontSize?: number; fontWeight?: unknown; fontFamily?: unknown; fontStyle?: unknown };
+    const runStyle = getCompositionTextRunStyle(
+      run,
+      {
+        fontSize: baseSize,
+        fontWeight: style.fontWeight,
+        fontFamily: style.fontFamily,
+        fontStyle: style.fontStyle
+      } as never,
+      layerFontRef
+    ) as { fontSize?: number; fontWeight?: unknown; fontFamily?: unknown; fontStyle?: unknown };
     specs.add(
       fontString({
         fontStyle: runStyle.fontStyle,
@@ -426,12 +434,15 @@ function layoutWords(
   ctx: Ctx,
   runs: TextRun[],
   baseStyle: { fontSize: number; fontWeight?: unknown; color?: unknown; fontFamily?: unknown; fontStyle?: unknown },
-  maxWidth: number
+  maxWidth: number,
+  /** ADR-023 S10 — see `getCompositionTextRunStyle`'s own doc for why this travels as its own
+   *  parameter rather than riding inside `baseStyle`. */
+  layerFontRef: FontRef
 ): Word[][] {
   // Tokenize runs → words carrying per-run style, preserving explicit newlines.
   const tokens: Array<Word | "break"> = [];
   for (const run of runs) {
-    const runStyle = getCompositionTextRunStyle(run, baseStyle as never) as {
+    const runStyle = getCompositionTextRunStyle(run, baseStyle as never, layerFontRef) as {
       fontSize?: number;
       fontWeight?: unknown;
       color?: string;
@@ -595,7 +606,7 @@ function measureTextLayout(ctx: Ctx, layer: TimelineLayer, t: number, W: number,
   // doesn't carry stale spacing into the next measure.
   ctx.letterSpacing = letterSpacing;
   const baseStyle = { fontSize, fontWeight: style.fontWeight, color: style.color, fontFamily: style.fontFamily, fontStyle: style.fontStyle };
-  const lines = layoutWords(ctx, runs, baseStyle, maxWidthContent > 0 ? maxWidthContent : 0);
+  const lines = layoutWords(ctx, runs, baseStyle, maxWidthContent > 0 ? maxWidthContent : 0, getCompositionFontRef(layer));
 
   const fixedWidth = widthStr.endsWith("%") ? (num(widthStr) / 100) * W - 2 * padX : 0;
   const contentWidth = fixedWidth > 0 ? fixedWidth : Math.max(0, ...lines.map((l) => lineWidth(ctx, l)));
@@ -1276,6 +1287,14 @@ export async function drawTextLayer(
    * Everything a curve cannot carry is listed in `textPathUnsupported`, declared rather than dropped
    * quietly. The run is the layer's visible runs joined: a path is one run, and newlines are joined
    * with a space rather than silently truncating the layer's text to its first line.
+   *
+   * ADR-023 S10, decided rather than discovered: a per-RUN font (`run.fontRef`/`run.fontFamily`) is
+   * ALREADY on this list, structurally — `.map((run) => run.text)` below keeps only the characters,
+   * the same way it already drops per-run bold/italic/color. A curve was always one style for the
+   * whole path (`style.fontFamily` below is the LAYER's), so S10 adding a font to what a run can
+   * carry changes nothing here: the flatten already discards it, on purpose, same as everything else
+   * per-run. Not worth a new entry in `textPathUnsupported` (that list is layer-level features; this
+   * is the pre-existing "runs are not a concept on a curve" rule extending to one more field).
    */
   const pathCurve = num(style.textPathCurve, 0);
   if (hasTextPathCurve(pathCurve)) {

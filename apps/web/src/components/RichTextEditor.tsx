@@ -13,14 +13,23 @@
  * undo, source-text keyframe navigation) changes the runs — tracked via the last committed
  * serialization — so the caret is never clobbered mid-word. The last selection RANGE is saved on
  * every editor interaction and restored before a toolbar command runs, so portal dropdowns
- * (ThemedSelect) can steal focus without losing what the user selected.
+ * (FontPicker, ThemedSelect) can steal focus without losing what the user selected.
+ *
+ * ADR-023 S10 — the font control opens the SAME catalogue picker the layer-level field uses, not a
+ * bespoke five-stack dropdown. See `applyFontToSelection` for how a picked `FontRef` (which has no
+ * native DOM representation) survives the round trip through contentEditable HTML.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Baseline, Bold, Highlighter, Italic, Pipette } from "lucide-react";
-import { renderSafeFonts, type TextRun } from "@orreris/shared";
-import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
+import { isPinnedFontRef, type TextRun } from "@orreris/shared";
+import { FontPicker, type FontPickerValue } from "../editor/controls/FontPicker";
 import { htmlToRuns, runsArePlain, runsToHtml, serializeRuns } from "./rich-text-serialize";
+
+/** Bold/italic weight the toolbar's font picker asks for — the SAME cut S2.7 already pins when a
+ *  layer's Bold toggle is active while a family is picked. */
+const FACE_BOLD_WEIGHT = 700;
+const FACE_REGULAR_WEIGHT = 400;
 
 /** Size-multiplier step per A−/A+ press, clamped to a sane range. */
 const SIZE_STEP = 0.25;
@@ -29,6 +38,10 @@ const SIZE_MAX = 4;
 
 /** Marker-style highlight suggestions (translucent so the glyphs stay readable). */
 const HIGHLIGHT_COLORS = ["#ffe14d", "#7CFC9B", "#7cc7ff"];
+
+/** Never a real family name — the sentinel `applyFontToSelection` replaces, same idiom as
+ *  `stepSize`'s `font[size="7"]`. */
+const RUN_FONT_SENTINEL = "__orreris_run_font_sentinel__";
 
 export function RichTextEditor({
   layerId,
@@ -159,6 +172,43 @@ export function RichTextEditor({
     saveSelection();
   }
 
+  /**
+   * ADR-023 S10 — apply a picked font (pinned or system) to the selection.
+   *
+   * Same sentinel-then-replace shape as `stepSize` above, for the same reason: `execCommand` already
+   * knows how to wrap (and correctly SPLIT, across existing formatting elements) exactly the selected
+   * range — reimplementing that with the Range API is where rich-text editors go to die. The sentinel
+   * (`RUN_FONT_SENTINEL`) is never a real family name, so the replace below cannot collide with a
+   * user's own font-name pick landing mid-flight.
+   *
+   * A `FontRef` has no native DOM representation (no CSS property, no execCommand), so it travels as
+   * a `data-font-ref` attribute — exactly how `data-size-mult` already carries the size multiplier
+   * past the DOM round trip. `rich-text-serialize.ts` reads it back on the next `commit()`.
+   */
+  function applyFontToSelection(next: FontPickerValue) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    restoreSelection();
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.anchorNode || !editor.contains(selection.anchorNode)) return;
+    document.execCommand("styleWithCSS", false, "false");
+    document.execCommand("fontName", false, RUN_FONT_SENTINEL);
+    // The WYSIWYG family while editing: the ref's own family for a pinned pick (no axis instancing at
+    // the run level — `getCompositionTextRunStyle`'s doc), or the raw CSS stack for a system pick.
+    // FontPicker never hands back a `{ source: "system" }` ref (that pick clears `fontRef` and sets
+    // `fontFamily` instead), so this narrows defensively rather than asserting it.
+    const displayFamily = next.fontRef && isPinnedFontRef(next.fontRef) ? next.fontRef.family : next.fontFamily;
+    for (const font of Array.from(editor.querySelectorAll(`font[face="${RUN_FONT_SENTINEL}"]`))) {
+      const span = document.createElement("span");
+      span.style.fontFamily = displayFamily;
+      if (next.fontRef) span.setAttribute("data-font-ref", encodeURIComponent(JSON.stringify(next.fontRef)));
+      while (font.firstChild) span.appendChild(font.firstChild);
+      font.replaceWith(span);
+    }
+    commit();
+    saveSelection();
+  }
+
   return (
     <div className="rich-text-control">
       <div className="rich-text-toolbar" onMouseDown={(event) => event.preventDefault() /* keep the text selection */}>
@@ -217,16 +267,16 @@ export function RichTextEditor({
           style={{ position: "absolute", width: 0, height: 0, opacity: 0, pointerEvents: "none" }}
           onChange={(event) => exec("hiliteColor", event.target.value)}
         />
-        <ThemedSelect<string>
-          value=""
-          ariaLabel="Font for the selection"
-          placeholder="Aa"
-          className="rich-text-font-themed"
-          menuMinWidth={150}
-          options={renderSafeFonts.map((font) => ({ value: font.family, label: font.label }))}
-          onChange={(family) => {
-            if (family) exec("fontName", family);
-          }}
+        {/* ADR-023 S10 — the SAME catalogue picker the layer-level font field uses (FontPicker.tsx),
+            not a bespoke five-stack dropdown. `value` is action-only (this control has no single
+            "current selection's font" to show — a selection can span several), so `fontFamily: "Aa"`
+            is cosmetic label text, matching the placeholder the old dropdown showed. `weight`/`italic`
+            come from the SELECTION's live state, so picking a family while Bold is active pins that
+            family's bold cut immediately, the same S2.7 rule the layer field already follows. */}
+        <FontPicker
+          value={{ fontFamily: "Aa", fontRef: undefined, weight: selBold ? FACE_BOLD_WEIGHT : FACE_REGULAR_WEIGHT, italic: selItalic }}
+          resolved={{ label: "Aa", missing: false }}
+          onPick={applyFontToSelection}
         />
         <span className="rich-text-toolbar-hint" title="Select text, then style it — per-word styles render in preview and export">
           <Baseline size={11} />

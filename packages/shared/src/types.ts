@@ -664,6 +664,22 @@ export interface TextRun {
   color?: string | undefined;
   /** Per-run highlight (text marker) — rendered as the run's background in every renderer. */
   backgroundColor?: string | undefined;
+  /**
+   * ADR-023 S10 — TWO CONSTANTS, per D1a, never one default.
+   *
+   * `fontFamily` alone (no `fontRef`) means the run was authored as a raw CSS stack — the rich-text
+   * toolbar's pre-S10 behaviour — and MUST keep resolving as `{ source: "system" }` forever, exactly
+   * like a layer with no `fontRef` does. `fontRef` present is the S10 pinned path: a hashed,
+   * mirrored, embeddable file the export can abort by name on, same as the layer field below it in
+   * the inspector. Do not name-match an existing `fontFamily` string onto a catalogue family — "Anton"
+   * the system stack and "Anton" the pinned file are different renders (T-17), and a migration here
+   * would silently move every project with a per-run font already authored.
+   *
+   * Both absent means "inherit the layer's font", same as it always has.
+   *
+   * See `getCompositionRunFontRef` (composition-style.ts) for the one place this is read.
+   */
+  fontRef?: FontRef | undefined;
   fontFamily?: string | undefined;
   fontSizeMultiplier?: number | undefined;
 }

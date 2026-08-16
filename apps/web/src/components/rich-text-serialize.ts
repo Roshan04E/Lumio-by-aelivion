@@ -4,23 +4,38 @@
  * spans and the tags Chromium's execCommand produces (B/I/FONT/style spans, DIV line breaks).
  */
 
-import type { TextRun } from "@orreris/shared";
+import { isPinnedFontRef, type FontRef, type TextRun } from "@orreris/shared";
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * ADR-023 S10 — a run's `FontRef` has no native DOM representation (no CSS property, no execCommand),
+ * so it travels through contentEditable the same way `data-size-mult` already carries the size
+ * multiplier: a `data-*` attribute alongside a `style.fontFamily` for WYSIWYG. `encodeURIComponent`
+ * rather than a raw JSON attribute — a family name is free-form text and HTML-attribute-escaping JSON
+ * by hand is exactly the kind of thing that is subtly wrong once (a `"` inside a family name), not
+ * always.
+ */
 function runToHtml(run: TextRun): string {
   const styles: string[] = [];
   if (run.bold) styles.push("font-weight:700");
   if (run.italic) styles.push("font-style:italic");
   if (run.color) styles.push(`color:${run.color}`);
   if (run.backgroundColor) styles.push(`background-color:${run.backgroundColor}`);
-  if (run.fontFamily) styles.push(`font-family:${run.fontFamily}`);
+  // A run's OWN font: the ref wins when both are present (S10's precedence — see
+  // `getCompositionRunFontRef`), and its FAMILY is the WYSIWYG family — no axis instancing at the run
+  // level, so this is byte-for-byte the family `installPinnedFont` registers with no axis given.
+  // A run never authors a `{ source: "system" }` ref (that case is `fontFamily` alone, no `fontRef` —
+  // the two-constants rule); `isPinnedFontRef` narrows defensively rather than asserting it.
+  const displayFamily = run.fontRef && isPinnedFontRef(run.fontRef) ? run.fontRef.family : run.fontFamily;
+  if (displayFamily) styles.push(`font-family:${displayFamily}`);
   if (run.fontSizeMultiplier && run.fontSizeMultiplier !== 1) styles.push(`font-size:${run.fontSizeMultiplier}em`);
   const sizeAttr = run.fontSizeMultiplier && run.fontSizeMultiplier !== 1 ? ` data-size-mult="${run.fontSizeMultiplier}"` : "";
+  const refAttr = run.fontRef ? ` data-font-ref="${encodeURIComponent(JSON.stringify(run.fontRef))}"` : "";
   const text = escapeHtml(run.text).replace(/\n/g, "<br>");
-  return `<span style="${styles.join(";")}"${sizeAttr}>${text}</span>`;
+  return `<span style="${styles.join(";")}"${sizeAttr}${refAttr}>${text}</span>`;
 }
 
 export function runsToHtml(runs: TextRun[]): string {
@@ -33,7 +48,17 @@ interface RunStyleCtx {
   color: string | undefined;
   backgroundColor: string | undefined;
   fontFamily: string | undefined;
+  /** ADR-023 S10. Absent means "no run-level pin here" — distinct from `fontFamily` alone, which is
+   *  the legacy/system case (see `TextRun.fontRef`'s own doc for the two-constants rule). */
+  fontRef: FontRef | undefined;
   sizeMult: number;
+}
+
+/** Structural equality for two `FontRef`s (or their absence) — used only to decide run merging. */
+function sameFontRef(a: FontRef | undefined, b: FontRef | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function sameStyle(a: TextRun, ctx: RunStyleCtx): boolean {
@@ -43,6 +68,7 @@ function sameStyle(a: TextRun, ctx: RunStyleCtx): boolean {
     (a.color ?? undefined) === ctx.color &&
     (a.backgroundColor ?? undefined) === ctx.backgroundColor &&
     (a.fontFamily ?? undefined) === ctx.fontFamily &&
+    sameFontRef(a.fontRef, ctx.fontRef) &&
     (a.fontSizeMultiplier ?? 1) === ctx.sizeMult
   );
 }
@@ -61,6 +87,7 @@ function appendText(runs: TextRun[], text: string, ctx: RunStyleCtx): void {
     ...(ctx.color ? { color: ctx.color } : {}),
     ...(ctx.backgroundColor ? { backgroundColor: ctx.backgroundColor } : {}),
     ...(ctx.fontFamily ? { fontFamily: ctx.fontFamily } : {}),
+    ...(ctx.fontRef ? { fontRef: ctx.fontRef } : {}),
     ...(ctx.sizeMult !== 1 ? { fontSizeMultiplier: ctx.sizeMult } : {})
   });
 }
@@ -77,6 +104,23 @@ function normColor(value: string | null | undefined): string | undefined {
 function normFontFamily(value: string | null | undefined): string | undefined {
   const v = (value ?? "").trim();
   return v ? v.replace(/"/g, "'") : undefined;
+}
+
+/**
+ * ADR-023 S10 — read `data-font-ref` back. Malformed (hand-edited DOM, a future format change) reads
+ * as ABSENT rather than throwing: "I could not read it" and "there was never one" get the same safe
+ * answer, same as `normalizeFontRef`'s own rule one layer down for the ref's OWN shape. Not validated
+ * beyond "is an object" here — `normalizeFontRef` (via `getCompositionRunFontRef`) is what actually
+ * decides whether the shape survives, at READ time, same as every other `FontRef` in this codebase.
+ */
+function readFontRefAttr(value: string | null): FontRef | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(decodeURIComponent(value));
+    return parsed && typeof parsed === "object" ? (parsed as FontRef) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function walk(node: Node, ctx: RunStyleCtx, runs: TextRun[]): void {
@@ -117,6 +161,11 @@ function walk(node: Node, ctx: RunStyleCtx, runs: TextRun[]): void {
     const family = normFontFamily(style.fontFamily);
     if (family) next.fontFamily = family;
   }
+  // ADR-023 S10 — must run AFTER the style read above: a run's OWN pinned font's family (its
+  // WYSIWYG `style.font-family`) and its ref travel on the SAME span, and the ref is what actually
+  // decides resolution (`getCompositionRunFontRef`'s precedence) once both are present.
+  const fontRef = readFontRefAttr(node.getAttribute("data-font-ref"));
+  if (fontRef) next.fontRef = fontRef;
   const sizeMult = Number(node.getAttribute("data-size-mult"));
   if (Number.isFinite(sizeMult) && sizeMult > 0) next.sizeMult = sizeMult;
 
@@ -131,7 +180,7 @@ function walk(node: Node, ctx: RunStyleCtx, runs: TextRun[]): void {
 export function htmlToRuns(root: HTMLElement): TextRun[] {
   const runs: TextRun[] = [];
   for (const child of Array.from(root.childNodes)) {
-    walk(child, { bold: false, italic: false, color: undefined, backgroundColor: undefined, fontFamily: undefined, sizeMult: 1 }, runs);
+    walk(child, { bold: false, italic: false, color: undefined, backgroundColor: undefined, fontFamily: undefined, fontRef: undefined, sizeMult: 1 }, runs);
   }
   return runs.length ? runs : [{ text: "" }];
 }
@@ -139,7 +188,8 @@ export function htmlToRuns(root: HTMLElement): TextRun[] {
 /** True when no run carries any styling — the layer keeps the simple `text`-only model. */
 export function runsArePlain(runs: TextRun[]): boolean {
   return runs.every(
-    (run) => !run.bold && !run.italic && !run.color && !run.backgroundColor && !run.fontFamily && (run.fontSizeMultiplier ?? 1) === 1
+    (run) =>
+      !run.bold && !run.italic && !run.color && !run.backgroundColor && !run.fontFamily && !run.fontRef && (run.fontSizeMultiplier ?? 1) === 1
   );
 }
 
