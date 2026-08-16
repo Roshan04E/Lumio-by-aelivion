@@ -30,6 +30,7 @@ import {
   AlignLeft,
   ArrowLeftRight,
   Blend,
+  Bold,
   CaseSensitive,
   Image as ImageIcon,
   Eye,
@@ -46,7 +47,15 @@ import {
   Square,
   ZoomIn
 } from "lucide-react";
-import { textStyleSchema, type TextStyleSchemaKey, type TimelineLayer } from "@orreris/shared";
+import {
+  fontAxisSupport,
+  getCompositionFontRef,
+  isPinnedFontRef,
+  textStyleSchema,
+  type FontAxisRange,
+  type TextStyleSchemaKey,
+  type TimelineLayer
+} from "@orreris/shared";
 import { buildBackgroundColor, parseBackgroundColor } from "../../lib/colorBackground";
 import { fontReferenceId, fontReferenceResolver, type FontPickerValue } from "../controls/FontPicker";
 import type { PropertyField } from "./PropertyFieldList";
@@ -130,6 +139,17 @@ export interface TextStyleAdapterContext {
    * Absent → no fill rows, the same "an absent slot means no row" rule the font follows.
    */
   fillTexture?: TextStyleFillTextureReference | undefined;
+  /**
+   * ADR-023 S9a — the axes the layer's pinned FILE actually exposes, read from its `fvar` table.
+   *
+   * Three-valued on purpose, and the host must preserve that: `undefined` means "not read yet" (the
+   * bytes are still arriving, or the container is a `.woff2` this repo cannot parse), while an empty
+   * array means "read it, this file is static". A row bounded by the CSS spec rather than by the FILE
+   * is "no cut, no lie" in miniature — dragging past the face's real maximum does nothing and looks
+   * like a broken control — so a known range wins, an unknown one falls back to the schema bounds,
+   * and a file known to lack the axis gets NO row at all.
+   */
+  fontAxes?: FontAxisRange[] | undefined;
   slots: Partial<Record<TextStyleSlotKey, ReactNode>>;
 }
 
@@ -198,6 +218,55 @@ function styleNumberField(
  * the standard row; `custom` is the right one for a widget that IS its own row, which is what these
  * are. Both are ADR-002 escape hatches and neither adds a kind.
  */
+/**
+ * ADR-023 S9a — the `wght`/`wdth` rows, or nothing.
+ *
+ * Static (no `keyframe` wiring) because S9a is the static half deliberately: animating an axis wants
+ * a registered face per sampled value, and S9b's first job is to MEASURE that registration cost
+ * rather than to assume it is free. Offering a diamond here would ship the expensive half by
+ * accident.
+ *
+ * The displayed value when the field is absent is the FILE's own `fvar` default, which is what absent
+ * actually renders as — not 400, which is merely the most common default. Reset writes `undefined`
+ * rather than that number, so absent stays absent (D1a) and the layer does not acquire a coordinate
+ * it never authored.
+ */
+function axisFields(ctx: TextStyleAdapterContext): PropertyField[] {
+  const { layer, onChange } = ctx;
+  // Read through the same shared normalizer the renderers use, so "is this pinned" cannot be
+  // answered one way here and another way at emission.
+  if (!isPinnedFontRef(getCompositionFontRef(layer))) return [];
+
+  const rows: PropertyField[] = [];
+  const specs = [
+    { key: "fontWeightAxis", tag: "wght", icon: <Bold size={14} /> },
+    { key: "fontWidthAxis", tag: "wdth", icon: <MoveHorizontal size={14} /> }
+  ] as const;
+
+  for (const spec of specs) {
+    const support = fontAxisSupport(ctx.fontAxes, spec.tag);
+    // "read it, this file has no such axis" is the ONLY state that removes the row. "not read yet"
+    // keeps it, or the control would be missing for the first seconds of every session.
+    if (support.state === "absent") continue;
+    const bounds = boundsOf(spec.key, { min: 1, max: 1000, step: 1 });
+    const range = support.state === "supported" ? support.range : undefined;
+    const authored = layer[spec.key];
+    rows.push({
+      kind: "number",
+      key: spec.key,
+      label: labelOf(spec.key, spec.key),
+      icon: spec.icon,
+      value: typeof authored === "number" ? authored : range?.default ?? 400,
+      min: range?.min ?? bounds.min,
+      max: range?.max ?? bounds.max,
+      step: bounds.step,
+      onReset: () => onChange((item) => ({ ...item, [spec.key]: undefined })),
+      onChange: (next: number) => onChange((item) => ({ ...item, [spec.key]: next }))
+    });
+  }
+  return rows;
+}
+
 function slotField(ctx: TextStyleAdapterContext, key: TextStyleSlotKey): PropertyField | null {
   const node = ctx.slots[key];
   if (!node) return null;
@@ -251,6 +320,21 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
     })
   );
   put(slotField(ctx, "fontWeight"));
+  /**
+   * ADR-023 S9a — the variable axes, and the rules for when a row exists at all.
+   *
+   * Placed directly under the Bold toggle because that is the S2.7 boundary made visible: the toggle
+   * picks between FILES, these pick WITHIN one, and someone reaching for "a bit bolder than regular"
+   * should find both in the same place rather than discovering later that the product had two
+   * unrelated answers.
+   *
+   * A row appears only when it would DO something: the ref must be pinned (a system family has no
+   * bytes to re-register, so the axis is refused at emission and a slider would move nothing), and
+   * the file must either expose the axis or not have been read yet. A file read and known to be
+   * static gets no row — showing one would be exactly the faux-bold-over-a-single-style-family lie
+   * S2.7 refused.
+   */
+  for (const axis of axisFields(ctx)) put(axis);
   put(slotField(ctx, "italic"));
   put(slotField(ctx, "textAlign"));
   put(slotField(ctx, "direction"));

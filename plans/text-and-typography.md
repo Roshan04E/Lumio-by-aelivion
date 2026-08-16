@@ -29,7 +29,9 @@ S6  caption + text preset library         SHIPPED 2026-08-15; OQ8 closed; 18 fir
 S7  the text matte (tier 2) + matte ops + warp rework   half B (warp) SHIPPED 2026-08-15;
                                                           half A gated on the OQ1 spike
 S8  SVG: multi-stroke + path text          SHIPPED 2026-08-16; D8 amended — multi-stroke needed no SVG
-S9  per-character + variable-axis animation
+S9a STATIC variable axis                  SHIPPED 2026-08-16; OQ2's deferral REVERSED
+S9b ANIMATING the axis                    not started; the trap is per-frame registration COST
+S9  per-character animation                not started; OQ6 ANSWERED, precedence gate written + red
 ```
 
 Ordering rationale, stated because two of these look reorderable and are not:
@@ -947,6 +949,84 @@ surface exactly as the canvas surface draws them).
 
 **Scope:** builds on the existing `TextRun`s (`getCompositionTextRuns`, composition-style.ts:746)
 and the existing keyframe evaluator (`animation.ts`) — no new animation system.
+
+**SPLIT into three 2026-08-16**, because the halves have very different costs and the cheapest one
+was ready first. S9a (static axis) ships a visible win with no animation machinery at all and is
+DONE. S9b (animating the axis) has a registration-cost trap that has to be measured, not assumed.
+S9 proper (per-character) is the largest and is gated on OQ6, which is now ANSWERED.
+
+---
+
+### S9a — the STATIC variable axis. **SHIPPED 2026-08-16.**
+
+**Win:** author any weight or width a variable family exposes — 550, 620, whatever is in the file's
+`fvar` — instead of being limited to the cuts the catalogue enumerates. No animation machinery at all.
+
+**It reverses S5's deferral, and the reversal is measured.** S5 deferred this because canvas 2D
+exposes no `fontVariationSettings` and `ctx.font` rejects an inline declaration. Both are true and
+both are about DRAW time. A `FontFace` carries a `variationSettings` DESCRIPTOR that instances the
+axis at REGISTRATION, and CSS carries the same descriptor inside `@font-face` — the route the worker
+takes, because the worker installs faces as CSS. Two aliases over one variable file measure 331.98
+vs 368.08 **on canvas**, with a DOM control at 331.98 vs 368.09 proving the file is variable and the
+engine can instance it. See ADR-023's OQ2 entry for the full record.
+
+**What shipped**
+- `fontWeightAxis` / `fontWidthAxis` on `TimelineLayer` and `TextStyleFields`; two `number` fields,
+  not a `Record<axisTag, number>` — the ADR-003 taxonomy has no map kind, and this is the third time
+  the answer has been decomposition (`lut`, S8's two-fields-not-a-list). `opsz`/`slnt`/custom axes are
+  REFUSED, not approximated: an axis whose meaning is per-foundry cannot be given a labelled slider.
+- `font-variation.ts` — the alias-family derivation, the descriptor string, and a hand-rolled `fvar`
+  parser (hand-rolled because opentype.js cannot Brotli-decode `.woff2`; `font-outlines.ts:35`).
+- Registration on both surfaces: `new FontFace(alias, src, { variationSettings })` in the editor,
+  `font-variation-settings:` inside the worker's `@font-face` block. One download per FILE, one
+  registration per INSTANCE.
+- The S8 arc surface too — an SVG-as-`<img>` ignores the presentation attribute (measured) but
+  honours the `@font-face` descriptor, so a curved run varies.
+- The two rows sit directly under the Bold toggle, and appear only when the ref is PINNED and the
+  file either exposes the axis or has not been read yet. A file read and known static gets no row —
+  showing one would be S2.7's faux-bold lie in a new place.
+
+**The S2.7 boundary, which is why these do not fight.** S2.7 picks between FILES (Google enumerates
+instances and serves a static file per weight, which is why it sees Cairo's nine); S9a picks WITHIN
+one file. An axis never rewrites the ref, and the alias face carries the ref's own `font-weight`
+descriptor, so the emitted `font-weight` is byte-identical with and without an axis — asserted in
+`textstyle:golden`. **Cairo's nine enumerated instances must not be collapsed**; `font:face-test`
+still reports "Cairo 9 (no italic)", and that assertion protects THIS stage.
+
+**⚠ The detect that lies.** `FontFace.variationSettings` does not reflect back — Chromium returns
+empty for a face that renders the axis correctly — so a feature detect on the reflected value calls a
+working API unsupported. Written into `font-variation.ts` and the falsifier's failure message.
+
+**Evidence:** `font:axis-falsifier` — file control (Arimo-Regular, already in this repo, is VARIABLE
+with `wght` 400–700), subject (400 vs 700 differ), D1a (absent == the file's own default, in pixels),
+the arc surface (curved 400 vs 700 differ), refusal (system ref + axis is byte-identical to system
+ref). `textstyle:golden` 103 cases with **4 added and 0 changed**. `textstyle:schema` 33 fields swept.
+`render:baseline` 86/86 unchanged. Stills read, not just hashed: the 700 is the same Arimo letterform
+with interpolated stems, not a faux-bold smear or a substituted face.
+
+### S9b — ANIMATING the axis. **Not started.**
+
+Only after S9a. **The trap is registration cost:** a continuously animated axis wants a face per
+sampled value, and registering `FontFace`s per frame is not free — `collectPinnedFontInstances` turns
+from "a handful" into "one per sampled value". **Quantize to N steps and MEASURE N against visible
+banding** rather than picking a number. If the cost makes continuous animation impractical, saying so
+with the number is a real answer. S9a deliberately ships the axis rows WITHOUT keyframe wiring, so
+this half cannot arrive by accident.
+
+---
+
+### S9 — per-character animation. **Not started; OQ6 ANSWERED, precedence gate written and RED.**
+
+`text:s9-precedence` (bbf1242) declares the four compositions — animation composes UNDER warp, the
+curve WINS, a shaping-dependent script WINS, and at rest the animation contributes NOTHING — as
+equalities, written BEFORE the feature and failing by design. That is the `pending()` pattern: a gate
+that passed before the feature existed could not tell whether it arrived. **Do not re-tier it as
+broken and do not make it green until the animator lands.**
+
+**The paragraph below is now HISTORY for the axis half, kept for its S2.7 argument.** S9a shipped the
+axis and the argument here is what it was built on — that Google's index enumerates instances, so
+animating weight through the FILE would be a different `fileHash` (and, per T-8, a different raster)
+per frame.
 
 **The variable-axis half needs a different file than S2.7 pins** (581cbd1). Cairo is a variable
 family, but Google's index enumerates *instances* and its CDN serves a static instance per weight —

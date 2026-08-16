@@ -85,6 +85,41 @@ const fields = [
     }
   },
   {
+    key: "fontWeightAxis",
+    kind: "number",
+    min: 1,
+    max: 1000,
+    step: 1,
+    group: "typography",
+    label: "Weight axis",
+    // ADR-023 S9a / D1a. Absent is NOT 400 — it is "the face's own `fvar` default instance",
+    // permanently. A variable face's default is whatever the foundry chose (the Arimo this repo
+    // renders with today defaults to 400 over a 400–700 range, but nothing may rely on that), so a
+    // default here would move every layer already pinned to a variable file.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description:
+        "The `wght` axis of a VARIABLE font — 550, 620, any coordinate the file's `fvar` exposes. Not `fontWeight`, which is CSS and which S2.7 already resolves to a FILE; this moves an axis inside one file. Refused on a `{source:'system'}` ref, which has no bytes to instance.",
+      aiSynonyms: ["variable weight", "wght", "weight axis"]
+    }
+  },
+  {
+    key: "fontWidthAxis",
+    kind: "number",
+    min: 1,
+    max: 1000,
+    step: 1,
+    group: "typography",
+    label: "Width axis",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      description: "The `wdth` axis of a VARIABLE font. Same rules as the weight axis throughout.",
+      aiSynonyms: ["variable width", "wdth", "condensed", "extended"]
+    }
+  },
+  {
     key: "fontSize",
     kind: "number",
     unit: "px",

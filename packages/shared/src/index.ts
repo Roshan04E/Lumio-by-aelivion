@@ -90,6 +90,7 @@ export * from "./font-index";
 export * from "./font-ingest";
 export * from "./font-install";
 export * from "./font-store";
+export * from "./font-variation";
 export * from "./fonts";
 export * from "./media-manifest";
 export * from "./timeline";

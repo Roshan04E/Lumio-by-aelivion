@@ -97,6 +97,43 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
     layer: textLayer({ fontRef: { source: "system", fontFamily: "Arial, Helvetica, sans-serif" } })
   },
 
+  /**
+   * ADR-023 S9a — a variable axis moves the emitted FAMILY TOKEN and nothing else.
+   *
+   * These four pin the whole design in a form that costs milliseconds. The axis is baked into the
+   * face at registration, so what a renderer needs is a different family NAME; the golden is the
+   * place that proves the emitted `font-weight` did NOT move with it, which is the S2.7 boundary
+   * (that stage picks between FILES, this one picks within one) written down as bytes rather than as
+   * a doc comment. The system arm is the refusal: no bytes to re-register means no alias to name, and
+   * an axis emitted as a declaration would move the DOM overlay and nothing that ships.
+   */
+  {
+    name: "text/axis-weight-on-pinned",
+    layer: textLayer({
+      fontWeightAxis: 550,
+      fontRef: { source: "catalogue", family: "Arimo", fileHash: "arimo1", weight: 400, style: "normal" }
+    })
+  },
+  {
+    name: "text/axis-both-on-pinned",
+    layer: textLayer({
+      fontWeightAxis: 620,
+      fontWidthAxis: 87.5,
+      fontRef: { source: "catalogue", family: "Arimo", fileHash: "arimo1", weight: 400, style: "normal" }
+    })
+  },
+  {
+    name: "text/axis-refused-on-system-ref",
+    layer: textLayer({ fontWeightAxis: 700, fontRef: { source: "system", fontFamily: "Arial, Helvetica, sans-serif" } })
+  },
+  {
+    name: "text/axis-out-of-bounds-is-absent",
+    layer: textLayer({
+      fontWeightAxis: 4000,
+      fontRef: { source: "catalogue", family: "Arimo", fileHash: "arimo1", weight: 400, style: "normal" }
+    })
+  },
+
   // --- direction: absent / explicit / auto over Latin and over Arabic --------------------------
   { name: "text/direction-absent", layer: textLayer({ text: "مرحبا بالعالم" }) },
   { name: "text/direction-auto-latin", layer: textLayer({ direction: "auto" }) },

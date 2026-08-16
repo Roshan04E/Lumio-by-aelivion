@@ -225,6 +225,10 @@ export interface TextStyleFields {
    * hand-written-list defect, in the preset path instead of the manifest path.
    */
   fontRef?: FontRef | undefined;
+  /** See {@link TimelineLayer.fontWeightAxis}. ADR-023 S9a — an axis INSIDE the pinned file. A style
+   *  captured before S9a has no key, which keeps meaning "the face's own default instance". */
+  fontWeightAxis?: number | undefined;
+  fontWidthAxis?: number | undefined;
   fontSize?: number | undefined;
   fontWeight?: number | undefined;
   italic?: boolean | undefined;
@@ -837,6 +841,31 @@ export interface TimelineLayer {
    * reflow, and a reflow in an unattended export.
    */
   fontRef?: FontRef | undefined;
+  /**
+   * ADR-023 S9a — the `wght` axis of a VARIABLE font, in font units (not a CSS weight).
+   *
+   * **This is not {@link TimelineLayer.fontWeight}, and the difference is the whole stage.**
+   * `fontWeight` is CSS: over a legacy stack the browser synthesises, and over a pinned ref S2.7 has
+   * already made the FILE decide, because Google's index enumerates instances and its CDN serves one
+   * static file per weight. This field moves an axis INSIDE one file — 550, 620, any coordinate the
+   * face's `fvar` exposes — and it does so by registering the file a second time under an alias
+   * family with a `variationSettings` descriptor, because canvas 2D cannot apply an axis at draw
+   * time and the canvas raster is where both renderers get their pixels (T-13). See
+   * `font-variation.ts` for the measurement and for the feature detect that lies.
+   *
+   * **ABSENT MEANS "the face's own default instance", permanently and without migration** (D1a).
+   * Not 400: a variable face's `fvar` default is whatever the foundry chose, so writing a number in
+   * would move every layer already pinned to a variable file — and Arimo, which this repo ships and
+   * renders with today, is exactly such a file.
+   *
+   * A `{ source: "system" }` ref REFUSES this field rather than approximating it. A system family has
+   * no bytes to re-register, so there is no alias to name and the axis would move the editor's DOM
+   * overlay while changing nothing in the export — the "wrong pixels that look like a working
+   * feature" shape. The refusal is asserted, not assumed: see `font:axis-falsifier`.
+   */
+  fontWeightAxis?: number | undefined;
+  /** ADR-023 S9a — the `wdth` axis. Same rules as {@link TimelineLayer.fontWeightAxis} throughout. */
+  fontWidthAxis?: number | undefined;
   fontSize?: number | undefined;
   fontWeight?: number | undefined;
   italic?: boolean | undefined;

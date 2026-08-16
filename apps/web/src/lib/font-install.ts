@@ -12,8 +12,13 @@
  * like a working feature. A substitution nobody is told about is exactly that.
  */
 import {
-  collectPinnedFontRefs,
+  collectPinnedFontInstances,
+  fontAxisInstanceFamily,
   fontLoadSpec,
+  fontVariationSettingsCss,
+  parseFontVariationAxes,
+  type FontAxisRange,
+  type FontVariationAxes,
   fontObjectKey,
   fontStoreKeyFor,
   isPinnedFontRef,
@@ -36,8 +41,8 @@ function storageUrl(relativeKey: string): string {
   return `${base.replace(/\/+$/, "")}/storage/${relativeKey}`;
 }
 
-export function fontRefInstallKey(ref: PinnedFontRef): string {
-  return `${ref.source}|${ref.fileHash}|${ref.weight}|${ref.style}`;
+export function fontRefInstallKey(ref: PinnedFontRef, axes?: FontVariationAxes | undefined): string {
+  return `${ref.source}|${ref.fileHash}|${ref.weight}|${ref.style}|${fontVariationSettingsCss(axes) ?? ""}`;
 }
 
 function notify(): void {
@@ -52,8 +57,8 @@ function notify(): void {
  * 700" are two different faces (D1), and collapsing them here would silently serve one project the
  * other's outlines — the same mistake at runtime that D4 forbids in storage.
  */
-export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState> {
-  const key = fontRefInstallKey(ref);
+export function installPinnedFont(ref: PinnedFontRef, axes?: FontVariationAxes | undefined): Promise<FontInstallState> {
+  const key = fontRefInstallKey(ref, axes);
   const existing = installs.get(key);
   if (existing) return existing;
 
@@ -111,15 +116,35 @@ export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState>
           return unreachable;
         }
       }
-      const face = new FontFace(ref.family, source, {
+      /**
+       * ADR-023 S9a — the axis is a REGISTRATION-time descriptor, and an instance is its own family.
+       *
+       * `variationSettings` here is the browser-side twin of the `font-variation-settings` line the
+       * worker writes into its `@font-face` block. It instances the file as the face is built, which
+       * is the only route that reaches the canvas raster: canvas 2D exposes no `fontVariationSettings`
+       * and `ctx.font` rejects an inline declaration, and since T-13 the raster is where BOTH
+       * renderers get their text pixels.
+       *
+       * ⚠ Do NOT feature-detect this by reading `face.variationSettings` back. It does not reflect —
+       * Chromium returns empty for a face that renders the axis correctly — so a detect on the
+       * reflected value calls a working API unsupported. Detect by rendering two instances and
+       * measuring, or do not detect. Measured in `apps/worker/tmp/oq6-spike.mjs`.
+       *
+       * With no axis the family is `ref.family` and the descriptor is absent, so this is byte-for-byte
+       * the registration that shipped before S9a.
+       */
+      const settings = fontVariationSettingsCss(axes);
+      const family = fontAxisInstanceFamily(ref.family, axes);
+      const face = new FontFace(family, source, {
         weight: String(ref.weight),
-        style: ref.style
+        style: ref.style,
+        ...(settings ? { variationSettings: settings } : {})
       });
       await face.load();
       document.fonts.add(face);
       // Loading the FACE is not the same as the canvas being able to use it: the raster both
       // renderers draw through resolves fonts by shorthand, so ask for the shorthand too.
-      await document.fonts.load(fontLoadSpec({ family: ref.family, weight: ref.weight, style: ref.style, src: "" }));
+      await document.fonts.load(fontLoadSpec({ family, weight: ref.weight, style: ref.style, src: "" }));
       return "installed";
     } catch {
       // No rethrow, and no console noise pretending to be a report. The state IS the report — it
@@ -143,7 +168,9 @@ export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState>
 
 /** Kick off installation for every pinned font a composition needs. Idempotent. */
 export function installCompositionFonts(layers: CompositionLayerStyleInput[]): void {
-  for (const ref of collectPinnedFontRefs(layers)) void installPinnedFont(ref);
+  // Instances, not refs (S9a): a variable file authored at two axis coordinates needs two
+  // registrations, and the emitted CSS names the alias of each.
+  for (const { ref, axes } of collectPinnedFontInstances(layers)) void installPinnedFont(ref, axes);
 }
 
 /**
@@ -170,22 +197,34 @@ const faceCssCache = new Map<string, Promise<string | undefined>>();
  * by NAME inside an SVG image, so there is nothing to embed. `buildArcTextSvg` only treats the empty
  * string as the refusal, and only a PINNED ref can produce it.
  */
-export function resolveFontFaceCss(ref: FontRef): Promise<string | undefined> | undefined {
-  return isPinnedFontRef(ref) ? pathTextFontFaceCss(ref) : undefined;
+export function resolveFontFaceCss(
+  ref: FontRef,
+  instance?: { instanceFamily: string; axisSettings: string | undefined }
+): Promise<string | undefined> | undefined {
+  return isPinnedFontRef(ref) ? pathTextFontFaceCss(ref, instance) : undefined;
 }
 
-export function pathTextFontFaceCss(ref: PinnedFontRef): Promise<string | undefined> {
-  const key = fontRefInstallKey(ref);
-  const existing = faceCssCache.get(key);
+/**
+ * The BYTES of a pinned face, memoized per FILE.
+ *
+ * Two consumers now — the path-text `@font-face` below, and S9a's `fvar` read — and keying this by
+ * `fileHash` rather than by ref instance is the point: a file's axis ranges and its outlines do not
+ * depend on which axis coordinate a layer authored, so several instances share one download.
+ */
+const fileBytesCache = new Map<string, Promise<Uint8Array | undefined>>();
+
+function fontFileBytes(ref: PinnedFontRef): Promise<Uint8Array | undefined> {
+  const key = `${ref.source}|${ref.fileHash}`;
+  const existing = fileBytesCache.get(key);
   if (existing) return existing;
-  const promise = (async (): Promise<string | undefined> => {
+  const promise = (async (): Promise<Uint8Array | undefined> => {
     // T-3 again: the store is discriminated before anything resolves to bytes. This deliberately
     // repeats `installPinnedFont`'s switch rather than sharing a `urlOf(font)` helper, because that
     // helper is precisely the "resolvable URL supertype" D4 forbids.
     const storeKey = fontStoreKeyFor(ref);
     if (!storeKey) return undefined;
-    let blob: Blob | undefined;
     try {
+      let blob: Blob | undefined;
       if (storeKey.store === "catalogue") {
         const response = await fetch(storageUrl(fontObjectKey(storeKey)));
         if (!response.ok) return undefined;
@@ -200,12 +239,63 @@ export function pathTextFontFaceCss(ref: PinnedFontRef): Promise<string | undefi
           blob = await response.blob();
         }
       }
-      const buffer = new Uint8Array(await blob.arrayBuffer());
+      return new Uint8Array(await blob.arrayBuffer());
+    } catch {
+      return undefined;
+    }
+  })();
+  fileBytesCache.set(key, promise);
+  return promise;
+}
+
+/**
+ * ADR-023 S9a — which axes a pinned FILE actually exposes, for the inspector's controls.
+ *
+ * Synchronous, and `undefined` means "have not read it yet" rather than "no axes" — the three-valued
+ * shape `fontAxisSupport` needs. A control that treated "not read yet" as "no axes" would be
+ * disabled for the first seconds of every session, and a control that treated it as "has axes" would
+ * put a slider on a static file, which is "no cut, no lie" broken. The read is kicked off here and
+ * reported through the same `notify()` the install states use, so the panel re-renders when it lands.
+ */
+const axesByFile = new Map<string, FontAxisRange[] | undefined>();
+const axisReadsStarted = new Set<string>();
+
+export function fontFileAxes(ref: PinnedFontRef): FontAxisRange[] | undefined {
+  const key = `${ref.source}|${ref.fileHash}`;
+  if (!axisReadsStarted.has(key)) {
+    axisReadsStarted.add(key);
+    void fontFileBytes(ref).then((bytes) => {
+      axesByFile.set(key, bytes ? parseFontVariationAxes(bytes) : undefined);
+      notify();
+    });
+  }
+  return axesByFile.get(key);
+}
+
+export function pathTextFontFaceCss(
+  ref: PinnedFontRef,
+  /**
+   * S9a. Absent means the base file, which is what every pre-S9a caller wants. When present, the
+   * embedded face is registered under the ALIAS the emitted style names and carries the axis
+   * descriptor — otherwise the SVG defines "Arimo" while its `<text>` asks for "Arimo ~axis~wght700"
+   * and the arc renders in the isolated document's fallback, silently.
+   */
+  instance?: { instanceFamily: string; axisSettings: string | undefined }
+): Promise<string | undefined> {
+  const key = `${fontRefInstallKey(ref)}|${instance?.instanceFamily ?? ""}`;
+  const existing = faceCssCache.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<string | undefined> => {
+    try {
+      const buffer = await fontFileBytes(ref);
+      if (!buffer) return undefined;
       let binary = "";
       for (let i = 0; i < buffer.length; i += 1) binary += String.fromCharCode(buffer[i]!);
       const dataUrl = `data:font/ttf;base64,${btoa(binary)}`;
       return (
-        `@font-face{font-family:"${ref.family}";font-weight:${ref.weight};font-style:${ref.style};` +
+        `@font-face{font-family:"${instance?.instanceFamily ?? ref.family}";font-weight:${ref.weight};` +
+        `font-style:${ref.style};` +
+        `${instance?.axisSettings ? `font-variation-settings:${instance.axisSettings};` : ""}` +
         `src:url(${dataUrl})}`
       );
     } catch {
@@ -217,8 +307,8 @@ export function pathTextFontFaceCss(ref: PinnedFontRef): Promise<string | undefi
 }
 
 /** Synchronous read of what we know so far — `undefined` while a load is still in flight. */
-export function fontInstallState(ref: PinnedFontRef): FontInstallState | undefined {
-  return states.get(fontRefInstallKey(ref));
+export function fontInstallState(ref: PinnedFontRef, axes?: FontVariationAxes | undefined): FontInstallState | undefined {
+  return states.get(fontRefInstallKey(ref, axes));
 }
 
 /**
@@ -228,7 +318,13 @@ export function fontInstallState(ref: PinnedFontRef): FontInstallState | undefin
  * anything, and a banner that flashes "missing font" during startup teaches people to ignore it.
  */
 export function missingCompositionFonts(layers: CompositionLayerStyleInput[]): PinnedFontRef[] {
-  return collectPinnedFontRefs(layers).filter((ref) => states.get(fontRefInstallKey(ref)) === "missing");
+  // Keyed per INSTANCE (S9a), because that is what was installed: asking about the bare ref when the
+  // layer authored an axis reads a key nothing ever wrote, and "never asked for" would be reported as
+  // fine. The returned refs are still bare — a missing font is a FILE problem, and naming an axis
+  // coordinate in a banner would tell the user to relink something that is not the thing missing.
+  return collectPinnedFontInstances(layers)
+    .filter(({ ref, axes }) => states.get(fontRefInstallKey(ref, axes)) === "missing")
+    .map(({ ref }) => ref);
 }
 
 export function subscribeFontInstalls(listener: () => void): () => void {

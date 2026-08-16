@@ -256,6 +256,7 @@ import { InspectorHost } from "../editor/inspector/InspectorHost";
 // ADR-023 S4 — the text look's inspector rows come from the schema adapter, through the one renderer.
 import { PropertyFieldList } from "../editor/inspector/PropertyFieldList";
 import { buildTextStyleFields, pickTextStyleFields } from "../editor/inspector/textStyleFields";
+import { fontFileAxes } from "../lib/font-install";
 import {
   validateEditorCommand,
   type EditorCommandId,
@@ -433,6 +434,8 @@ import {
   normalizeGraphicSvg,
   extractSvgPalette,
   getCompositionTextRuns,
+  getCompositionFontRef,
+  isPinnedFontRef,
   detectTextScript,
   graphicToDataUrl,
   DEFAULT_GRAPHIC_FILL,
@@ -15154,6 +15157,11 @@ function TextGraphicControls({
   // own. The five widgets below are handed in as slots because their canonical editors are not in the
   // renderer's subset of the frozen taxonomy; see `textStyleFields.tsx` for why they arrive as
   // `custom` rather than `control`, and why no kind was added.
+  // S9a: read through the shared normalizer so "is this pinned" is answered the same way here, in
+  // the adapter, and at emission. A system ref yields no axis rows at all — it has no bytes to
+  // re-register, so the axis is refused downstream and a slider would move nothing.
+  const layerFontRef = getCompositionFontRef(layer);
+  const pinnedAxisRef = isPinnedFontRef(layerFontRef) ? layerFontRef : undefined;
   const styleFields = buildTextStyleFields({
     layer,
     palette,
@@ -15161,6 +15169,12 @@ function TextGraphicControls({
     styleKf,
     defaults: defaultTextStyle,
     setShadowEnabled,
+    /* ADR-023 S9a — the axes this layer's pinned FILE exposes, read from its `fvar` table. `undefined`
+       here means "not read yet" and MUST stay distinguishable from "read it, no axes": the adapter
+       drops the row only for the latter. `fontFileAxes` kicks the read off and reports through the
+       same install-store notification the missing-font banner already subscribes to, so the row
+       appears when the bytes land rather than on the next unrelated re-render. */
+    fontAxes: pinnedAxisRef ? fontFileAxes(pinnedAxisRef) : undefined,
     /* ADR-023 S2.5, through the shared `reference` kind since S4b. Picking a catalogue face writes a
        `fontRef` carrying a `fileHash` — the one write the whole S2 contract is downstream of, and the
        reason this crosses as a VALUE and a write rather than as a widget: a shared picker that wrote
@@ -15299,6 +15313,13 @@ function TextGraphicControls({
           </div>
           <div className="icon-control-row">
             <PropertyFieldList fields={pickTextStyleFields(styleFields, ["fontWeight", "italic", "textAlign"])} />
+          </div>
+          {/* ADR-023 S9a. Its own row rather than folded in above, because these two appear only for a
+              pinned VARIABLE file — a shared row would collapse to one control on most layers and to
+              none on a system stack, which reads as a broken layout rather than as a feature that does
+              not apply. `pickTextStyleFields` already drops keys the adapter did not emit. */}
+          <div className="icon-control-row">
+            <PropertyFieldList fields={pickTextStyleFields(styleFields, ["fontWeightAxis", "fontWidthAxis"])} />
           </div>
           <div className="icon-control-row">
             <PropertyFieldList fields={pickTextStyleFields(styleFields, ["direction"])} />

@@ -26,8 +26,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
   canServeFont,
-  collectPinnedFontRefs,
+  collectPinnedFontInstances,
+  fontAxisInstanceFamily,
   fontObjectKey,
+  fontVariationSettingsCss,
   FontResolutionError,
   fontStoreKeyFor,
   type CompositionLayerStyleInput,
@@ -74,13 +76,34 @@ export async function resolveFontsForLayers(
    */
   viewerId: string | undefined
 ): Promise<InstalledFontFace[]> {
-  const refs = collectPinnedFontRefs(layers);
-  if (!refs.length) return [];
+  /**
+   * ADR-023 S9a — instances, not refs, and the difference is one download versus N.
+   *
+   * A variable file authored at two axis coordinates is ONE set of bytes and TWO registrations. So
+   * the loop walks (file, axis) pairs while `srcByFile` keeps the base64 per FILE: inlining a
+   * 300KB face once per axis value would multiply `inputProps` by the number of instances, and S9b
+   * turns "a couple of instances" into "one per sampled value".
+   */
+  const instances = collectPinnedFontInstances(layers);
+  if (!instances.length) return [];
 
   const faces: InstalledFontFace[] = [];
   const missing: PinnedFontRef[] = [];
+  const srcByFile = new Map<string, string>();
 
-  for (const ref of refs) {
+  for (const { ref, axes } of instances) {
+    const fileKey = `${ref.source}|${ref.fileHash}`;
+    const cached = srcByFile.get(fileKey);
+    if (cached) {
+      faces.push({
+        family: fontAxisInstanceFamily(ref.family, axes),
+        weight: ref.weight,
+        style: ref.style,
+        src: cached,
+        variationSettings: fontVariationSettingsCss(axes)
+      });
+      continue;
+    }
     // D4/T-3: the key is derived by discriminating on `source`. There is no way to ask for "the
     // bytes of a font" without saying which store it lives in, which is what keeps a per-user face
     // from ever being resolved through the shared path.
@@ -105,11 +128,17 @@ export async function resolveFontsForLayers(
       missing.push(ref);
       continue;
     }
+    const src = `data:font/ttf;base64,${bytes.toString("base64")}`;
+    srcByFile.set(fileKey, src);
     faces.push({
-      family: ref.family,
+      // Identical to `ref.family` when no axis is authored, so a pinned face's registration is
+      // byte-for-byte what it was before S9a — which is what makes `render:baseline` the instrument
+      // for the "nothing else moved" half of this claim.
+      family: fontAxisInstanceFamily(ref.family, axes),
       weight: ref.weight,
       style: ref.style,
-      src: `data:font/ttf;base64,${bytes.toString("base64")}`
+      src,
+      variationSettings: fontVariationSettingsCss(axes)
     });
   }
 

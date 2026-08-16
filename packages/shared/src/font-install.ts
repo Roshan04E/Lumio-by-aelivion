@@ -18,7 +18,12 @@
  * store for itself.
  */
 import type { CompositionLayerStyleInput } from "./composition-style";
-import { getCompositionFontRef } from "./composition-style";
+import { getCompositionFontAxesSource, getCompositionFontRef } from "./composition-style";
+import {
+  fontVariationSettingsCss,
+  resolveFontVariationAxes,
+  type FontVariationAxes
+} from "./font-variation";
 import { cssFamilyToken, isPinnedFontRef, type FontRef, type PinnedFontRef } from "./fonts";
 
 /** One `@font-face` the render page must have before it draws. */
@@ -28,6 +33,48 @@ export interface InstalledFontFace {
   style: "normal" | "italic";
   /** Where the bytes come from: a `data:` URL in the worker, an HTTP URL in the browser. */
   src: string;
+  /**
+   * ADR-023 S9a — the `font-variation-settings` DESCRIPTOR, when this face is an axis instance.
+   *
+   * A descriptor, emphatically not a declaration: it instances the axis when the face is REGISTERED,
+   * which is the only route that reaches the canvas raster (canvas 2D applies no axis at draw time).
+   * A face carrying one is registered under an alias family — `fontAxisInstanceFamily` — so several
+   * instances of the same bytes coexist, and the emitted CSS picks one by NAME.
+   */
+  variationSettings?: string | undefined;
+}
+
+/**
+ * One registration a composition needs: a file, plus the axis instance to bake into it.
+ *
+ * Separate from a bare `FontRef` because the two multiplicities differ and conflating them is a real
+ * bug rather than a tidiness point: N axis instances of one file are ONE set of bytes to fetch and N
+ * faces to register. The worker resolves bytes per {@link collectPinnedFontRefs} and registers per
+ * this — one download, several `@font-face` rules.
+ */
+export interface PinnedFontInstance {
+  ref: PinnedFontRef;
+  axes: FontVariationAxes | undefined;
+}
+
+/**
+ * Every (file, axis-instance) pair a set of layers needs, deduplicated.
+ *
+ * The dedupe key includes the settings string, so two layers at `wght 550` share one registration and
+ * a layer at 620 gets its own. That is also the shape S9b will meter: a continuously animated axis
+ * turns this list from "a handful" into "one per sampled value", which is why S9b's first job is to
+ * measure the registration cost rather than assume it.
+ */
+export function collectPinnedFontInstances(layers: CompositionLayerStyleInput[]): PinnedFontInstance[] {
+  const byKey = new Map<string, PinnedFontInstance>();
+  for (const layer of layers) {
+    const ref: FontRef = getCompositionFontRef(layer);
+    if (!isPinnedFontRef(ref)) continue;
+    const axes = resolveFontVariationAxes(getCompositionFontAxesSource(layer));
+    const key = `${ref.source}|${ref.fileHash}|${ref.weight}|${ref.style}|${fontVariationSettingsCss(axes) ?? ""}`;
+    if (!byKey.has(key)) byKey.set(key, { ref, axes });
+  }
+  return [...byKey.values()];
 }
 
 /**
@@ -81,7 +128,13 @@ export function fontFaceCss(faces: readonly InstalledFontFace[]): string {
     .map(
       (face) =>
         `@font-face{font-family:${cssFamilyToken(face.family)};font-weight:${face.weight};` +
-        `font-style:${face.style};font-display:block;src:url(${face.src})}`
+        `font-style:${face.style};font-display:block;` +
+        // ADR-023 S9a. Inside an `@font-face` block this is a DESCRIPTOR — it instances the axis when
+        // the face is registered — and that is the only reason it works here at all: the same property
+        // written as a declaration on an element is ignored by the canvas raster both renderers draw
+        // through. Emitted before `src` so a reader sees what the face IS before where it comes from.
+        `${face.variationSettings ? `font-variation-settings:${face.variationSettings};` : ""}` +
+        `src:url(${face.src})}`
     )
     .join("\n");
 }

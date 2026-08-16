@@ -85,6 +85,14 @@ const pinnedInter: FontRef = {
   italic: false,
   fontFamily: "Inter"
 };
+/** S9a: the ref an axis co-requisite pins. Any PINNED ref will do — the axis is refused only on `system`. */
+const AXIS_FONT_REF: FontRef = {
+  source: "catalogue",
+  family: "Arimo",
+  fileHash: "hash-arimo-400",
+  weight: 400,
+  style: "normal"
+};
 const pinnedLora: FontRef = {
   source: "catalogue",
   family: "Lora",
@@ -341,7 +349,12 @@ const pinnedLora: FontRef = {
     strokeOuterWidth: 40,
     // S8: above MIN_TEXT_PATH_CURVE, or it resolves to 0 and the field would report "changes
     // nothing" — a report about the threshold rather than about the field.
-    textPathCurve: 60
+    textPathCurve: 60,
+    // S9a: a coordinate inside Arimo's real `wght` range (400–700), read off the file's `fvar` rather
+    // than picked. Note these move the emitted FAMILY TOKEN, not a declaration — the instance was
+    // baked into the face at registration, which is the only route that reaches the canvas raster.
+    fontWeightAxis: 700,
+    fontWidthAxis: 87.5
   };
   /**
    * Some fields are CONDITIONALLY emitted and provably cannot move anything alone: `WebkitTextStroke`
@@ -377,7 +390,16 @@ const pinnedLora: FontRef = {
      * stroke covers completely.
      */
     strokeOuterColor: { strokeWidth: 10, strokeOuterWidth: 40 },
-    strokeOuterWidth: { strokeWidth: 10, strokeOuterColor: "#f5d90a" }
+    strokeOuterWidth: { strokeWidth: 10, strokeOuterColor: "#f5d90a" },
+    /**
+     * S9a: an axis needs a PINNED ref to be an axis of. This co-requisite is not a convenience — it
+     * is the refusal itself, read out of `fontRefCss`: a `{source:"system"}` ref has no bytes to
+     * re-register, so there is no alias family to name and the axis is dropped. The default fixture
+     * layer carries a system ref, so without this the sweep would report "changes nothing" — and that
+     * report would be TRUE, and would be about the refusal rather than about the field.
+     */
+    fontWeightAxis: { fontRef: AXIS_FONT_REF },
+    fontWidthAxis: { fontRef: AXIS_FONT_REF }
   };
   /**
    * S5b — fields whose emission needs a style OPTION, not another layer field.

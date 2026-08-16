@@ -965,6 +965,45 @@ S9 owns this now, and owns it whole: making a variable axis reachable at all is 
 (registering per-instance faces, or a second text surface), and only after that does OQ2's
 two-Chromium question become askable.
 
+**CLOSED 2026-08-16 (S9a) — it was the first of those two, and the deferral above is REVERSED.** Both
+facts recorded in the paragraphs above remain true and neither one blocks the feature, because both
+are about DRAW time and the axis does not have to be applied at draw time. A `FontFace` carries a
+`variationSettings` DESCRIPTOR which instances the axis at **registration**, and CSS carries the same
+descriptor inside an `@font-face` block — which is the route the worker takes, since the worker
+installs faces as CSS rather than as `FontFace` objects. Measured (`apps/worker/tmp/oq6-spike.mjs`):
+two aliases over one variable file measure **331.98 vs 368.08 on canvas**, against a DOM control on
+the same face at 331.98 vs 368.09 which establishes that the file is variable and this engine can
+instance it — so the canvas number is a fact about canvas rather than about the probe.
+
+The design that follows from it: **an axis instance is a separate registered FAMILY, not a property of
+a draw.** `fontRefCss` emits an alias family token, the raster resolves it by name like any other
+family, and no code on the drawing path knows that variable fonts exist. One consequence is worth
+stating because it was not predicted: the alias reaches the S8 arc surface too — an SVG-as-`<img>`
+ignores `font-variation-settings` as a presentation attribute (the spike's negative) but honours it
+as an `@font-face` descriptor in the document it carries, so a curved run varies as well
+(`font:axis-falsifier`, curve arms).
+
+**⚠ AND THE DETECT THAT LIES, recorded here because it would delete the feature.**
+`FontFace.variationSettings` **does not reflect back** — construct a face with
+`{ variationSettings: "'wght' 700" }`, read the property, and Chromium returns empty while the face
+renders at 700 correctly. A feature detect written against the reflected value reports a WORKING API
+as unsupported. This is the mirror image of the OQ2 probe's own first-draft error above (which read
+back an expando it had just written): there the instance lied by remembering, here it lies by
+forgetting. **Detect by RENDERING two instances and measuring, or do not detect.** Written into
+`font-variation.ts` and into the falsifier's failure message, not only here.
+
+**The axis is refused on a `{source:"system"}` ref**, and asserted as an equality rather than assumed.
+A system family has no bytes to re-register, so there is no alias to name; the only route left would
+be a declaration, which the DOM overlay honours and the canvas raster ignores — an axis that moves
+the editor and changes nothing in the export, which is §1's failure shape exactly.
+
+**OQ2's original two-Chromium question is now askable and is NOT yet answered.** Both renderers take
+their text pixels from the same canvas raster (T-13), so they instance through the same code path in
+the same engine; the axis falsifier proves the descriptor survives the worker's whole
+store→resolver→data-URL→`@font-face` chain. What is untested is two DIFFERENT Chromium versions
+interpolating one axis identically, which is D1's stated bound ("the same font", never "the same
+pixels forever") and not something a gate on one machine can settle.
+
 **OQ3 — Full font files or per-project subsets?** Subsetting cuts payload substantially but makes
 the stored artifact a function of the subsetter's version, which undermines D1's determinism story
 in the same way name-keying did. Provisional lean: **mirror full files** (determinism), subset only

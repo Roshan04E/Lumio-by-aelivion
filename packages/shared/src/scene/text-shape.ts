@@ -28,7 +28,8 @@ import {
 import { hasTextWarp } from "../text-warp";
 import type { FontRef } from "../fonts";
 import { isPinnedFontRef } from "../fonts";
-import { getCompositionFontRef } from "../composition-style";
+import { getCompositionFontAxesSource, getCompositionFontRef } from "../composition-style";
+import { fontAxisInstanceFamily, fontVariationSettingsCss, resolveFontVariationAxes } from "../font-variation";
 import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
 
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
@@ -55,7 +56,21 @@ export type OverlayStyleOptions = Pick<CompositionStyleOptions, "resolveAssetUrl
    * the page's own faces, its network, or anything else. **Returning `undefined` is a refusal**, and
    * the arc then declines to draw rather than rendering the run in whatever the fallback is.
    */
-  resolveFontFaceCss?: ((ref: FontRef) => Promise<string | undefined> | string | undefined) | undefined;
+  /**
+   * ADR-023 S9a — `instanceFamily` is the family the emitted style actually NAMES, which for a layer
+   * with a variable axis is the alias (`Arimo ~axis~wght700`) and not `ref.family`. It has to be a
+   * parameter rather than something the app re-derives, because the app would have to re-read the
+   * layer's axis fields to get it and the two reads could disagree — and when they disagree the
+   * symptom is not an error: the SVG document defines one family and the `<text>` asks for another,
+   * so the arc renders in the isolated document's fallback. `axisSettings` is the descriptor that
+   * makes the embedded face BE that instance.
+   */
+  resolveFontFaceCss?:
+    | ((
+        ref: FontRef,
+        instance: { instanceFamily: string; axisSettings: string | undefined }
+      ) => Promise<string | undefined> | string | undefined)
+    | undefined;
 };
 
 /**
@@ -938,7 +953,16 @@ export async function drawTextLayer(
     // A pinned face has to travel INSIDE the isolated SVG document. `undefined` from the app is a
     // refusal, and `buildArcTextSvg` declines on the empty string rather than rendering a fallback.
     const ref = getCompositionFontRef(layer);
-    const fontFaceCss = isPinnedFontRef(ref) ? (await styleOptions.resolveFontFaceCss?.(ref)) ?? "" : undefined;
+    // S9a: the SVG must embed the INSTANCE the emitted style names, not the base file. Derived from
+    // the same `getCompositionFontAxesSource` the install plan reads, so the family in the document
+    // and the family on the `<text>` cannot drift apart.
+    const pathAxes = resolveFontVariationAxes(getCompositionFontAxesSource(layer));
+    const fontFaceCss = isPinnedFontRef(ref)
+      ? (await styleOptions.resolveFontFaceCss?.(ref, {
+          instanceFamily: fontAxisInstanceFamily(ref.family, pathAxes),
+          axisSettings: fontVariationSettingsCss(pathAxes)
+        })) ?? ""
+      : undefined;
     const margin = textPathOverhang(pathCurve, textWidth, fontSize);
     const svgW = textWidth + 2 * margin;
     const svgH = fontSize * 1.4 + 2 * margin;

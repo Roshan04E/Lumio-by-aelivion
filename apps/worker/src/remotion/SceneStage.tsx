@@ -241,7 +241,7 @@ class SceneController {
     // worker's installed faces already carry their bytes as `data:` URLs (that is what
     // `resolveManifestFonts` produced before the browser was even started), so this is a lookup, not
     // a fetch — and an SVG drawn as an image cannot reach the page's own faces, only its own.
-    private readonly resolveFontFaceCss?: (ref: FontRef) => string | undefined
+    private readonly resolveFontFaceCss?: (ref: FontRef, instance: { instanceFamily: string; axisSettings: string | undefined }) => string | undefined
   ) {
     this.compositor = new SceneCompositor(canvas, width, height);
     this.matteCache = new SceneMaskMatteCache(width, height);
@@ -726,11 +726,18 @@ export function SceneStage({ manifest, fonts }: { manifest: RenderManifest; font
    */
   const fontFaceCssFor = useMemo(() => {
     const byKey = new Map((fonts ?? []).map((face) => [`${face.family}|${face.weight}|${face.style}`, face]));
-    return (ref: FontRef): string | undefined => {
+    // S9a: keyed by the INSTANCE family the caller names, not by `ref.family`. The resolver already
+    // registered one face per axis instance under an alias, so looking up the base family would miss
+    // — and a miss here is the refusal, so a curved run with an axis would silently stop drawing.
+    return (ref: FontRef, instance: { instanceFamily: string; axisSettings: string | undefined }): string | undefined => {
       if (ref.source === "system") return undefined;
-      const face = byKey.get(`${ref.family}|${ref.weight}|${ref.style}`);
+      const face = byKey.get(`${instance.instanceFamily}|${ref.weight}|${ref.style}`);
       if (!face) return undefined;
-      return `@font-face{font-family:"${face.family}";font-weight:${face.weight};font-style:${face.style};src:url(${face.src})}`;
+      return (
+        `@font-face{font-family:"${face.family}";font-weight:${face.weight};font-style:${face.style};` +
+        `${face.variationSettings ? `font-variation-settings:${face.variationSettings};` : ""}` +
+        `src:url(${face.src})}`
+      );
     };
   }, [fonts]);
 

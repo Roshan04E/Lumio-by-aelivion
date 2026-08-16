@@ -4,6 +4,7 @@ import { frameProfiler } from "./color/frame-profiler";
 import { COLOR_EFFECT_TYPES, compileColorPipeline, LEGACY_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
+import { resolveFontVariationAxes } from "./font-variation";
 import { fontRefCss, fontRefKey, normalizeFontRef, type FontRef } from "./fonts";
 import { detectTextScript } from "./text-script";
 import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, SourceTextKeyframe, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
@@ -39,6 +40,9 @@ export interface CompositionLayerStyleInput {
   letterSpacing?: number | undefined;
   lineHeight?: number | undefined;
   fontRef?: FontRef | undefined;
+  /** ADR-023 S9a — the `wght`/`wdth` axis INSIDE the pinned file. See {@link TimelineLayer.fontWeightAxis}. */
+  fontWeightAxis?: number | undefined;
+  fontWidthAxis?: number | undefined;
   textWidthPercent?: number | undefined;
   textAlign?: "left" | "center" | "right" | "start" | "end" | string | undefined;
   direction?: "auto" | "ltr" | "rtl" | undefined;
@@ -827,7 +831,11 @@ export function resolveTextStyle(
   // returns it unchanged with NO weight or style opinion — which is what keeps the three font
   // declarations byte-identical to what they were before `FontRef` existed.
   const fontRef = getCompositionFontRef(layer);
-  const fontCss = fontRefCss(fontRef);
+  // ADR-023 S9a. The axis reaches the raster through the FAMILY TOKEN, because the instance was baked
+  // into the face at registration — see `font-variation.ts`. A system ref drops it inside
+  // `fontRefCss`, which is the refusal, not an oversight.
+  const fontAxes = resolveFontVariationAxes(getCompositionFontAxesSource(layer));
+  const fontCss = fontRefCss(fontRef, fontAxes);
   // The shadow's absent-blur default depends on the LAYER, not on the field: a `shadow` effect means
   // the layer asked for the stock shadow, and no effect means no shadow at all.
   const hasShadowEffect = hasCompositionEffect(layer.effects, "shadow");
@@ -1489,6 +1497,27 @@ export function getCompositionFontRef(layer: CompositionLayerStyleInput | Timeli
 }
 
 /**
+ * ADR-023 S9a — the ONE place the axis fields are read off a layer, for `getCompositionFontRef`'s
+ * reason: the install plan and the CSS emission must agree about which instance exists, and they are
+ * in different packages. Two independent `layer.x ?? style.x` reads is how the family token comes to
+ * name a face nobody registered — text that silently falls back to `sans-serif` in the export only.
+ */
+export function getCompositionFontAxesSource(layer: CompositionLayerStyleInput | TimelineLayer): {
+  fontWeightAxis?: number | undefined;
+  fontWidthAxis?: number | undefined;
+} {
+  const style = styleOf(layer);
+  return {
+    fontWeightAxis: numberOrUndefined(layer.fontWeightAxis ?? style.fontWeightAxis),
+    fontWidthAxis: numberOrUndefined(layer.fontWidthAxis ?? style.fontWidthAxis)
+  };
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
  * Every distinct font a composition needs, as `FontRef`s (ADR-023 S2).
  *
  * This used to collect CSS family STRINGS, which is exactly the shape that cannot express "install
@@ -1627,6 +1656,12 @@ export const MANIFEST_LAYER_STYLE_KEYS = [
   // legacy project. This entry was added because the exhaustiveness constraint below refused to
   // compile without it — which is the constraint doing exactly the job T-15 gave it.
   "fontRef",
+  // ADR-023 S9a — the axis instance INSIDE the pinned file. It travels as data, not as an already-
+  // resolved family token, because the worker's install plan has to see the same numbers the CSS
+  // emission does: the alias family names a face, and a bag carrying the name without the numbers
+  // would name a face the worker never registered.
+  "fontWeightAxis",
+  "fontWidthAxis",
   "fontSize",
   "fontWeight",
   "italic",

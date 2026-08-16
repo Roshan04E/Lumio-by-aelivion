@@ -13,7 +13,7 @@ import {
   expandFrameBorders,
   expandNestedCompositions,
   getCompositionFontsUsed,
-  collectPinnedFontRefs,
+  collectPinnedFontInstances,
   fontRefCss,
   FontResolutionError,
   graphicAnimationBakeTime,
@@ -341,10 +341,14 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
    * existed, which D1a forbids in the strongest terms.
    */
   const layers = composition.tracks.flatMap((track) => track.layers);
-  const pinnedFonts = collectPinnedFontRefs(layers);
+  // S9a: INSTANCES, not refs. An axis instance is a separate registration under an alias family, and
+  // the emitted CSS names the alias — so installing only the bare ref would leave the export naming a
+  // face nobody registered, falling back to `sans-serif` in the deliverable and nowhere else. The
+  // abort still reports the FILE, because the file is what the user would relink.
+  const pinnedFonts = collectPinnedFontInstances(layers);
   if (pinnedFonts.length) {
-    const outcomes = await Promise.all(pinnedFonts.map(installPinnedFont));
-    const unresolved = pinnedFonts.filter((_, index) => outcomes[index] !== "installed");
+    const outcomes = await Promise.all(pinnedFonts.map(({ ref, axes }) => installPinnedFont(ref, axes)));
+    const unresolved = pinnedFonts.filter((_, index) => outcomes[index] !== "installed").map(({ ref }) => ref);
     if (unresolved.length) throw new FontResolutionError(unresolved);
   }
 

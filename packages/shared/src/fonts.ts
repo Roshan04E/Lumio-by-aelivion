@@ -17,6 +17,7 @@
  * versions, and both renderers ride Chromium. This module guarantees "the same font", never "the
  * same pixels forever".
  */
+import { fontAxisInstanceFamily, type FontVariationAxes } from "./font-variation";
 
 /**
  * What a layer stores. NOT a CSS string.
@@ -140,10 +141,25 @@ export function cssFamilyToken(family: string): string {
  * rather than hidden; the worker never relies on it, because an unresolved pinned font aborts the
  * render before a frame is drawn (T-2).
  */
-export function fontRefCss(ref: FontRef): { fontFamily: string; fontWeight?: number; fontStyle?: "normal" | "italic" } {
+export function fontRefCss(
+  ref: FontRef,
+  axes?: FontVariationAxes | undefined
+): { fontFamily: string; fontWeight?: number; fontStyle?: "normal" | "italic" } {
+  // ADR-023 S9a. A system ref REFUSES an axis instead of approximating one: there are no bytes to
+  // re-register under an alias, so the only route left would be a `font-variation-settings`
+  // declaration — which the DOM overlay honours and the canvas raster ignores, i.e. an axis that
+  // moves the editor and ships nothing. Silently dropping it here is what makes the refusal
+  // TESTABLE as an equality (system+axis must be byte-identical to system), which is the only form
+  // that catches it. See `font-variation.ts` for why draw-time is not available at all.
   if (ref.source === "system") return { fontFamily: ref.fontFamily };
   return {
-    fontFamily: `${cssFamilyToken(ref.family)}, sans-serif`,
+    // The axis lives in the FAMILY TOKEN, not in a declaration, because it was baked into the face at
+    // registration. That is what lets `ctx.font`, the DOM and an SVG `@font-face` all pick it up
+    // without a single line on the drawing path knowing that variable fonts exist.
+    fontFamily: `${cssFamilyToken(fontAxisInstanceFamily(ref.family, axes))}, sans-serif`,
+    // Unchanged by the axis, deliberately (the S2.7 boundary): the alias face is registered with the
+    // REF's own weight/style descriptors, so an axis moves the family token and nothing else. A
+    // pinned layer's emitted `font-weight` is byte-identical with and without an axis.
     fontWeight: ref.weight,
     fontStyle: ref.style
   };
