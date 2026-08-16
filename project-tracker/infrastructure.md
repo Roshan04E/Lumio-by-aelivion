@@ -421,3 +421,53 @@ the entry is trusted**, because one clean run is not evidence of stability at an
 then the text programme has ~20 glyph-edge fixtures in a zero-tolerance gate and this is the first one
 whose reference was measured rather than assumed to hold; the others were registered before anyone
 knew to check, and any of them could be sitting in the same place.
+
+## The free-RAM preflight ships — and it would NOT have caught the two voids that bought it (v6, 2026-08-16)
+
+**Built:** `assertFreeMemory` in `browser/browser-preflight.ts`, `assertFreeDisk`'s sibling — same
+shape, same file, same two call sites (`assertQuietBrowserMachine` at startup,
+`assertZeroBrowserFloor` between ladder rungs), same env override (`GATE_MIN_FREE_RAM_GB`), same rule
+that an unreadable reading passes with a printed note rather than blocking.
+
+**CORRECTION TO v3, and it is the important part of this entry.** v3 claimed the missing free-RAM
+check "would have refused both of these runs at launch rather than after forty minutes." **That is
+false.** The evidence was in the run logs the whole time: the two voided sweeps printed **37 and 79
+fixture rows** before dying. Both STARTED on a machine that was clean, and the competing harness
+launched mid-run in both cases. A startup check cannot refuse a process that does not exist yet —
+which is precisely the limitation v3 itself identified in the browser COUNT, restated one resource
+over and then forgotten within the same entry.
+
+Recorded rather than edited away, because the failure is instructive: a guard's justifying story is
+the thing least likely to be checked, and this one was written by the same session that had the
+disproving log open. **A check justified by an unverified story is how the next guard gets
+over-trusted.**
+
+**So what is it actually worth?** Two things, stated narrowly:
+
+1. It refuses a gate that starts on an ALREADY-loaded machine. Demonstrated live: with the parallel
+   Flarex session up (2 harnesses, 30 chrome processes, 3.3 GB free), `render:baseline` now refuses in
+   milliseconds instead of spending forty minutes to die. That is the common case when a human starts
+   a sweep while other work is visibly running.
+2. Because it is exported, a measurement ladder re-establishes the floor BETWEEN RUNGS, which is the
+   only place a periodic reading catches a late arrival.
+
+**It does not close the mid-run case.** A lock the gates take and the probes respect is still what
+would; this is the cheap half, not the fix.
+
+**Calibration, from four readings on this 13.9 GB box:**
+
+    4.5 GB, 4.7 GB   two harnesses alive  — the state two sweeps died in
+    5.7 GB, 5.8 GB   one harness or none  — the state the sweep that COMPLETED ran in
+    floor: 5 GB
+
+**The first floor tried was 6 GB, and it was wrong**: this box idles at 5.7–5.8 GB, so 6 GB refuses a
+healthy machine — the failure mode a resource guard is least able to survive, because it gets disabled
+wholesale by the next person in a hurry. The gap is only ~1 GB, so the check is COARSE by construction
+and says so in its own refusal text: it catches a second harness, not a machine that is merely tight.
+
+**Falsified in both directions** (`preflight:falsifier`, new): refuses below the floor, PASSES above it
+(a check that threw unconditionally would satisfy a refuses-below test perfectly while blocking every
+browser gate in the repo), honours the override in both directions, ignores a junk override value
+rather than obeying it, and reports an unreadable reading as unreadable. The disk sibling — shipped
+earlier without a falsifier — is covered by the same file, because they are one precondition class and
+a reader wondering whether the disk check can fire should not have to look elsewhere.

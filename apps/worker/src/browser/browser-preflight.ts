@@ -159,6 +159,107 @@ function resolveMinFreeBytes(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed * GIB : DEFAULT_MIN_FREE_BYTES;
 }
 
+/**
+ * The free-RAM floor, calibrated from four readings on this repo's usual box (13.9 GB total):
+ *
+ *     4.5 GB, 4.7 GB   two Chromium harnesses alive — the state two sweeps died in
+ *     5.7 GB, 5.8 GB   one harness or none — the state the sweep that COMPLETED ran in
+ *
+ * 5 GB sits between them. It is deliberately NOT higher: this box idles at 5.7–5.8 GB, so a 6 GB
+ * floor — the first number tried here — refuses a perfectly healthy machine, which is the failure
+ * mode a resource guard is least able to survive. It gets disabled wholesale by the next person in a
+ * hurry, and then it is not a guard at all.
+ *
+ * **The separation is only ~1 GB, so this is a COARSE instrument and should be read as one.** It
+ * catches "another browser harness is already up"; it will not catch a machine that is merely
+ * tight. Widening the gap is not available — the numbers are what the box does.
+ */
+const DEFAULT_MIN_FREE_RAM_BYTES = 5 * 1024 ** 3;
+
+/** Free physical memory in bytes, or `undefined` if it cannot be read. */
+function freeRamBytes(): number | undefined {
+  try {
+    const free = os.freemem();
+    // `freemem()` returns 0 on some platforms rather than failing, and 0 is indistinguishable from a
+    // genuinely exhausted machine. Treat it as UNREADABLE: refusing every gate on a platform whose
+    // instrument returns a constant would be the guard inventing a reason to stop work.
+    return free > 0 ? free : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Refuse to run a gate on a machine with no memory left — `assertFreeDisk`'s sibling, and it exists
+ * for the same reason one gate over: a precondition that is cheap to check at startup and expensive
+ * to discover at minute forty.
+ *
+ * **WHAT BOUGHT IT (2026-08-16).** Two full `render:baseline` sweeps voided at roughly forty minutes
+ * each — `Navigation failed because browser has disconnected!` and `Protocol error
+ * (Runtime.callFunctionOn): Target closed` — because a parallel session's Flarex harness was running
+ * a second Chromium on a 13.9 GB box, leaving ~4.7 GB free.
+ *
+ * **AND IT WOULD NOT HAVE CAUGHT EITHER OF THEM. Read this before trusting it.** Both sweeps STARTED
+ * on a clean machine and printed 37 and 79 fixture rows respectively before dying; the competing
+ * harness launched mid-run in both cases. A startup check cannot refuse a process that does not exist
+ * yet — which is the identical limitation the browser COUNT has, and the reason `infrastructure.md`
+ * v3 was written. The first draft of this comment claimed the opposite ("it would have refused both
+ * of these runs at launch"); that claim was false and is corrected here rather than quietly dropped,
+ * because a guard justified by a story nobody checked is how the next one gets over-trusted.
+ *
+ * **What it IS good for, stated narrowly so it is not oversold:** refusing a gate that starts on an
+ * already-loaded machine — the common case when a human kicks off a sweep while other work is
+ * visibly running — and, because it is exported, letting a measurement ladder re-establish the floor
+ * BETWEEN RUNGS, which is the only place a periodic reading can actually catch a late arrival.
+ * `assertZeroBrowserFloor` now does exactly that.
+ *
+ * **What would actually close the mid-run case** (not built, and deliberately not smuggled in here):
+ * a machine-wide lock the gates take and the probes respect, so the second harness waits instead of
+ * colliding. This check is the cheap half; it is not the fix.
+ *
+ * **An UNREADABLE reading does not block**, matching `assertFreeDisk` and `listStaleHarnessProcesses`
+ * — a guard that cannot see the machine must not invent a reason to stop work. It says so out loud,
+ * because "the check did not run" and "the check passed" must not look alike.
+ */
+export function assertFreeMemory(label: string, minFreeBytes = resolveMinFreeRamBytes()): void {
+  const free = freeRamBytes();
+  if (free === undefined) {
+    process.stdout.write(`${label}: free-RAM check SKIPPED — could not read free physical memory.\n`);
+    return;
+  }
+  if (free >= minFreeBytes) return;
+  throw new Error(
+    `${label}: REFUSING TO RUN — only ${gb(free)} of physical memory free; this gate needs ${gb(minFreeBytes)}.\n` +
+      `  A memory-starved machine does not fail as "out of memory". Chrome's renderer is reaped under ` +
+      `pressure and the gate reports "Navigation failed because browser has disconnected" or "Protocol ` +
+      `error (Runtime.callFunctionOn): Target closed" — PARTWAY THROUGH, after it has already printed ` +
+      `rows that read as a verdict. Measured 2026-08-16: two full render:baseline sweeps voided at ~40 ` +
+      `minutes each, on a 13.9 GB box where a second Chromium harness left 4.7 GB free.\n` +
+      `  Fix: stop the other browser work, then re-run. On this repo that is usually a parallel session's ` +
+      `gate or probe in another worktree — check for node processes running a *-probe/*-gate script, and ` +
+      `for leftover automation chrome trees (see the browser count in this same preflight).\n` +
+      `  Override the floor with GATE_MIN_FREE_RAM_GB=<n> only if you know this gate is small; it ` +
+      `defaults to ${gb(DEFAULT_MIN_FREE_RAM_BYTES)}, which sits between the readings this box shows ` +
+      `with two harnesses alive (4.5-4.7 GB) and with one or none (5.7-5.8 GB). That is a ~1 GB gap, so ` +
+      `this check is COARSE: it catches a second harness already running, not a machine that is merely ` +
+      `tight, and it cannot catch one that launches after this gate starts.`
+  );
+}
+
+/** The RAM floor, overridable per machine. A non-numeric or negative value is ignored, not obeyed. */
+function resolveMinFreeRamBytes(): number {
+  const raw = process.env.GATE_MIN_FREE_RAM_GB;
+  if (!raw) return DEFAULT_MIN_FREE_RAM_BYTES;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed * GIB : DEFAULT_MIN_FREE_RAM_BYTES;
+}
+
+/** Free physical memory, for a gate that wants to PRINT the precondition it checked. */
+export function describeFreeMemory(): string {
+  const free = freeRamBytes();
+  return free === undefined ? "RAM unreadable" : `${gb(free)} RAM free`;
+}
+
 /** Free space on each gate volume, for a gate that wants to PRINT the precondition it checked. */
 export function describeFreeDisk(): string {
   return gateVolumes()
@@ -254,6 +355,10 @@ export function assertZeroBrowserFloor(label: string): void {
   // this runs BETWEEN RUNGS of a measurement ladder, which is where a volume that had room at startup
   // runs out — and a ladder is precisely the instrument whose output looks like data either way.
   assertFreeDisk(label);
+  // Between rungs, for the disk check's reason one line up: a ladder can START with headroom and lose
+  // it to a harness that appears later, and a ladder is precisely the instrument whose output looks
+  // like data either way.
+  assertFreeMemory(label);
   reapAutomationBrowsers();
   const alive = listAutomationBrowsers();
   if (alive.length) {
@@ -350,6 +455,11 @@ export interface BrowserPreflightOptions {
    * genuinely renders a handful of stills, and should never raise it silently to make itself pass.
    */
   minFreeBytes?: number;
+  /**
+   * Free-RAM floor, in bytes. Same rule as `minFreeBytes` above: lower it only for a gate that
+   * genuinely renders a handful of stills, and never raise it silently to make a gate pass.
+   */
+  minFreeRamBytes?: number;
 }
 
 /**
@@ -383,6 +493,14 @@ export function assertQuietBrowserMachine(options: BrowserPreflightOptions): voi
    * full disk is about the disk, rather than about whichever process check happened to trip on it.
    */
   assertFreeDisk(label, options.minFreeBytes);
+  /**
+   * SECOND, and for the same reason the disk check is first: it is a single `os.freemem()` and its
+   * failure mode is the one that most recently cost this repo eighty minutes across two sweeps. It
+   * sits next to the disk check because they are the same KIND of precondition — a shared resource
+   * the gate will consume, measured before the gate spends anything, rather than discovered when the
+   * thing it starves takes the browser down mid-run.
+   */
+  assertFreeMemory(label, options.minFreeRamBytes);
   if (scriptMarker) {
     const stale = listStaleHarnessProcesses(scriptMarker);
     if (stale.length) {

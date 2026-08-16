@@ -15,6 +15,7 @@
     "blend:test": "tsx src/blend-parity-test.ts",
     "build": "tsc -p tsconfig.json --noEmit",
     "caption:qa": "tsx src/caption-qa-test.ts",
+    "preflight:falsifier": "tsx src/preflight-falsifier.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "render:compare": "tsx src/render-comparison-test.ts",
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
