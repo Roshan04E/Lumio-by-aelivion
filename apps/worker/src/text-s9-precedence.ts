@@ -14,6 +14,24 @@
  * they are written here first, and they are expected to FAIL on a tree where the feature does not
  * exist — a gate that passes before the feature exists cannot tell whether it arrived.
  *
+ * ## ⚠ THIS GATE IS RED ON PURPOSE. DO NOT RE-TIER IT AS BROKEN.
+ *
+ * It fails at the SUBJECT, with a message that says so, and it stays red until the per-character
+ * animator lands. That is the `pending()` pattern this repo already uses — a harness check that
+ * asserts the DEFECT (here: the absence) still reproduces. Three things follow, and each has been got
+ * wrong before:
+ *
+ *   - **Do not "fix" it** by relaxing the subject, by skipping it, or by moving it to a quarantine
+ *     list. The failure IS the current, correct reading.
+ *   - **Do not make it green** except by shipping the feature. An equality that holds because nothing
+ *     animates is not evidence of a precedence, which is why every equality below is paired with a
+ *     subject.
+ *   - **Do not batch it into a sweep** that reports a pass/fail count as a health signal; it will be
+ *     the one red line and will read as a regression to anyone who did not open this file.
+ *
+ * S9a (the static variable axis) shipped separately and does NOT change any of this: it adds no
+ * animation, touches no branch these arms exercise, and the hashes below are unaffected by it.
+ *
  * THE FOUR DECLARED PRECEDENCES:
  *
  *   P1  Per-cluster animation composes UNDER warp. Warp deforms the ALREADY-ANIMATED picture, which
