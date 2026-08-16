@@ -80,7 +80,8 @@
     "rulerjump:recoveryaccept": "tsx src/ruler-jump-recovery-acceptance-probe.ts",
     "preset:sheet": "tsx src/preset-sheet.ts",
     "flarex:incremental-gate": "tsx src/flarex-incremental-invalidation-gate.ts",
-    "flarex:reuse-measure": "tsx src/flarex-reuse-measure.ts"
+    "flarex:reuse-measure": "tsx src/flarex-reuse-measure.ts",
+    "flarex:frame-cache-gate": "tsx src/flarex-frame-cache-gate.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

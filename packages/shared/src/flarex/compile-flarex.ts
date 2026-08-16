@@ -2081,16 +2081,31 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // property of the graph. Because this read is in shared code, dropping the fallback corrects the web
   // preview, the local export and the Remotion worker in one move. `previewNodeId` stays persisted and
   // the healer still validates it — editor state that survives a reload is still editor state.
+  /**
+   * ADR-021 3b: stamp the ROOT content hash on whatever draw leaves this compiler. The hash of the
+   * node that actually produced the picture folds its whole upstream closure (R3), so ONE token
+   * describes the entire graph's content at this time — which is exactly the "graph content hash"
+   * half of the frame cache's `(graph content hash, t)` key.
+   *
+   * Stamped at every exit, including the preview-root and unwired-output ones. A caller that reads
+   * the token off the draw is reading the compiler's answer, not re-deriving it; a caller that does
+   * not read it is unaffected, because the field is inert to the renderer.
+   */
+  const stampToken = (draw: FlarexImageValue, rootNodeId: string): FlarexImageValue => {
+    draw.flarexContentToken = contentHashes.get(rootNodeId);
+    return draw;
+  };
+
   const previewRootId = ctx.previewRootNodeId;
   const previewNode = previewRootId ? nodes[previewRootId] : undefined;
   if (previewNode && previewNode.type !== "mediaOut") {
     const previewed = evalNode(previewNode.id);
-    if (previewed?.kind === "image") return previewed.draw;
+    if (previewed?.kind === "image") return stampToken(previewed.draw, previewNode.id);
   }
   // Profiler-only: time the whole recursive lowering (traversal + emission) as the "lower" phase —
   // compile total ≈ setup + hashing + lower. No-op unless profiling.
   const result = frameProfiler.measure("compile.lower", () => evalNode(mediaOut.id));
-  if (result?.kind === "image") return result.draw;
+  if (result?.kind === "image") return stampToken(result.draw, mediaOut.id);
   // An UNWIRED MediaOut is an intentional "no output" (the Fusion contract: nothing reaches the
   // viewer) — render transparent, don't leak the source. Every OTHER failure (cycle, dangling
   // upstream, matte-only chain) still returns null → the caller's soft-degrade to the plain clip
@@ -2099,7 +2114,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     const empty = cloneImage(ctx.hostSourceDraw);
     if (!isGroup(empty)) empty.transform.opacity = 0;
     else empty.shell.transform.opacity = 0;
-    return empty;
+    return stampToken(empty, mediaOut.id);
   }
   return null;
 }
