@@ -383,3 +383,41 @@ for, so it is recorded here rather than taken: **the entry is still present.**
 `multi-stroke` and `cluster-text` are `useTextFixture` fixtures, and that flag SKIPS captions
 (`render-comparison-fixture.ts`). Neither flagged fixture contains a caption layer, and all 84
 byte-identical fixtures include every caption-carrying one. The two readings cannot be about captions.
+
+## `cluster-text`'s baseline entry is REMOVED — the removal is the finding (v5, 2026-08-16)
+
+**Founder decision, 2026-08-16.** v4 recorded the recommendation and deliberately did not act on it.
+Acting on it now, and writing it down rather than dropping it quietly, because a fixture silently
+vanishing from a gate is indistinguishable from a fixture nobody noticed was gone.
+
+**Why removal rather than the alternatives.** Three options existed and two are closed:
+
+1. **Leave it.** An entry that flags 3 of 4 runs reports noise as signal in perpetuity, and a
+   permanently-noisy gate trains people to ignore it — the same corrosion as a permanently-red test,
+   which this repo refused for exactly this reason two weeks ago. A gate people skim is worse than a
+   gate that covers less, because the second one is honest about what it covers.
+2. **Re-capture.** Forbidden (v1), and worse here than usual: at a 3-of-4 split a re-capture is a coin
+   toss that freezes whichever state that one run produced.
+3. **Remove.** The only honest option left.
+
+**What is lost, stated exactly.** `cluster-text` loses its zero-tolerance answer to "did this byte
+move" — and that is a question the fixture has demonstrated it cannot answer about itself, since it
+gives two different answers to it from the same code. It KEEPS its `render:compare:pixels` coverage,
+which passed at 0.000% (0/2073600) and is the coverage that answers something real for it: do the two
+renderers agree about a mid-flight per-character reveal. S9's load-bearing evidence never rested on
+the picture gate anyway — the tiling invariant is arithmetic (`cluster:model`) and the at-rest equality
+is a hash comparison of a memcpy, neither of which has a floor to sit on.
+
+**The manifest's `commit`/`capturedAt` were NOT touched.** Removing an entry is not a capture, and
+rewriting that metadata would claim a re-capture that did not happen. The diff is 5 lines out, 0 in.
+
+**RE-REGISTRATION TRIGGER.** If the glyph-edge floor described in v1/v2 is ever characterised and
+fixed — a cause identified, not merely a quiet week — `cluster-text` comes back:
+
+    BASELINE_FIXTURES=cluster-text pnpm --filter @orreris/worker render:baseline -- --capture
+
+and then it must be verified the way it was here: **two consecutive narrowed runs byte-clean before
+the entry is trusted**, because one clean run is not evidence of stability at any scope (v2). Until
+then the text programme has ~20 glyph-edge fixtures in a zero-tolerance gate and this is the first one
+whose reference was measured rather than assumed to hold; the others were registered before anyone
+knew to check, and any of them could be sitting in the same place.
