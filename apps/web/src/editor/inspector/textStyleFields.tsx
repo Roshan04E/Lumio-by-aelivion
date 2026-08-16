@@ -323,6 +323,40 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
   put(slotField(ctx, "strokePaintOrder"));
 
   /**
+   * S8 / ADR-023 D8 — the concentric OUTER ring. Two rows, one per schema field.
+   *
+   * The same Reset discipline the gradient established, for the same D1a reason: absence is the "no
+   * ring" state, so Reset writes nothing rather than a default colour, and both fields clear
+   * together — a colour with no width (or a width under the inner stroke) does not render, so
+   * leaving one behind would park an invisible half-value in saved data.
+   */
+  {
+    const clearOuterStroke = () =>
+      onChange((item) => ({ ...item, strokeOuterColor: undefined, strokeOuterWidth: undefined }));
+    fields.strokeOuterColor = {
+      kind: "color",
+      key: "strokeOuterColor",
+      label: labelOf("strokeOuterColor", "Outer stroke color"),
+      icon: <PenLine size={14} />,
+      value: layer.strokeOuterColor ?? layer.strokeColor ?? "#161618",
+      palette,
+      onReset: clearOuterStroke,
+      onChange: (value) => onChange((item) => ({ ...item, strokeOuterColor: value }))
+    };
+    put(
+      styleNumberField(ctx, {
+        key: "strokeOuterWidth",
+        property: "style.strokeOuterWidth",
+        icon: <PenLine size={14} />,
+        base: layer.strokeOuterWidth ?? 0,
+        ...boundsOf("strokeOuterWidth", { min: 0, max: 200, step: 1 }),
+        onReset: clearOuterStroke,
+        onWrite: (value) => onChange((item) => ({ ...item, strokeOuterWidth: value }))
+      })
+    );
+  }
+
+  /**
    * S5 / ADR-023 D7 — the two-stop glyph gradient. Three rows, one per schema field.
    *
    * RESET CLEARS THE GRADIENT rather than writing a default colour, and that is the D1a rule reaching

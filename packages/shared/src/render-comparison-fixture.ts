@@ -144,6 +144,7 @@ export type RenderComparisonFixtureKey =
   | "gradient-fill"
   | "per-line-pill"
   | "shadow-stack"
+  | "multi-stroke"
   | "flarex-key-glow"
   | "flarex-curves"
   | "flarex-keyframed-blur"
@@ -236,6 +237,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "gradient-fill",
   "per-line-pill",
   "shadow-stack",
+  "multi-stroke",
   "flarex-key-glow",
   "flarex-curves",
   "flarex-keyframed-blur",
@@ -1538,6 +1540,9 @@ interface FixtureVariant {
   textFillGradient?: { from: string; to: string; angle?: number };
   textPerLinePill?: { color: string; paddingEm?: number; radiusEm?: number };
   textShadowStack?: { layers: number; blur: number; offsetX: number; offsetY: number; color: string };
+  /** S8 (ADR-023 D8): the concentric outer ring. Undefined everywhere else, so the keys are omitted
+   *  and every pre-S8 fixture stays byte-identical. */
+  textOuterStroke?: { color: string; width: number };
   /** ADR-023 D9a — the warp field applied to the text layer. */
   textWarp?: { style: string; bend: number; distortH?: number; distortV?: number };
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
@@ -1871,6 +1876,30 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         textFontSize: 300,
         textStrokeWidth: 6,
         textShadowStack: { layers: 8, blur: 0.001, offsetX: 6, offsetY: 6, color: "#7b2ff7" }
+      };
+    case "multi-stroke":
+      /**
+       * S8 (ADR-023 D8). A two-colour concentric outline: a 14px dark inner stroke ringed by a 44px
+       * bright outer one, so ~15px of ring shows outside ~7px of inner stroke.
+       *
+       * `strokePaintOrder: "under"` is not decoration here. With the strokes painted OVER the fill the
+       * rings eat inward and most of the glyph is stroke, which is a legible picture but not the look
+       * the stage ships, and it would make the fixture agree with a build that had the ring order
+       * backwards — the inner ring drawn first is simply covered by the outer one, so the picture is
+       * "one 44px stroke" either way. Painted under the fill, a reversed order LOSES the inner colour
+       * entirely and the fixture says so.
+       *
+       * Big glyphs and scale 1 for `stroke-paint-order`'s reason: strokes are drawn before the layer
+       * transform, so a scaled layer would magnify a thin ring rather than test a wide one.
+       */
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 300,
+        textStrokeWidth: 14,
+        textStrokePaintOrder: "under",
+        textOuterStroke: { color: "#f5d90a", width: 44 }
       };
     case "media-opacity":
       return { effects: [], fit: "cover", mediaOpacity: 50 };
@@ -2228,6 +2257,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
       variant.textFillGradient ||
       variant.textPerLinePill ||
       variant.textShadowStack ||
+      variant.textOuterStroke ||
       variant.textWarp
   );
   const textFixtureLayer: TimelineLayer = {
@@ -2278,6 +2308,10 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
           fillGradientTo: variant.textFillGradient.to,
           ...(variant.textFillGradient.angle === undefined ? {} : { fillGradientAngle: variant.textFillGradient.angle })
         }
+      : {}),
+    // S8 (ADR-023 D8) — the concentric outer ring, spread conditionally for the same reason.
+    ...(variant.textOuterStroke
+      ? { strokeOuterColor: variant.textOuterStroke.color, strokeOuterWidth: variant.textOuterStroke.width }
       : {}),
     ...(variant.textPerLinePill
       ? {

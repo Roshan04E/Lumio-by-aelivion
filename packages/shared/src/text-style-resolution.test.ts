@@ -144,6 +144,44 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
   },
   { name: "text/gradient-in-style-bag", layer: textLayer({ style: { fillGradientFrom: "#ff0000", fillGradientTo: "#0000ff" } }) },
 
+  // --- S8: the concentric outer ring, and every way `resolveOuterStroke` declines ---------------
+  //
+  // The three refusals are goldens rather than comments because each is a permanent claim about the
+  // EMITTED style, and each is a way the feature could start over-emitting without any picture gate
+  // noticing: an emitted `textOuterStroke` moves the raster's cache key even when it paints nothing.
+  {
+    name: "text/outer-stroke",
+    layer: textLayer({ strokeWidth: 10, strokeColor: "#cc0000", strokeOuterColor: "#f5d90a", strokeOuterWidth: 40 })
+  },
+  {
+    name: "text/outer-stroke-under-fill",
+    layer: textLayer({
+      strokeWidth: 10,
+      strokeColor: "#cc0000",
+      strokePaintOrder: "under",
+      strokeOuterColor: "#f5d90a",
+      strokeOuterWidth: 40
+    })
+  },
+  { name: "text/outer-stroke-no-inner", layer: textLayer({ strokeWidth: 0, strokeOuterColor: "#f5d90a", strokeOuterWidth: 40 }) },
+  {
+    name: "text/outer-stroke-narrower-than-inner",
+    layer: textLayer({ strokeWidth: 40, strokeColor: "#cc0000", strokeOuterColor: "#f5d90a", strokeOuterWidth: 10 })
+  },
+  {
+    name: "text/outer-stroke-equal-to-inner",
+    layer: textLayer({ strokeWidth: 40, strokeColor: "#cc0000", strokeOuterColor: "#f5d90a", strokeOuterWidth: 40 })
+  },
+  { name: "text/outer-stroke-no-color", layer: textLayer({ strokeWidth: 10, strokeOuterWidth: 40 }) },
+  {
+    name: "text/outer-stroke-in-style-bag",
+    layer: textLayer({ style: { strokeWidth: 10, strokeOuterColor: "#f5d90a", strokeOuterWidth: 40 } })
+  },
+  {
+    name: "text/outer-stroke-rgba",
+    layer: textLayer({ strokeWidth: 10, strokeOuterColor: "rgba(245, 217, 10, 0.6)", strokeOuterWidth: 40 })
+  },
+
   // --- S5b: image fill — the id → URL resolution, and every way it can decline -------------------
   { name: "text/fill-texture-absent", layer: textLayer({ color: "#ff0000" }), options: fillTextureOptions },
   { name: "text/fill-texture-no-resolver", layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID }) },

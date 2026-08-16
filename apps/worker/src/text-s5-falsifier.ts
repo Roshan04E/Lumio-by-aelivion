@@ -153,6 +153,41 @@ async function main(): Promise<void> {
     `fill       on=${short(fillOn)}  off=${short(fillOff)}  unresolvable=${short(fillUnresolvable)}  cover=${short(fillCover)}  scale4=${short(fillScaled)}\n\n`
   );
 
+  /**
+   * --- S8: the concentric outer ring -----------------------------------------------------------
+   *
+   * Written against T-15 addendum 3, because the naive arm here is a textbook difference-fails-open.
+   * "Ring on vs ring off differs" is satisfied by any perturbation, and the ring has three separate
+   * ways to move the render for reasons that are NOT the feature working: the raster's overhang
+   * margin widens with the outer width (so the box changes size), the emitted style is part of the
+   * raster's cache key, and the manifest bag gains keys. So each arm below names what the two sides
+   * SHARE, and the pair that carries the stage is `ringColorA` vs `ringColorB` — identical in every
+   * one of those three respects, differing only in the ring's COLOUR, which nothing but a ring
+   * actually being painted can express.
+   */
+  const ringOn = await renderWith("multi-stroke", "ring-on", {});
+  const ringOff = await renderWith("multi-stroke", "ring-off", {
+    strokeOuterColor: undefined,
+    strokeOuterWidth: undefined
+  });
+  // Same width, same box, same key length — only the colour differs.
+  const ringColorB = await renderWith("multi-stroke", "ring-color-b", { strokeOuterColor: "#00e5ff" });
+  // NARROWER than the inner stroke: `resolveOuterStroke` refuses it, so this must be byte-identical
+  // to no ring at all. Without this arm, "the ring is drawn whenever the keys are present" passes.
+  const ringNarrow = await renderWith("multi-stroke", "ring-narrower-than-inner", { strokeOuterWidth: 8 });
+  // A ring with NO INNER STROKE to ring. Also refused, and it must collapse onto the same picture as
+  // the same layer with the ring keys deleted — not merely differ from the subject.
+  const ringNoInner = await renderWith("multi-stroke", "ring-no-inner", { strokeWidth: 0 });
+  const ringNoInnerNoRing = await renderWith("multi-stroke", "ring-no-inner-no-ring", {
+    strokeWidth: 0,
+    strokeOuterColor: undefined,
+    strokeOuterWidth: undefined
+  });
+  process.stdout.write(
+    `ring       on=${short(ringOn)}  off=${short(ringOff)}  colorB=${short(ringColorB)}  narrow=${short(ringNarrow)}  ` +
+      `no-inner=${short(ringNoInner)}  no-inner-no-ring=${short(ringNoInnerNoRing)}\n\n`
+  );
+
   // --- the assertions --------------------------------------------------------------------------
   assert.notEqual(
     gradientOn,
@@ -233,7 +268,40 @@ async function main(): Promise<void> {
     "FALSIFIER FAILED — `fillTextureScale` changed nothing. The number is not reaching `fillTexturePaint`."
   );
 
+  assert.notEqual(
+    ringOn,
+    ringOff,
+    "FALSIFIER FAILED — removing the outer stroke produced a BYTE-IDENTICAL render. The ring is not " +
+      "reaching the renderer: check MANIFEST_LAYER_STYLE_KEYS carries strokeOuterColor/Width, that " +
+      "`getCompositionTextStyle` emits `textOuterStroke`, and that drawTextLayer's `strokeRings` runs."
+  );
+  assert.notEqual(
+    ringColorB,
+    ringOn,
+    "FALSIFIER FAILED — changing only the ring's COLOUR changed nothing. This is the arm that carries " +
+      "the stage: the two renders share the ring WIDTH, so they share the raster's overhang margin, its " +
+      "box size and its cache-key length, and the only thing left that can move the picture is a ring " +
+      "actually being painted in the colour it was given. `ring-on` vs `ring-off` alone would have been " +
+      "satisfied by any one of those three perturbations (T-15 addendum 3)."
+  );
+  assert.equal(
+    ringNarrow,
+    ringOff,
+    "CONTROL FAILED — a ring NARROWER than the stroke it surrounds rendered differently from no ring. " +
+      "`resolveOuterStroke` refuses it because the inner stroke covers it completely, so the picture must " +
+      "be identical; if it is not, either the refusal is not happening or the ring is being drawn after " +
+      "the inner stroke rather than before it."
+  );
+  assert.equal(
+    ringNoInner,
+    ringNoInnerNoRing,
+    "CONTROL FAILED — an outer ring with NO INNER STROKE to ring rendered as something. A ring around " +
+      "nothing is a stroke, which `strokeWidth` already is, so `resolveOuterStroke` refuses it; rendering " +
+      "it would give the layer a second way to say something it can already say, reachable only by accident."
+  );
+
   process.stdout.write("PASS — all three S5 fields change the render, and all three no-op arms are byte-identical.\n");
+  process.stdout.write("PASS — the S8 ring paints, its COLOUR alone moves the render, and both refusal cases are byte-identical to no ring.\n");
   process.stdout.write("PASS — the S5b image fill resolves, its fit and scale move, and an unresolvable id degrades to the solid colour.\n");
   process.stdout.write(`stills: ${outDir}\n`);
 }

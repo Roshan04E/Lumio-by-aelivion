@@ -22,6 +22,7 @@ import {
   getVisibleTextRuns,
   parseFillTexture,
   parseTextLinePill,
+  parseTextStroke,
 } from "../composition-style";
 import { hasTextWarp } from "../text-warp";
 import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
@@ -584,6 +585,9 @@ function overlayInkMargin(layer: TimelineLayer, t: number, styleOptions: Overlay
     const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
     if (style.textShadow) m = Math.max(m, shadowExtent(String(style.textShadow)));
     if (style.WebkitTextStroke) m = Math.max(m, num(String(style.WebkitTextStroke)) + 2);
+    // ADR-023 S8: the outer ring reaches further out than the inner stroke by construction (it is
+    // only resolved when it is wider), so a raster sized for the inner stroke alone clips it.
+    if (style.textOuterStroke) m = Math.max(m, num(String(style.textOuterStroke)) + 2);
     // ADR-023 S5: a per-line pill is drawn around each line's INK box (ascent+descent+2·padY), and the
     // default `lineHeight` here is 0.95 — under 1, so the ink box is TALLER than the line box and the
     // first line's pill reaches above the element box. The comp-sized raster never clipped; the tight
@@ -764,10 +768,35 @@ export async function drawTextLayer(
   const pillPadX = linePill ? linePill.padXEm * fontSize : 0;
   const pillRadius = linePill ? linePill.radiusEm * fontSize : 0;
 
-  // Stroke (WebkitTextStroke: "Wpx color").
-  const strokeStr = style.WebkitTextStroke ? String(style.WebkitTextStroke) : "";
-  const strokeWidth = strokeStr ? num(strokeStr) : 0;
-  const strokeColor = strokeStr ? strokeStr.slice(String(num(strokeStr)).length + 3) : "";
+  // Stroke (WebkitTextStroke: "Wpx color"), read through the ONE shared parser for that idiom.
+  const strokeParsed = style.WebkitTextStroke ? parseTextStroke(String(style.WebkitTextStroke)) : undefined;
+  const strokeWidth = strokeParsed?.width ?? 0;
+  const strokeColor = strokeParsed?.color ?? "";
+  /**
+   * ADR-023 D8 (S8) — the concentric OUTER ring, from the same emitted string the DOM path builds
+   * its stacked copy from, so the two constructions cannot disagree about the look.
+   *
+   * Canvas centres a stroke on the outline exactly as `-webkit-text-stroke` does, so N rings are N
+   * `strokeText` passes drawn WIDEST FIRST: each narrower pass covers the inner half of the one
+   * before it, leaving `(thisWidth - nextWidth)/2` of visible band. Measured, band for band, against
+   * both the DOM construction and SVG's — which is what retired D8's claim that this needs SVG.
+   *
+   * It is only ever resolved when it is wider than the inner stroke, so "widest first" here is
+   * simply "outer, then inner" with no comparison to make at paint time.
+   */
+  const outerStroke = style.textOuterStroke ? parseTextStroke(String(style.textOuterStroke)) : undefined;
+  /** One ring pass, shared by the shadow silhouettes and the two paint-order branches below. */
+  const strokeRings = (text: string, px: number, py: number): void => {
+    ctx.lineJoin = "round";
+    if (outerStroke) {
+      ctx.lineWidth = outerStroke.width;
+      ctx.strokeStyle = outerStroke.color;
+      ctx.strokeText(text, px, py);
+    }
+    ctx.lineWidth = strokeWidth;
+    ctx.strokeStyle = strokeColor || "#000";
+    ctx.strokeText(text, px, py);
+  };
   // ADR-023 D7 (S1). The CSS the DOM path gets is `paint-order: stroke fill`; canvas has no such
   // property, so the equivalent here is literally the order of the two passes. Read from the SAME
   // emitted style object rather than from the layer, so the DOM and the raster cannot diverge on
@@ -925,16 +954,15 @@ export async function drawTextLayer(
         positions.push(px);
         px += ctx.measureText(word.text).width;
       });
-      const outerStroke = strokeUnderFill && strokeWidth > 0;
+      // Renamed from `outerStroke` when S8 gave that name a meaning: this is about WHICH PASS casts
+      // the shadow (the outermost silhouette), not about the concentric ring.
+      const silhouetteIsStroke = strokeUnderFill && strokeWidth > 0;
       for (let k = shadowList.length - 1; k >= 1; k -= 1) {
         applyShadow(ctx, shadowList[k]!);
         pieces.forEach((word, index) => {
           ctx.font = word.font;
-          if (outerStroke) {
-            ctx.lineWidth = strokeWidth;
-            ctx.strokeStyle = strokeColor || "#000";
-            ctx.lineJoin = "round";
-            ctx.strokeText(word.text, positions[index]!, y);
+          if (silhouetteIsStroke) {
+            strokeRings(word.text, positions[index]!, y);
           } else {
             ctx.fillStyle = glyphPaint ?? word.color;
             ctx.fillText(word.text, positions[index]!, y);
@@ -985,10 +1013,7 @@ export async function drawTextLayer(
       // what CSS does too; a shadow on the second pass would draw on top of the first.
       if (strokeUnderFill && strokeWidth > 0) {
         if (shadow) applyShadow(ctx, shadow);
-        ctx.lineWidth = strokeWidth;
-        ctx.strokeStyle = strokeColor || "#000";
-        ctx.lineJoin = "round";
-        ctx.strokeText(word.text, x, y);
+        strokeRings(word.text, x, y);
 
         ctx.shadowColor = "transparent";
         ctx.shadowBlur = 0;
@@ -1003,10 +1028,7 @@ export async function drawTextLayer(
           // Clear shadow for the stroke pass so the stroke doesn't add a second shadow.
           ctx.shadowColor = "transparent";
           ctx.shadowBlur = 0;
-          ctx.lineWidth = strokeWidth;
-          ctx.strokeStyle = strokeColor || "#000";
-          ctx.lineJoin = "round";
-          ctx.strokeText(word.text, x, y);
+          strokeRings(word.text, x, y);
         }
       }
 

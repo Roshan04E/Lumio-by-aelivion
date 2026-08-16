@@ -254,6 +254,43 @@ const fields = [
     documentation: { description: "`paint-order: stroke fill` — a heavy stroke stops eating the letterform." }
   },
   /**
+   * ADR-023 D8 (S8) — the concentric OUTER ring, as TWO fields, for the reason the gradient is three:
+   * a list of independently-coloured strokes is the `list` kind, frozen into ADR-003's taxonomy and
+   * not yet buildable by `PropertyFieldList`. A third ring is not approximated.
+   *
+   * Both `absenceIsMeaningful`: absent is "no ring", permanently, and a colour defaulted in on load
+   * would put a ring on every stroked title in every existing project (D1a).
+   */
+  {
+    key: "strokeOuterColor",
+    kind: "color",
+    group: "fill",
+    label: "Outer stroke color",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      aiSynonyms: ["second outline color", "double outline"],
+      description: "The outer ring of a two-colour concentric outline. Needs an inner stroke to ring."
+    }
+  },
+  {
+    key: "strokeOuterWidth",
+    kind: "number",
+    unit: "px",
+    min: 0,
+    max: 200,
+    step: 1,
+    group: "fill",
+    label: "Outer stroke width",
+    animatableAs: "style.strokeOuterWidth",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      aiSynonyms: ["second outline width"],
+      description: "Total width of the outer ring. Nothing is drawn unless it exceeds the inner stroke width, which covers it."
+    }
+  },
+  /**
    * ADR-023 D7 (S5) — tier-1 gradient fill, as THREE fields rather than one.
    *
    * The composite `gradient` kind is in the frozen fifteen and is not one the renderer can build yet;

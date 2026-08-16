@@ -55,6 +55,7 @@ import {
   getOverlayMaskWrapperStyle,
   getCompositionShapeStyle,
   getCompositionTextLinePillStyle,
+  getCompositionTextOuterStrokeStyle,
   getCompositionTextRunStyle,
   getCompositionTextStyle,
   getCompositionTransition,
@@ -97,6 +98,7 @@ import {
   suppressMediaSources,
   type ProjectGraph,
   normalizeProjectColorSettings,
+  toOuterStrokeRunStyle,
   type SourceAsset,
   type TimelineComposition,
   type TimelineKeyframeV2,
@@ -3716,8 +3718,19 @@ const PreviewLayer = memo(function PreviewLayer({
     // scene raster keys its cache on — so they are stripped here rather than emitted somewhere the
     // cache cannot see. `linePill` is ONE wrapper around all the runs, not one per run: an inline box
     // fragments per LINE, which is exactly the rectangle the raster draws behind each line.
-    const { textFillGradient: _textFillGradient, textLinePill: _textLinePill, ...textBoxStyle } = style;
+    //
+    // S8 / ADR-023 D8 adds the third: `textOuterStroke` is a SECOND stroke, and an element carries
+    // one. It is stripped for the same reason and consumed the same way — as a stacked copy of the
+    // text behind the real runs, which is the identical geometry the raster's second `strokeText`
+    // pass draws, and is why this look needed no second rendering surface.
+    const {
+      textFillGradient: _textFillGradient,
+      textLinePill: _textLinePill,
+      textOuterStroke: _textOuterStroke,
+      ...textBoxStyle
+    } = style;
     const linePillStyle = getCompositionTextLinePillStyle(style) as CSSProperties | undefined;
+    const outerStrokeStyle = getCompositionTextOuterStrokeStyle(style) as CSSProperties | undefined;
     const textRunSpans = visibleRuns.map((run, index) => (
       <span
         key={`${layer.id}_run_${index}`}
@@ -3726,6 +3739,25 @@ const PreviewLayer = memo(function PreviewLayer({
         {run.text}
       </span>
     ));
+    // S8 / ADR-023 D8 — the outer ring: one absolutely-positioned copy of the same runs, carrying the
+    // ring and no fill of any kind (see `toOuterStrokeRunStyle` for which keys paint one and why each
+    // has to go). `aria-hidden` because it is the same words a second time, and the accessibility tree
+    // must not read the title twice.
+    const outerStrokeCopy = outerStrokeStyle ? (
+      <span aria-hidden="true" style={outerStrokeStyle}>
+        {visibleRuns.map((run, index) => (
+          <span
+            key={`${layer.id}_ring_${index}`}
+            style={{
+              ...(toOuterStrokeRunStyle(getCompositionTextRunStyle(run, style)) as CSSProperties),
+              visibility: warpReady ? "hidden" : undefined
+            }}
+          >
+            {run.text}
+          </span>
+        ))}
+      </span>
+    ) : null;
     const textButton = (
       <button
         className={`preview-text-layer ${selected ? "is-selected" : ""}`}
@@ -3740,6 +3772,10 @@ const PreviewLayer = memo(function PreviewLayer({
           ...(interactive ? null : { pointerEvents: "none" })
         }}
       >
+        {/* The ring first, so the real runs paint over it. Both are positioned (the runs get
+            `position: relative` from `getCompositionTextRunStyle` whenever a ring is present), so
+            painting follows source order rather than the positioned-over-in-flow rule. */}
+        {outerStrokeCopy}
         {linePillStyle ? <span style={linePillStyle}>{textRunSpans}</span> : textRunSpans}
         {warpReady ? (
           // Force visibility so the warp shows even though the (sibling) runs are hidden — but when

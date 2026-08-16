@@ -334,7 +334,11 @@ const pinnedLora: FontRef = {
     // below, which is that co-requisite rather than a second kind of one.
     fillTextureAssetId: FIXTURE_ASSET_ID,
     fillTextureFit: "tile",
-    fillTextureScale: 4
+    fillTextureScale: 4,
+    // S8 (ADR-023 D8). The ring's width must exceed the co-requisite inner stroke below, or
+    // `resolveOuterStroke` refuses it — which is the feature, not an obstacle to route around.
+    strokeOuterColor: "#f5d90a",
+    strokeOuterWidth: 40
   };
   /**
    * Some fields are CONDITIONALLY emitted and provably cannot move anything alone: `WebkitTextStroke`
@@ -361,7 +365,16 @@ const pinnedLora: FontRef = {
     shadowLayers: { shadowBlur: 8, shadowOffsetY: 6 },
     // S5b: fit and scale describe an image, so they need one to describe.
     fillTextureFit: { fillTextureAssetId: FIXTURE_ASSET_ID },
-    fillTextureScale: { fillTextureAssetId: FIXTURE_ASSET_ID }
+    fillTextureScale: { fillTextureAssetId: FIXTURE_ASSET_ID },
+    /**
+     * S8: a ring needs something to be a ring AROUND — an inner stroke — and each of its two fields
+     * needs the other, exactly as each gradient stop needs its partner. Both co-requisites are read
+     * out of `resolveOuterStroke`'s refusals rather than found by turning knobs: no inner stroke
+     * means there is no ring to draw, and a width at or under the inner stroke's is a band the inner
+     * stroke covers completely.
+     */
+    strokeOuterColor: { strokeWidth: 10, strokeOuterWidth: 40 },
+    strokeOuterWidth: { strokeWidth: 10, strokeOuterColor: "#f5d90a" }
   };
   /**
    * S5b — fields whose emission needs a style OPTION, not another layer field.

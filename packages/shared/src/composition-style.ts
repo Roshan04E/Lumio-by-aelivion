@@ -61,6 +61,8 @@ export interface CompositionLayerStyleInput {
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
   strokePaintOrder?: "over" | "under" | undefined;
+  strokeOuterColor?: string | undefined;
+  strokeOuterWidth?: number | undefined;
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
   fillGradientAngle?: number | undefined;
@@ -772,6 +774,12 @@ export interface ResolvedTextStyle {
   /** `strokePaintOrder === "under"`. Absent reads as false without being written back as `"over"`. */
   strokeUnderFill: boolean;
   /**
+   * ADR-023 D8 (S8). The concentric OUTER ring, or absent — and absent covers every way of not
+   * having one, including a ring narrower than the stroke it surrounds. Deciding that here rather
+   * than at paint time is what stops the raster and the DOM overlay from each having an opinion.
+   */
+  outerStroke: { width: number; color: string } | undefined;
+  /**
    * ADR-023 S5. The two-stop glyph gradient, or ABSENT — and absent is the state a half-authored
    * gradient collapses to, so "one stop set" can never emit a one-colour gradient that reads as a
    * broken fill. Resolution is where that rule lives, not emission, because the raster and the DOM
@@ -840,6 +848,9 @@ export function resolveTextStyle(
     // changes anything, so every project authored before this field existed emits exactly the CSS it
     // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
     strokeUnderFill: (layer.strokePaintOrder ?? style.strokePaintOrder) === "under",
+    // ADR-023 D8 (S8). The second ring, or nothing — the gradient's both-or-nothing posture applied
+    // to a second axis, and for the same reason: an unfinished edit reads as the look before it.
+    outerStroke: resolveOuterStroke(layer, style, options),
     // ADR-023 D7 (S5). BOTH stops or nothing — resolved here so the raster and the DOM cannot answer
     // "is there a gradient" differently, and so a half-authored one falls back to the solid fill
     // rather than emitting a one-colour gradient that reads as a bug.
@@ -894,6 +905,40 @@ function resolveFillGradient(
   const angle = layer.fillGradientAngle ?? (style.fillGradientAngle as number | undefined);
   // 180deg — CSS `linear-gradient`'s own default direction (top → bottom).
   return { from, to, angleDeg: typeof angle === "number" && Number.isFinite(angle) ? angle : 180 };
+}
+
+/**
+ * ADR-023 D8 (S8) — the concentric outer stroke, or `undefined`.
+ *
+ * Three ways to have no ring, deliberately collapsed into one answer, because every one of them
+ * paints the identical picture and a renderer that distinguished them would be inventing policy:
+ *
+ * 1. no outer width authored — nothing was asked for;
+ * 2. **no inner stroke to ring** — a ring around nothing is not a ring, it is a stroke, and
+ *    `strokeWidth` is already that. Without this clause "outer stroke only" would render as a
+ *    single stroke in the outer colour, which is a second way to say something the layer can
+ *    already say, reachable only by accident;
+ * 3. **the ring is not wider than what it surrounds** — the inner stroke is painted after it and
+ *    covers it completely, so the picture is byte-identical to no ring. Emitting it anyway would
+ *    make the cache key move for a look that did not.
+ */
+function resolveOuterStroke(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  style: Record<string, unknown>,
+  options: CompositionStyleOptions
+): { width: number; color: string } | undefined {
+  const innerWidth = animStyleNumber(layer, options, "style.strokeWidth", numberOr(layer.strokeWidth ?? style.strokeWidth, 0));
+  if (innerWidth <= 0) return undefined;
+  const width = animStyleNumber(
+    layer,
+    options,
+    "style.strokeOuterWidth",
+    numberOr(layer.strokeOuterWidth ?? style.strokeOuterWidth, 0)
+  );
+  if (!(width > innerWidth)) return undefined;
+  const color = layer.strokeOuterColor ?? (style.strokeOuterColor as string | undefined);
+  if (typeof color !== "string" || !color) return undefined;
+  return { width, color };
 }
 
 /**
@@ -1018,8 +1063,34 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
      * which is one more copy list of exactly the kind T-15 is about. It is now keyed because it is
      * emitted, like every other look.
      */
-    fillTexture: fillTextureCss(resolved.fillTexture)
+    fillTexture: fillTextureCss(resolved.fillTexture),
+    /**
+     * ADR-023 D8 (S8) — the concentric outer ring. A FOURTH non-CSS key, for the same reason as the
+     * three above: this object is what every renderer reads and what `scene-text-raster` keys its
+     * cache on, so a look that is not in here is a stale raster and a blind spot in every gate.
+     *
+     * There is no CSS property for a second text stroke, but there is no need for a second SURFACE
+     * either — `-webkit-text-stroke` on a stacked copy of the same browser-shaped text is the same
+     * geometry the raster's second `strokeText` draws, which is measured rather than assumed
+     * (`s8-premise-probe.mjs`, arms A/B/C). The DOM path builds that copy from this string; the
+     * raster parses it. Same colour-last idiom as `WebkitTextStroke`.
+     */
+    textOuterStroke: resolved.outerStroke ? `${resolved.outerStroke.width}px ${resolved.outerStroke.color}` : undefined
   };
+}
+
+/**
+ * Read back the `"<width>px <color>"` idiom — the one `WebkitTextStroke` has always used and the one
+ * `textOuterStroke` (S8) adopts. Exported and shared by BOTH strokes so there is one answer to "how
+ * wide, what colour", rather than the hand-rolled `slice(String(num(s)).length + 3)` the raster used
+ * to carry for the inner stroke and would have needed a second copy of for the outer one.
+ */
+export function parseTextStroke(value: string): { width: number; color: string } | undefined {
+  const match = value.match(/^([\d.]+)px\s+(.+)$/s);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  if (!Number.isFinite(width)) return undefined;
+  return { width, color: match[2]!.trim() };
 }
 
 /**
@@ -1155,6 +1226,9 @@ export function getCompositionTextRunStyle(
     textFillGradient?: string | undefined;
     /** ADR-023 S5 — present when the layer has a per-line pill, which the run has to paint above. */
     textLinePill?: string | undefined;
+    /** ADR-023 S8 — present when the layer has a concentric outer ring, which the run must paint
+     *  above for the same reason and by the same mechanism as the pill. */
+    textOuterStroke?: string | undefined;
   }
 ): Record<string, unknown> {
   const baseFontSize = numberOr(baseStyle.fontSize, compositionTextDefaults.fontSize);
@@ -1197,9 +1271,70 @@ export function getCompositionTextRunStyle(
      * in-flow inline backgrounds — the DOM's way of saying "pills first, then all the text". No offset,
      * so nothing moves; only the paint order changes. Emitted ONLY alongside a pill, so a layer without
      * one is byte-identical.
+     *
+     * ADR-023 S8 extends this to the outer ring, which needs the identical lift for the identical
+     * reason: the ring is an absolutely-positioned copy earlier in the DOM, and an in-flow run would
+     * paint BELOW it (a positioned element with `z-index: auto` paints above non-positioned in-flow
+     * content, whatever the source order). Same mechanism, same no-offset, so the two compose.
      */
-    ...(baseStyle.textLinePill ? { position: "relative" } : {})
+    ...(baseStyle.textLinePill || baseStyle.textOuterStroke ? { position: "relative" } : {})
   };
+}
+
+/**
+ * ADR-023 D8 (S8) — the DOM half of the concentric outer ring: the style for ONE absolutely-
+ * positioned copy of the whole text, sitting behind the real runs and carrying nothing but the ring.
+ *
+ * **This is not an approximation of a second stroke; it IS a second stroke.** The copy is the same
+ * text, laid out and shaped by the same engine, with a real `-webkit-text-stroke` on it — the exact
+ * geometry the raster's second `strokeText` pass draws, verified band for band against both the
+ * raster and SVG in `s8-premise-probe.mjs`. That measurement is what retired D8's claim that
+ * concentric strokes need a second rendering surface.
+ *
+ * `inset: 0` rather than any padding of its own: an absolutely-positioned box resolves against its
+ * containing block's PADDING box, so the copy's content starts exactly where the button's content
+ * starts. Giving it `padding: inherit` as well would indent it twice.
+ */
+export function getCompositionTextOuterStrokeStyle(baseStyle: {
+  textOuterStroke?: string | undefined;
+}): Record<string, unknown> | undefined {
+  if (!baseStyle.textOuterStroke) return undefined;
+  return {
+    position: "absolute",
+    inset: 0,
+    WebkitTextStroke: baseStyle.textOuterStroke,
+    // The ring is the only thing this copy paints, so the fill is given up rather than ordered.
+    // `paint-order` is inherited from the box and would otherwise decide something that has no
+    // meaning here; stating it keeps the copy independent of the layer's own paint order.
+    paintOrder: "stroke fill",
+    pointerEvents: "none"
+  };
+}
+
+/**
+ * The per-run half of the same copy: the run's metrics, with **everything that paints a fill
+ * removed**.
+ *
+ * Each of these keys is a way the real run puts ink inside the glyph, and every one of them would
+ * paint that ink a second time, underneath the real run, at the ring's expense:
+ * `color`/`WebkitTextFillColor` (the solid fill), `backgroundImage` + the two `background-clip`s (the
+ * S5 gradient, which is clipped to the glyph and so lands exactly where the ring is), and
+ * `backgroundColor` (the per-run highlight box, which is not glyph-shaped at all and would double).
+ *
+ * Metrics — family, size, weight, style — are kept untouched, because the copy has to lay out
+ * identically or the ring is around a different set of glyph positions than the ones on top of it.
+ */
+export function toOuterStrokeRunStyle(runStyle: Record<string, unknown>): Record<string, unknown> {
+  const {
+    color: _color,
+    backgroundColor: _backgroundColor,
+    backgroundImage: _backgroundImage,
+    backgroundClip: _backgroundClip,
+    WebkitBackgroundClip: _webkitBackgroundClip,
+    WebkitTextFillColor: _webkitTextFillColor,
+    ...metrics
+  } = runStyle;
+  return { ...metrics, color: "transparent", WebkitTextFillColor: "transparent" };
 }
 
 /**
@@ -1480,6 +1615,9 @@ export const MANIFEST_LAYER_STYLE_KEYS = [
   "strokeColor",
   "strokeWidth",
   "strokePaintOrder",
+  // ADR-023 D8 (S8) — the concentric second ring.
+  "strokeOuterColor",
+  "strokeOuterWidth",
   // ADR-023 D7 (S5). Same story as `fontRef` above: the exhaustiveness constraint below refused to
   // compile until these five were listed, which is the constraint doing the job T-15 gave it.
   "fillGradientFrom",

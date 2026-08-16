@@ -236,6 +236,10 @@ export interface TextStyleFields {
   /** See {@link TimelineLayer.strokePaintOrder}. Part of the look, so a saved style carries it — and
    *  a style captured before S1 simply has no key, which keeps meaning `"over"`. */
   strokePaintOrder?: "over" | "under" | undefined;
+  /** See {@link TimelineLayer.strokeOuterColor}. ADR-023 S8 — the concentric second ring. A style
+   *  captured before S8 has no key, which keeps meaning "no outer stroke". */
+  strokeOuterColor?: string | undefined;
+  strokeOuterWidth?: number | undefined;
   /** See {@link TimelineLayer.fillGradientFrom}. ADR-023 S5 — tier-1 gradient fill. */
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
@@ -906,6 +910,33 @@ export interface TimelineLayer {
    * else renders exactly as it does today until its author opts in.
    */
   strokePaintOrder?: "over" | "under" | undefined;
+  /**
+   * ADR-023 D8 (S8) — **a second, concentric stroke OUTSIDE the first**: the two-colour sticker
+   * outline. `strokeColor`/`strokeWidth` is the inner ring; this is the one around it.
+   *
+   * **This does not need SVG, and that is a correction to D8, measured** (`s8-premise-probe.mjs`).
+   * D8 named multiple independent strokes as one of exactly two things CSS cannot do. Both surfaces
+   * that ship a picture do it natively: the canvas raster strokes widest-first and then fills, and
+   * the DOM overlay stacks a second copy of the same browser-shaped text behind the first. Both
+   * reproduce SVG's own band profile at the authored widths, so a second rendering surface would
+   * have bought a second rendering surface and nothing else. SVG is still needed for `<textPath>`.
+   *
+   * **TWO fields, not a list, for the reason `fillGradientFrom`/`To`/`Angle` is three fields:** a
+   * list of independently-coloured strokes is the `list` kind, which is frozen into ADR-003's
+   * taxonomy and not yet buildable by `PropertyFieldList`, and ADR-003's promotion clause wants
+   * genuine two-system demand. A third ring is **not approximated** — the same answer S5 gave to
+   * per-copy shadow colours. Two rings is the look people mean by "multi-colour outline".
+   *
+   * **Nothing is drawn unless there is an inner stroke to ring, and the outer one is wider than
+   * it.** A ring narrower than what it surrounds is entirely covered — invisible either way — and
+   * "outer stroke with no inner stroke" is not a ring at all, it is a stroke, which `strokeWidth`
+   * already is. Resolved in one place so the raster and the DOM cannot answer it differently, in
+   * the same both-or-nothing shape as the gradient's two stops.
+   *
+   * **ABSENT MEANS NO OUTER STROKE, permanently and without migration** (D1a).
+   */
+  strokeOuterColor?: string | undefined;
+  strokeOuterWidth?: number | undefined;
   /**
    * ADR-023 D7 (S5) — **tier-1 gradient fill for the glyphs**, the CSS `background-clip: text` look.
    *
