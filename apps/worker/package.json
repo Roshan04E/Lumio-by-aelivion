@@ -78,7 +78,9 @@
     "rulerjump:wedgeconfirm": "tsx src/ruler-jump-wedge-confirm-probe.ts",
     "rulerjump:pausealone": "tsx src/ruler-jump-pause-alone-probe.ts",
     "rulerjump:recoveryaccept": "tsx src/ruler-jump-recovery-acceptance-probe.ts",
-    "preset:sheet": "tsx src/preset-sheet.ts"
+    "preset:sheet": "tsx src/preset-sheet.ts",
+    "flarex:incremental-gate": "tsx src/flarex-incremental-invalidation-gate.ts",
+    "flarex:reuse-measure": "tsx src/flarex-reuse-measure.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

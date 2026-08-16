@@ -388,6 +388,62 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > **3b is unaffected and is genuinely absent** — a search for a composited-output cache finds nothing.
 > It remains the real remaining half of step 3, with I-P9's eviction ruling attached.
 
+> **3a CLOSED-OUT 2026-08-16 — no cache is to be built, and the step's CLAIMED WIN does not survive
+> measurement. Both halves of the scoping note above are now settled, and one of them the other way.**
+>
+> **(1) I-P7's key is IMPLEMENTED, verbatim — the scoping note compared it against the wrong object.**
+> `SceneCompositor.contentCacheKey` (`scene-compositor.ts:3443`) is
+> `` `${CONTENT_CACHE_CONTRACT_VERSION}|${nestW}x${nestH}|r${RENDERER_REVISION}|el:${effectLight}|${draw.contentHash}|${draw.dependencyVersions}` `` —
+> ContractVersion, ContextVersion (its own comment: "the SINGLE site that builds the ContextVersion"),
+> NodeContentHash, plus the ADR-010 opaque dependency tokens. `content-hash.ts`'s header states the
+> formula it implements as "ADR-009: CacheKey = (ContractVersion, ContextVersion, NodeContentHash)".
+> The note's caveat measured I-P7 against the *incremental evaluator*, which is a different object.
+>
+> **(2) The difference IS material anyway, and what breaks is now measured.** The incremental evaluator
+> runs FIRST and short-circuits the whole upstream subtree (`compile-flarex.ts:1394`, deliberately
+> "placed BEFORE lowering"), so when it reuses, the correct key is never consulted. Its own content
+> signature is hand-rolled — `type | enabled | RAW params` (`incremental-evaluation.ts:116`) — and a
+> Flarex keyframe lives in `comp.animations`, which that signature does not read. So the stronger key
+> is present in the tree and is bypassed by a weaker one sitting above it. Registered as **DEBT-022**;
+> falsified both ways by `pnpm --filter @orreris/worker flarex:incremental-gate`.
+>
+> **(3) The 92–95% figure is NOT reproduced on a real graph with real footage.** Re-measured by
+> `flarex:reuse-measure` — a comp built through the product's own import and add-MediaIn flow (12 real
+> renders, 61 nodes over 12 asset sources), captured from the live editor, then driven through the real
+> `dependency-graph.ts` closure:
+>
+> | edit | reusable | §3.2(c) said |
+> |---|---|---|
+> | none (counterweight) | 100.0% | — |
+> | param drag @ HEAD source | **75.4%** | 92.6% |
+> | param drag @ TAIL source | **91.8%** | 92.6% |
+> | rewire one edge | **78.7%** | 95.0% |
+> | source change (media epoch) | **0.0%** | 91.7% |
+> | slider drag on an ANIMATED param | 100.0% | *should invalidate* — DEBT-022 |
+>
+> Two corrections follow. **The param figure is a property of graph SHAPE, not a constant**: the same
+> edit reuses 75.4% at the head of a merge chain and 91.8% at the tail, because a head edit flows
+> through every merge below it. A single number for "param drag" is an artifact of which node the
+> harness picked, and §3.2(c)'s synthetic graph picked a kinder one. **And a source change dirties
+> EVERYTHING, not 8.3%**: `mediaEpoch` is a SUM over all pool entries, so any one source decoding a new
+> picture marks the `source` axis and dirties every `mediaIn` — documented as deliberate conservatism
+> ("ANY new picture invalidates every MediaIn"), but it means the 8.3% figure does not describe a comp
+> with live video at all.
+>
+> **(4) In the live editor the mechanism registered ZERO reuse.** `__rfIncremental` after settle:
+> `reused=0 · evaluated=7140 · frames=282`, with `dirtyNodes 61/61`; a steady-state delta sampled 8 s
+> apart caught exactly one composite, which evaluated all 60 nodes and reused none. That is not a
+> broken cache — it is (3) restated: on a video comp the only thing that WAKES the compositor is a
+> decode, and a decode invalidates globally. The cache can only pay off on a recomposite triggered by
+> an EDIT, which is what the table measures.
+>
+> **RULING. Do not build a third cache — I-P7's cache exists and is correct.** What §6 called step 3a
+> is therefore not construction work; it is two defects and a corrected claim. **§6's "measured 92–95%
+> reuse" line should be read as superseded by the table above.** The remaining work is DEBT-022 (an
+> invalidation term, not a cache) and, optionally, narrowing the `source` axis from a global sum to
+> per-source epochs — which is the only change that would make the live reuse rate non-zero, and which
+> is NOT proposed here because it is a behaviour change to shipped ADR-012 code with its own risk.
+
 > ~~Claimed for editing only; §3.2(c) forbids claiming it for playback.~~ — the blanket form of this
 > is superseded; it holds for 3a and not for 3b. See §3.2(c′).
 

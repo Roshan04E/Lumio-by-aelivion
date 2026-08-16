@@ -3676,3 +3676,72 @@ mechanism that produced two bugs in two slices is still in place and still silen
   test that runs in seconds, so the bisect is cheap — which is the opposite of the usual situation
   here and is the reason to do it before the next full sweep rather than after a flaky failure sends
   someone hunting.
+
+### DEBT-022 — a weaker cache key sits ABOVE the correct one and short-circuits it, so a keyframe edit does not invalidate
+
+- Status: **open — USER-VISIBLE DEFECT**, found 2026-08-16 closing out ADR-021 step 3a
+- Registered: 2026-08-16
+- Reason: `incremental-evaluation.ts` decides node reuse from a hand-rolled per-node signature,
+  `signatureOf` = `type | enabled | RAW params` (`:116`). A Flarex node's keyframes do **not** live in
+  `node.params` — they live in `comp.animations` — and nothing else marks the node. With the playhead
+  stationary the node is clean on content, context, time and source, so `reuseValue` returns the
+  previous value and `compile-flarex.ts:1394` skips the node's **entire upstream subtree** (that call is
+  "placed BEFORE lowering", deliberately, which is what makes the skip worth having and also what makes
+  this defect total rather than partial). The viewer keeps the previous picture.
+- **The correct key already exists one layer down and is never consulted.** ADR-009's
+  `NodeContentHash` resolves every param to its value at `t` (R1) — so it *does* see a keyframe edit —
+  and `SceneCompositor.contentCacheKey` keys the content-addressed cache on exactly
+  `(ContractVersion, ContextVersion, NodeContentHash, dependencyVersions)`. That is I-P7's key, correct
+  and shipped. It cannot help here because the weaker check runs first and returns before reaching it.
+  **This is the defect's shape and the reason it is registered as a class, not a typo: a cache whose key
+  is right can be defeated by a cheaper guard placed in front of it.**
+- Invariant affected: ADR-021 **I-P7** in substance (the node-output cache's identity), and the same
+  class as retired **DEBT-016** — "a cache key omitted an input the cached value depended on". DEBT-016
+  was one cache keyed on `(layerId, comp.version, renderScale)`; this one omits `comp.animations`.
+- Owner: unassigned
+- Expiry condition: an edit that changes what a param RESOLVES TO at the current time invalidates the
+  node, for every route the editor can write one — asserted by `flarex:incremental-gate`, which must be
+  green in both directions (the unchanged-comp counterweight must keep REUSING)
+- Planned slice: none accepted. The obvious repair is to make the signature fold what
+  `NodeContentHash` folds — params resolved at `t` — and `compile-flarex.ts:570` already computes
+  `computeFlarexContentHashes(comp, ctx.timeSeconds)` on every compile, so the value exists; the cost
+  question is that `beginIncrementalFrame` runs BEFORE the compile and would either recompute the
+  hashes or need them threaded to it. A cheaper stopgap is to fold `comp.version` (documented as "THE
+  dirty/invalidation key") into the signature, at the price of invalidating every node in a comp on
+  any edit — which would drop the param-drag reuse measured below to 0%. **Neither is chosen here.**
+- Tracking issue: —
+- Detection: any reuse/skip guard whose key is assembled by hand rather than taken from
+  `computeFlarexContentHashes`. Concretely: a `signatureOf`-style string built from `node.params` while
+  the value being cached depends on `comp.animations`.
+
+**Reproduced through the PRODUCT'S OWN WRITE PATH, not a simulation of it.**
+`applyNodeParamValueAtTime`'s documented four-way rule says that for an ALREADY ANIMATED param it
+updates or inserts a keyframe and "never touch[es] the base". `flarex:incremental-gate` asserts exactly
+that and then asks the mechanism:
+
+```
+PASS  BASELINE: an unchanged comp at an unchanged time REUSES     <- the counterweight
+PASS  param drag invalidates
+PASS  rewire invalidates
+PASS  source change invalidates a downstream node
+FAIL  KEYFRAME VALUE edit invalidates
+FAIL  KEYFRAME MOVE invalidates
+FAIL  KEYFRAME DELETE invalidates
+PASS  editor's write path leaves node.params untouched for an animated param   -- 0 -> 0
+FAIL  SLIDER DRAG on an ANIMATED param invalidates
+```
+
+The baseline check is load-bearing: without it a mechanism that reported "dirty" unconditionally would
+pass every other line and prove nothing.
+
+**User-visible statement of it:** *with the playhead parked, drag a slider on a Flarex node param that
+already has keyframes — the value is written, and the viewer does not change.* It recovers as soon as
+anything else invalidates (move the playhead, touch a non-animated param, a source decodes a frame),
+which is why it would read as flakiness rather than as a stuck cache.
+
+**Why it was not found earlier, recorded so the next audit starts from the right place.** Every gate
+that covers this area covers a *different* cache. `flarex:cache-gate` asserts warm-vs-cold parity for
+the content-addressed materialization cache — the one whose key is correct — and it is a SEQUENCE gate
+over frames at MOVING time, where the time axis dirties everything anyway and this defect cannot
+reproduce. The stationary playhead is the only regime it appears in, and no gate held it still.
+
