@@ -259,8 +259,8 @@ export interface BuildSceneDrawsInputs {
    * frame MUST namespace by comp or two comps' node `n0` would share a record. The comp id is attached
    * here rather than trusted to the host for the same reason `onFlarexDegrade` attaches it.
    */
-  flarexOnEvaluated?: ((compId: string, nodeId: string, contextKey: string, value: unknown) => void) | undefined;
-  flarexReuseValue?: ((compId: string, nodeId: string, contextKey: string) => FlarexValue | null) | undefined;
+  flarexOnEvaluated?: ((compId: string, nodeId: string, contextKey: string, value: unknown, contentHash: string | undefined) => void) | undefined;
+  flarexReuseValue?: ((compId: string, nodeId: string, contextKey: string, contentHash: string | undefined) => FlarexValue | null) | undefined;
   /**
    * Cross-frame cache for Flarex asset-source draws (perf: `resolveSourceDraw` rebuilt a full per-clip
    * draw every frame, ~54% of compile time — profiler-measured). A BARE virtual loader's draw structure
@@ -883,10 +883,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       onDegrade: inputs.onFlarexDegrade ? (degradation) => inputs.onFlarexDegrade!(comp.id, degradation) : undefined,
       // S6.4/S6.6 — comp id attached here, so a node id is never ambiguous across comps in one frame.
       onEvaluated: inputs.flarexOnEvaluated
-        ? (nodeId, contextKey, value) => inputs.flarexOnEvaluated!(comp.id, nodeId, contextKey, value)
+        ? (nodeId, contextKey, value, contentHash) => inputs.flarexOnEvaluated!(comp.id, nodeId, contextKey, value, contentHash)
         : undefined,
       reuseValue: inputs.flarexReuseValue
-        ? (nodeId, contextKey) => inputs.flarexReuseValue!(comp.id, nodeId, contextKey)
+        ? (nodeId, contextKey, contentHash) => inputs.flarexReuseValue!(comp.id, nodeId, contextKey, contentHash)
         : undefined,
       // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
       // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its

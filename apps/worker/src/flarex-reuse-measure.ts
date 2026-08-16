@@ -35,7 +35,7 @@ import path from "node:path";
 import { chromium, type Page } from "playwright";
 import { addAssetSourceMediaIn, addMediaInBoundTo, awaitWebCodecsEngaged, defaultClipPath, importAssets, reachEditor } from "./browser/editor-session.js";
 import { assertZeroBrowserFloor } from "./browser/browser-preflight.js";
-import { createFlarexNode, type FlarexComp } from "@orreris/shared";
+import { computeFlarexContentHashes, createFlarexNode, type FlarexComp } from "@orreris/shared";
 import { beginIncrementalFrame, commitIncrementalFrame, resetIncrementalEvaluation } from "../../web/src/playback/incremental-evaluation.js";
 import { applyNodeParamValueAtTime, setNodeParamBase } from "../../web/src/editor/flarex/flarex-keyframes.js";
 
@@ -159,16 +159,20 @@ function reusableFraction(
   const ctxKey = (id: string) => `${id}@${T.toFixed(6)}`;
   const MATTE = { kind: "matte", matte: { kind: "vector", masks: [] } };
 
+  // Hashes exactly as the compiler supplies them (DEBT-022): at the comp-local time this evaluation
+  // is for, for every node, from the same function `compile-flarex.ts:570` calls.
+  const hashesBefore = computeFlarexContentHashes(comp, T);
   const first = beginIncrementalFrame({ comps: { [comp.id]: comp }, ...CONTEXT, mediaEpoch, frameTimeSeconds: T, frameId: 1, nowMs: 16 });
   if (!first) throw new Error("no channels");
-  for (const id of ids) first.onEvaluated(comp.id, id, ctxKey(id), MATTE);
+  for (const id of ids) first.onEvaluated(comp.id, id, ctxKey(id), MATTE, hashesBefore.get(id));
   commitIncrementalFrame();
 
   const next = mutate(comp);
   const second = beginIncrementalFrame({ comps: { [next.id]: next }, ...CONTEXT, mediaEpoch: mediaEpochAfter, frameTimeSeconds: T, frameId: 2, nowMs: 32 });
   if (!second) throw new Error("no channels");
+  const hashesAfter = computeFlarexContentHashes(next, T);
   let reusable = 0;
-  for (const id of Object.keys(next.nodes)) if (second.reuseValue(next.id, id, ctxKey(id)) !== null) reusable += 1;
+  for (const id of Object.keys(next.nodes)) if (second.reuseValue(next.id, id, ctxKey(id), hashesAfter.get(id)) !== null) reusable += 1;
   commitIncrementalFrame();
   const total = Object.keys(next.nodes).length;
   return { reusable, total, pct: total ? (reusable / total) * 100 : 0 };
@@ -236,6 +240,70 @@ function phase2(comp: FlarexComp): void {
   for (const r of rows) {
     console.log(`  ${r.label.padEnd(34)} reusable ${String(r.reusable).padStart(4)}/${String(r.total).padEnd(4)} = ${r.pct.toFixed(1).padStart(5)}%   ${r.note}`);
   }
+
+  phase3(comp);
+}
+
+/**
+ * PHASE 3 — DEBT-022's design question, measured rather than assumed: RECOMPUTE or THREAD?
+ *
+ * The repair needs each node's `NodeContentHash` at the time its value was produced. Two ways to get
+ * it, and the founder's instruction was to measure rather than guess which is cheaper:
+ *
+ *   RECOMPUTE — `beginIncrementalFrame` calls `computeFlarexContentHashes` itself. Costs one extra
+ *               full hash pass per comp per frame, ON TOP of the one `compile-flarex.ts:570` already
+ *               runs unconditionally. That extra pass is what this phase prices.
+ *   THREAD    — the compiler hands the hash it ALREADY computed to `reuseValue`/`onEvaluated`. Costs
+ *               one `Map.get` per node per compile and no hashing at all.
+ *
+ * The cost number below is therefore "what recompute would have added", and it is reported even though
+ * the decision does not rest on it — because a decision that rests on an unmeasured cost is the thing
+ * this repo keeps paying to undo.
+ */
+function phase3(comp: FlarexComp): void {
+  const nodeCount = Object.keys(comp.nodes).length;
+  console.log(`\nPHASE 3 — recompute vs thread: what one extra hash pass costs (${nodeCount} nodes)\n`);
+
+  const time = (c: FlarexComp, iterations: number): number => {
+    computeFlarexContentHashes(c, T); // warm
+    const start = performance.now();
+    for (let i = 0; i < iterations; i += 1) computeFlarexContentHashes(c, T + i * 1e-6);
+    return (performance.now() - start) / iterations;
+  };
+
+  // Scale the real graph up by cloning its node/edge shape, so the cost is reported as a CURVE rather
+  // than as one number that happens to describe a 61-node comp.
+  const scaled = (factor: number): FlarexComp => {
+    if (factor === 1) return comp;
+    const next: FlarexComp = { ...comp, nodes: { ...comp.nodes }, edges: [...comp.edges] };
+    for (let copy = 1; copy < factor; copy += 1) {
+      for (const [id, node] of Object.entries(comp.nodes)) {
+        next.nodes[`${id}__c${copy}`] = { ...node, id: `${id}__c${copy}` };
+      }
+      for (const e of comp.edges) {
+        next.edges.push({ ...e, id: `${e.id}__c${copy}`, from: { ...e.from, nodeId: `${e.from.nodeId}__c${copy}` }, to: { ...e.to, nodeId: `${e.to.nodeId}__c${copy}` } });
+      }
+    }
+    return next;
+  };
+
+  for (const factor of [1, 2, 4]) {
+    const c = scaled(factor);
+    const n = Object.keys(c.nodes).length;
+    const ms = time(c, 200);
+    console.log(
+      `  ${String(n).padStart(4)} nodes   one hash pass = ${ms.toFixed(3)} ms` +
+        `   (${((ms / 33.3) * 100).toFixed(1)}% of a 33.3 ms frame; recompute pays this TWICE per frame, thread once)`
+    );
+  }
+  console.log(
+    "\n  DECIDED BY CORRECTNESS, NOT BY THE NUMBERS ABOVE. `compileFlarexComp` is called with\n" +
+      "  `timeSeconds: Math.max(0, t - layer.startSeconds)` — comp-local time, DIFFERENT per referencing\n" +
+      "  layer — while `beginIncrementalFrame` knows only the timeline `t`. A host-side recompute would\n" +
+      "  therefore sample the animation curve at the WRONG time whenever a Flarex clip does not start at\n" +
+      "  0, and would miss exactly the keyframe edits DEBT-022 is about. Threading is both correct and\n" +
+      "  free; recompute is neither."
+  );
 }
 
 async function main(): Promise<void> {

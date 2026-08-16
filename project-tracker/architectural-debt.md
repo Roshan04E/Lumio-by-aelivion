@@ -3679,8 +3679,11 @@ mechanism that produced two bugs in two slices is still in place and still silen
 
 ### DEBT-022 — a weaker cache key sits ABOVE the correct one and short-circuits it, so a keyframe edit does not invalidate
 
-- Status: **open — USER-VISIBLE DEFECT**, found 2026-08-16 closing out ADR-021 step 3a
+- Status: **RETIRED 2026-08-16** — fixed the same day it was registered, by founder decision to repair
+  it before building 3b. See the closing update at the end of this entry.
 - Registered: 2026-08-16
+- **Header updated 2026-08-16:** Status was "open — USER-VISIBLE DEFECT, found 2026-08-16 closing out
+  ADR-021 step 3a" — see the closing update below. (`README.md`, "State fields vs. history.")
 - Reason: `incremental-evaluation.ts` decides node reuse from a hand-rolled per-node signature,
   `signatureOf` = `type | enabled | RAW params` (`:116`). A Flarex node's keyframes do **not** live in
   `node.params` — they live in `comp.animations` — and nothing else marks the node. With the playhead
@@ -3744,4 +3747,61 @@ that covers this area covers a *different* cache. `flarex:cache-gate` asserts wa
 the content-addressed materialization cache — the one whose key is correct — and it is a SEQUENCE gate
 over frames at MOVING time, where the time axis dirties everything anyway and this defect cannot
 reproduce. The stationary playhead is the only regime it appears in, and no gate held it still.
+
+
+**FIXED AND ACCEPTED 2026-08-16 — the hash is THREADED, not recomputed, and the decision is a
+correctness one that a cost measurement could not have made.**
+
+The repair: `compileFlarexComp` already computes every node's `NodeContentHash` on every compile
+(`compile-flarex.ts:570`, `computeFlarexContentHashes(comp, ctx.timeSeconds, …)`), and now hands it to
+the host alongside the question — `reuseValue(nodeId, contextKey, contentHash)` and
+`onEvaluated(nodeId, contextKey, value, contentHash)`. `incremental-evaluation.ts` stores the hash a
+value was produced under and refuses reuse when it moves, **ahead of** the axis machinery. Mismatch OR
+absent-on-either-side ⇒ evaluate, which is the compiler's own stated asymmetry for this channel ("the
+failure mode of a wrong `null` is wasted work and the failure mode of a wrong value is a stale pixel").
+
+**Why THREAD rather than RECOMPUTE, and it is not the cost.** `build-scene-draws.ts` calls the compiler
+with `timeSeconds: Math.max(0, t - layer.startSeconds)` — comp-local time, **different per referencing
+layer** — while `beginIncrementalFrame` knows only the timeline `t`. A host-side recompute would sample
+the animation curve at the WRONG time for any Flarex clip that does not start at 0, and would therefore
+miss exactly the keyframe edits this entry is about. It would also be a second full hash pass on top of
+the one the compile already runs; priced on the real captured graph for the record:
+
+| nodes | one hash pass | share of a 33.3 ms frame |
+|---|---|---|
+| 61 | 0.999 ms | 3.0% |
+| 122 | 1.595 ms | 4.8% |
+| 244 | 3.159 ms | 9.5% |
+
+Threading adds no hashing at all — one `Map.get` per node per compile — and `f?.(args)` short-circuits,
+so a caller that supplies no channels (export, worker, fixtures) does not even evaluate the lookup.
+**Export output is byte-identical by construction**, which is why no pixel gate was run for it.
+
+**Acceptance: `flarex:incremental-gate` is GREEN, 9/9**, including the counterweight (an unchanged comp
+at an unchanged time still REUSES) — without which a repair that simply always invalidated would pass
+every other line. The three keyframe classes and the slider-drag-on-an-animated-param case all now
+invalidate.
+
+**The cost of the repair, stated as a number rather than a hope.** Re-running `flarex:reuse-measure`
+over the same captured 61-node graph, before → after:
+
+| edit | before | after |
+|---|---|---|
+| none (counterweight) | 100.0% | **100.0%** |
+| param drag @ HEAD source | 75.4% | **75.4%** |
+| param drag @ TAIL source | 91.8% | **91.8%** |
+| rewire one edge | 78.7% | **78.7%** |
+| source change | 0.0% | **0.0%** |
+| slider drag on an ANIMATED param | 100.0% *(stale)* | **75.4%** |
+
+**No edit class lost reuse.** The only row that moved is the one that was wrong, and it moved to
+exactly the figure its non-animated twin already had — the same node, the same closure — which is the
+result that says the fix is precise rather than merely conservative. This is the outcome the rejected
+stopgap could not have produced: folding `comp.version` would have taken every row to 0%.
+
+Regression surface checked: `kernel:conform` green (including **I-15**, "the lowering layer owns no
+clock, no kernel dependency and no module state" — the invariant a new compiler out-channel parameter
+could plausibly have broken), and `flarex:test` fails exactly one assertion, the pre-existing
+**DEBT-021** one, verified by stashing this change and re-running at the merge base to get the
+identical single failure.
 

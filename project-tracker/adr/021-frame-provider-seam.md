@@ -437,6 +437,14 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > decode, and a decode invalidates globally. The cache can only pay off on a recomposite triggered by
 > an EDIT, which is what the table measures.
 >
+> **DEBT-022 FIXED 2026-08-16**, by founder decision, before 3b — because 3b sits ON TOP of it: a
+> frame cache recomputes on a miss, and the recompute runs through this evaluator, so 3b would have
+> inherited the staleness and any stale-picture report would then have had two candidate causes in two
+> layers. The compiler now hands its `NodeContentHash` to the host's reuse check (threaded, not
+> recomputed — the host cannot compute it correctly, because this compile's time is
+> `t − layer.startSeconds` and the host knows only `t`). `flarex:incremental-gate` is green 9/9 and no
+> edit class lost reuse; the full before/after table is in DEBT-022's closing update.
+>
 > **RULING. Do not build a third cache — I-P7's cache exists and is correct.** What §6 called step 3a
 > is therefore not construction work; it is two defects and a corrected claim. **§6's "measured 92–95%
 > reuse" line should be read as superseded by the table above.** The remaining work is DEBT-022 (an

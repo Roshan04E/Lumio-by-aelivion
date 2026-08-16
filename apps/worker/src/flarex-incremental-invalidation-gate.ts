@@ -23,6 +23,7 @@
  * Run: pnpm --filter @orreris/worker flarex:incremental-gate
  */
 import {
+  computeFlarexContentHashes,
   createFlarexComp,
   createFlarexNode,
   type FlarexComp,
@@ -74,8 +75,10 @@ const CONTEXT = { renderScale: 1, width: 1920, height: 1080, mediaEpoch: 7, grad
 function recordFrame(comp: FlarexComp, t: number, frameId: number, value: unknown): void {
   const ch = beginIncrementalFrame({ comps: { [comp.id]: comp }, ...CONTEXT, frameTimeSeconds: t, frameId, nowMs: frameId * 16 });
   if (!ch) throw new Error("no channels");
-  // The compiler keys records on `evalKey` = `${nodeId}@${t.toFixed(6)}`.
-  ch.onEvaluated(comp.id, "nBright", `nBright@${t.toFixed(6)}`, value);
+  // The compiler keys records on `evalKey` = `${nodeId}@${t.toFixed(6)}` and hands the node's
+  // `NodeContentHash` at ITS comp-local time alongside. Both are reproduced here rather than faked, so
+  // this gate exercises the real contract instead of a convenient subset of it.
+  ch.onEvaluated(comp.id, "nBright", `nBright@${t.toFixed(6)}`, value, computeFlarexContentHashes(comp, t).get("nBright"));
   commitIncrementalFrame();
 }
 
@@ -85,7 +88,7 @@ function wouldReuse(comp: FlarexComp, t: number, frameId: number): boolean {
   if (!ch) throw new Error("no channels");
   // A vector matte holds no device resources, so gate 3 (`texturesAlive`) passes without a GL session —
   // which isolates this gate to the INVALIDATION question rather than to resource liveness.
-  const reused = ch.reuseValue(comp.id, "nBright", `nBright@${t.toFixed(6)}`) !== null;
+  const reused = ch.reuseValue(comp.id, "nBright", `nBright@${t.toFixed(6)}`, computeFlarexContentHashes(comp, t).get("nBright")) !== null;
   commitIncrementalFrame();
   return reused;
 }
@@ -138,7 +141,7 @@ console.log("ADR-021 step 3a — incremental reuse invalidation, per edit class\
     frameId: 2,
     nowMs: 32,
   });
-  const reused = ch!.reuseValue(comp.id, "nBright", `nBright@${T.toFixed(6)}`) !== null;
+  const reused = ch!.reuseValue(comp.id, "nBright", `nBright@${T.toFixed(6)}`, computeFlarexContentHashes(comp, T).get("nBright")) !== null;
   commitIncrementalFrame();
   // NOTE: `colorCorrect` declares content/context/time and NOT `source` — only a mediaIn declares it.
   // Whether the source axis reaches this node is exactly what is being asked.

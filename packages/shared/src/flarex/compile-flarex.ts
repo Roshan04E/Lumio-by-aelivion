@@ -78,7 +78,7 @@ export interface FlarexLowerCtx {
    * with it. Same shape as `onDegrade` and `onLayerNotReady` above — the compiler reports, the host
    * decides what that means and where it goes.
    */
-  onEvaluated?: ((nodeId: string, contextKey: string, value: unknown) => void) | undefined;
+  onEvaluated?: ((nodeId: string, contextKey: string, value: unknown, contentHash: string | undefined) => void) | undefined;
   /**
    * IN-channel for incremental evaluation (slice S6.6). Absent = every node is lowered, today's
    * behaviour and the flag-off rollback.
@@ -92,8 +92,18 @@ export interface FlarexLowerCtx {
    * Returning null means "evaluate it", and is always safe; that asymmetry is deliberate, because the
    * failure mode of a wrong `null` is wasted work and the failure mode of a wrong value is a stale
    * pixel on a frame that should have looked different.
+   *
+   * **`contentHash` is the node's ADR-009 `NodeContentHash` at THIS compile's comp-local time**, and it
+   * is passed because the host cannot compute it correctly. DEBT-022: the host's dirty marking ran
+   * before this compile, from a hand-rolled `type | enabled | RAW params` signature that could not see
+   * `comp.animations` — so a keyframe edit at a stationary playhead reused a stale subtree. The host
+   * cannot simply hash the comp itself either: this compile's time is `t − layer.startSeconds`
+   * (`build-scene-draws.ts`), which the host does not know and which differs per referencing layer, so
+   * a host-side hash would sample the animation curve at the WRONG time and miss exactly the edits it
+   * exists to catch. The hash is therefore produced HERE, where the right time is known, and handed
+   * over. I-15 is unaffected: this is still a fact the compiler reports, not a policy it consults.
    */
-  reuseValue?: ((nodeId: string, contextKey: string) => FlarexValue | null) | undefined;
+  reuseValue?: ((nodeId: string, contextKey: string, contentHash: string | undefined) => FlarexValue | null) | undefined;
   /** The caller's comp-sized matte cache; null = shape-mask nodes soft-degrade to no matte. */
   matteCache?: SceneMaskMatteCache | null | undefined;
   /**
@@ -1391,7 +1401,11 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        * cache and S6.4 needed in the record store. A null answer means "evaluate", and costs one
        * property read when no host has attached the channel.
        */
-      const reused = ctx.reuseValue?.(nodeId, key);
+      // DEBT-022: the hash goes WITH the question. `contentHashes` was computed above at
+      // `ctx.timeSeconds` — this compile's comp-local time — so it folds every param RESOLVED at t
+      // (ADR-009 R1) and every upstream hash (R3). That is what makes a keyframe edit visible to the
+      // host's reuse decision, and a rewire visible without a separate closure walk.
+      const reused = ctx.reuseValue?.(nodeId, key, contentHashes.get(nodeId));
       if (reused) {
         memo.set(key, reused);
         frameProfiler.noteEval(nodeId, node.type, "skipped");
@@ -1426,7 +1440,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        * Gated: with records off this is one property read and no allocation (R1), and the evaluator
        * behaves exactly as before.
        */
-      ctx.onEvaluated?.(nodeId, key, value);
+      // Recorded WITH the hash the value was produced under, so the next frame's reuse check has
+      // something to compare against (DEBT-022).
+      ctx.onEvaluated?.(nodeId, key, value, contentHashes.get(nodeId));
       return value;
     } finally {
       frameProfiler.exitEval();
