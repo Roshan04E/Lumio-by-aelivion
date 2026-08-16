@@ -31,6 +31,11 @@
  * ("ProtocolError: Target closed") while this was being built. Clearing the machine is a human's
  * call; only a measurement ladder that provably owns the machine reaps, via `assertZeroBrowserFloor`.
  *
+ * IT ALSO CHECKS FREE DISK (2026-08-16). See `assertFreeDisk` below for the two sessions that bought
+ * that, and for why it fires at startup rather than on the ENOSPC. "The machine is clean" is a
+ * growing list, and every entry on it was added by an evidence-corrupting failure that did not look
+ * like the thing it was.
+ *
  * IT ALSO COUNTS THE HARNESS ITSELF (2026-08-12), and that addition has its own measured cost. A
  * `wc:gate` run hung with no output and no browser for ~25 minutes; the machine was holding two
  * leftover NODE trees from earlier gate runs, and this preflight passed it, because it counts
@@ -42,8 +47,124 @@
  * and a preflight that fails on its own launcher is worse than no preflight).
  */
 import { execSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 
 const isWindows = process.platform === "win32";
+
+/**
+ * FREE DISK IS A PRECONDITION, NOT A SYMPTOM (added 2026-08-16).
+ *
+ * "The machine is clean" meant no stray Chrome and no leftover vite. It now also means the volume has
+ * room, and that addition cost two independent sessions in one night — the same shape as the two
+ * sessions that bought the browser check above:
+ *
+ *   - The Flarex session's entire noise-floor investigation is VOID. It spent hours chasing a
+ *     nondeterminism that was a disk with nothing left on it.
+ *   - The text session's `render:baseline` sweep died at `ENOSPC` mid-run, having printed a column of
+ *     `unchanged` first. That partial column was read as a verdict and written into a commit message
+ *     as "86/86 unchanged" before the crash was noticed. It had to be retracted.
+ *
+ * That second one is the whole argument for failing at STARTUP. A full disk does not announce itself
+ * as a full disk: Remotion's pre-encode throws `ENOSPC`, Chrome's profile writes fail in ways that
+ * read as flake, and a gate that has already emitted rows hands you numbers that look like data. The
+ * bad reading is produced BEFORE the error, so a check that fires afterwards is too late — the same
+ * reason the browser count above is a hard refusal rather than a warning.
+ *
+ * THE FLOOR IS ABOUT HEADROOM DURING THE RUN, not about the artifacts left behind. A full
+ * `render:baseline` writes ~220 MB of PNGs but transiently consumes several GB in Remotion's
+ * per-render `pre-encode` scratch, which is why a machine showing "6 GB free" still ran out. Hence a
+ * floor in gigabytes rather than megabytes, and hence it is checked before the first render rather
+ * than amortised across the sweep.
+ */
+const DEFAULT_MIN_FREE_BYTES = 5 * 1024 ** 3;
+
+/** Free bytes on the volume holding `somePath`, or `undefined` if it cannot be read. */
+function freeBytesOn(somePath: string): number | undefined {
+  try {
+    const stats = fs.statfsSync(somePath);
+    return stats.bavail * stats.bsize;
+  } catch {
+    return undefined;
+  }
+}
+
+const GIB = 1024 ** 3;
+const gb = (bytes: number) => `${(bytes / GIB).toFixed(1)} GB`;
+
+/**
+ * Every volume a browser gate writes to, deduplicated by free-space reading.
+ *
+ * TWO paths, not one, and on this repo's usual box they are the same volume — but they are not
+ * required to be. The OS temp dir is where Remotion's scratch and Chrome's profile live (the space
+ * that actually runs out), and the repo is where the gate's stills and baselines land. A check that
+ * looked only at the repo would pass while the volume Remotion needs was full.
+ */
+function gateVolumes(): { label: string; path: string; free: number | undefined }[] {
+  const seen = new Map<string, { label: string; path: string; free: number | undefined }>();
+  for (const [label, path] of [
+    ["temp", os.tmpdir()],
+    ["repo", process.cwd()]
+  ] as const) {
+    const free = freeBytesOn(path);
+    // Keyed by free-space reading: two paths on one volume report the same number, and listing that
+    // volume twice would make the failure message read as two separate problems.
+    const key = String(free ?? `unreadable:${label}`);
+    if (!seen.has(key)) seen.set(key, { label, path, free });
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Refuse to run a gate on a volume with no room.
+ *
+ * Exported so a long ladder can re-check between rungs: a sweep can START with headroom and run out
+ * three fixtures in, which is exactly what happened to `render:baseline`.
+ *
+ * An UNREADABLE volume does not block. `statfsSync` is the guard's own instrument, and a guard that
+ * cannot see the machine must not invent a reason to stop work — the same rule
+ * `listStaleHarnessProcesses` follows when enumeration fails. It says so out loud rather than
+ * silently passing, because "the check did not run" and "the check passed" must not look alike.
+ */
+export function assertFreeDisk(label: string, minFreeBytes = resolveMinFreeBytes()): void {
+  const volumes = gateVolumes();
+  const readable = volumes.filter((v) => v.free !== undefined);
+  if (!readable.length) {
+    process.stdout.write(`${label}: free-disk check SKIPPED — could not read free space on any gate volume.\n`);
+    return;
+  }
+  const short = readable.filter((v) => v.free! < minFreeBytes);
+  if (!short.length) return;
+  throw new Error(
+    `${label}: REFUSING TO RUN — only ${short.map((v) => `${gb(v.free!)} free on the ${v.label} volume (${v.path})`).join(", ")}; ` +
+      `this gate needs ${gb(minFreeBytes)}.\n` +
+      `  A full volume does not fail as "the disk is full". Remotion's pre-encode throws ENOSPC partway ` +
+      `through a sweep that has ALREADY printed rows, and those rows get read as a verdict — measured ` +
+      `2026-08-16, when a partial baseline column was written into a commit message as "86/86 unchanged" ` +
+      `and had to be retracted. A separate session the same night voided hours of noise-floor work to the ` +
+      `same cause, having attributed it to nondeterminism.\n` +
+      `  Fix: free space, then re-run. Cheap candidates: this repo's tmp/ gate outputs, and stale ` +
+      `remotion-*/orreris-* directories under ${os.tmpdir()}.\n` +
+      `  Override the floor with GATE_MIN_FREE_GB=<n> only if you know this gate is small; it defaults ` +
+      `to ${gb(DEFAULT_MIN_FREE_BYTES)} because a full render:baseline transiently needs GIGABYTES of ` +
+      `scratch while leaving only ~220 MB behind.`
+  );
+}
+
+/** The floor, overridable per machine. A non-numeric or negative value is ignored, not obeyed. */
+function resolveMinFreeBytes(): number {
+  const raw = process.env.GATE_MIN_FREE_GB;
+  if (!raw) return DEFAULT_MIN_FREE_BYTES;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed * GIB : DEFAULT_MIN_FREE_BYTES;
+}
+
+/** Free space on each gate volume, for a gate that wants to PRINT the precondition it checked. */
+export function describeFreeDisk(): string {
+  return gateVolumes()
+    .map((v) => `${v.label} ${v.free === undefined ? "unreadable" : gb(v.free)} free`)
+    .join(", ");
+}
 
 /** Automation markers. A real user-launched Chrome carries none of these. */
 const AUTOMATION_MARKERS = ["--remote-debugging-port", "--enable-automation", "--headless", "--disable-blink-features=AutomationControlled"];
@@ -129,6 +250,10 @@ export function reapAutomationBrowsers(timeoutMs = 10_000): number {
  * the previous rung's working set is the exact error being guarded against.
  */
 export function assertZeroBrowserFloor(label: string): void {
+  // The disk floor belongs here too, and for a sharper reason than in the once-per-process preflight:
+  // this runs BETWEEN RUNGS of a measurement ladder, which is where a volume that had room at startup
+  // runs out — and a ladder is precisely the instrument whose output looks like data either way.
+  assertFreeDisk(label);
   reapAutomationBrowsers();
   const alive = listAutomationBrowsers();
   if (alive.length) {
@@ -220,6 +345,11 @@ export interface BrowserPreflightOptions {
    * the machine opt in via `assertZeroBrowserFloor` instead.
    */
   reap?: boolean;
+  /**
+   * Free-disk floor, in bytes. Omit for the shared default — a gate should only lower this if it
+   * genuinely renders a handful of stills, and should never raise it silently to make itself pass.
+   */
+  minFreeBytes?: number;
 }
 
 /**
@@ -246,6 +376,13 @@ export function assertQuietBrowserMachine(options: BrowserPreflightOptions): voi
   if (preflightDone) return;
   preflightDone = true;
   const { label, reap = false, scriptMarker } = options;
+  /**
+   * FIRST, before either process check. Deliberately the cheapest and earliest of the three: it is a
+   * single `statfs` and it is the one whose failure has most recently corrupted a night's evidence in
+   * two unrelated subsystems at once. Ordering it first also means the message a founder sees on a
+   * full disk is about the disk, rather than about whichever process check happened to trip on it.
+   */
+  assertFreeDisk(label, options.minFreeBytes);
   if (scriptMarker) {
     const stale = listStaleHarnessProcesses(scriptMarker);
     if (stale.length) {
