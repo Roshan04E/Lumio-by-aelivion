@@ -14887,8 +14887,16 @@ input.scrub-number:focus {
   font-size: 0.66rem;
 }
 
-/* S0 / ADR-023 T-12 (INTERIM — delete with the D9a warp rework). */
-.warp-shaping-notice {
+/**
+ * An inspector control declining to do something, and saying why (T-12's discipline).
+ *
+ * Was `.warp-shaping-notice`, added by S0 for warp's outline engine and marked INTERIM — "delete with
+ * the D9a warp rework". The rework landed in S7 half B and this did not go with it. Renamed rather
+ * than deleted because it is not orphaned: ADR-023 S9's per-cluster refusal now consumes it, and that
+ * refusal is permanent rather than interim — a cursive script cannot be sliced on prefix-measured
+ * bands, which is measured, not pending an engine.
+ */
+.inspector-refusal-notice {
   display: flex;
   gap: 8px;
   align-items: flex-start;
@@ -14902,7 +14910,7 @@ input.scrub-number:focus {
   line-height: 1.45;
 }
 
-.warp-shaping-notice svg {
+.inspector-refusal-notice svg {
   flex: none;
   margin-top: 2px;
 }

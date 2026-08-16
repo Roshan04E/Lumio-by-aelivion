@@ -16197,7 +16197,7 @@ function TextClusterRefusalNotice({ layer }: { layer: TimelineLayer }) {
         ? "This text uses a script whose letters change shape depending on their neighbours (Arabic, Hebrew, Devanagari, Thai and similar), or carries combining marks or an emoji sequence. Animating each character separately would break the joining, so it renders all at once rather than with the wrong letterforms."
         : "This browser cannot identify character boundaries (no Intl.Segmenter), and splitting on code points would break combining marks and emoji — so the reveal is off rather than approximate.";
   return (
-    <p className="warp-shaping-notice" role="status" data-testid="cluster-refusal-notice">
+    <p className="inspector-refusal-notice" role="status" data-testid="cluster-refusal-notice">
       <AlertTriangle size={14} aria-hidden="true" />
       <span>{message}</span>
     </p>
