@@ -300,6 +300,40 @@ function parseCssColor(input: string): [number, number, number] {
  * renderers for layers/junctions no longer present) so live WebGL contexts stay bounded. Pure w.r.t. its
  * inputs otherwise — the same `(layers, t)` produces the same list.
  */
+/**
+ * ADR-021 3b, the PLACEMENT half of the frame key.
+ *
+ * `compileFlarexComp` stamps the graph's root `NodeContentHash` on the draw it emits. That token is
+ * total over the GRAPH — every resolved param, the topology, the font identity — and blind to
+ * everything the TIMELINE decides: where the clip sits, what it is trimmed to, what effects wrap it,
+ * which asset it points at. Those live on the `TimelineLayer`, and a frame key that omitted them
+ * would serve the pre-drag picture after the user moved the clip. That is the stale serve, arriving
+ * through the one door the compiler cannot see.
+ *
+ * So the layer is folded WHOLE rather than field by field. An enumerated list of "the fields that
+ * matter" is exactly the shape of DEBT-016 — a key omitting an input the value depends on — and the
+ * omission would be found as a rendering bug months later. `TimelineLayer` is plain serializable
+ * data, so stringifying it is total by construction and stays total as fields are added.
+ *
+ * The obvious objection is cost, and the WeakMap answers it: layers are immutable in the editor's
+ * state, so a given object is stringified ONCE and every later frame is a pointer lookup. An edit
+ * produces a new object, which is precisely when the digest must be recomputed anyway.
+ */
+const layerIdentityDigests = new WeakMap<TimelineLayer, string>();
+function layerIdentityDigest(layer: TimelineLayer): string {
+  let digest = layerIdentityDigests.get(layer);
+  if (digest === undefined) {
+    // FNV-1a over the serialization: the token is opaque and only ever compared for equality, so a
+    // 32-bit digest keeps the key short without the cache ever interpreting it.
+    const text = JSON.stringify(layer);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i += 1) h = ((h ^ text.charCodeAt(i)) * 16777619) >>> 0;
+    digest = h.toString(16);
+    layerIdentityDigests.set(layer, digest);
+  }
+  return digest;
+}
+
 export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   const {
     layers: inputLayers,
@@ -909,6 +943,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         return cachedPreFlarexDraw(virtual, dims, comp.version ?? 0) ?? "pending";
       },
     }));
+    // ADR-021 3b: complete the frame-key token. The compiler supplied the graph half; the timeline
+    // half is this layer's identity (see `layerIdentityDigest`). Only ever appended to a token the
+    // compiler actually stamped, so a draw that lowered to nothing — or a comp served from its proxy,
+    // which returns early above and carries no token — stays uncacheable rather than acquiring an
+    // identity it cannot honour.
+    if (lowered?.flarexContentToken !== undefined) {
+      lowered.flarexContentToken = `${lowered.flarexContentToken}~${layerIdentityDigest(layer)}`;
+    }
     return lowered ?? draw;
   };
 

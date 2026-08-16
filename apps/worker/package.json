@@ -81,7 +81,8 @@
     "preset:sheet": "tsx src/preset-sheet.ts",
     "flarex:incremental-gate": "tsx src/flarex-incremental-invalidation-gate.ts",
     "flarex:reuse-measure": "tsx src/flarex-reuse-measure.ts",
-    "flarex:frame-cache-gate": "tsx src/flarex-frame-cache-gate.ts"
+    "flarex:frame-cache-gate": "tsx src/flarex-frame-cache-gate.ts",
+    "flarex:frame-cache-field": "tsx src/flarex-frame-cache-field-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

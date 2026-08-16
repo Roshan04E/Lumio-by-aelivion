@@ -455,7 +455,79 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > ~~Claimed for editing only; §3.2(c) forbids claiming it for playback.~~ — the blanket form of this
 > is superseded; it holds for 3a and not for 3b. See §3.2(c′).
 
+> **3b SHIPPED 2026-08-16 — the composited-frame cache, its gate, and its host wiring.**
+>
+> **The gate was built before the cache**, on founder instruction, and the ordering earned itself
+> immediately. A frame cache's characteristic failure is a STALE SERVE, which does not present as a
+> caching bug — it presents as a rendering bug, and `render:compare:pixels` is structurally blind to
+> it (one frame per fixture is the only case where a frame cache is trivially correct).
+> `flarex:frame-cache-gate` renders every scenario WARM (cache on) against COLD (fresh compositor per
+> frame, cache off) and compares frame by frame, plus exact predicted HIT COUNTS, the settle gate, and
+> eviction. `FRAME_CACHE_SABOTAGE=drop-t|drop-graph` breaks the key on purpose and both must make it
+> fail — they do, 16 failures and 2 respectively. The first sabotage run caught a defect in the GATE:
+> its edit fixture moved the content hash without moving pixels, so the oracle was comparing two
+> identical pictures and could not fail. Fixed; both arms now fire.
+>
+> **The key is `(graph content hash, t)`, with the graph term taken from the ADR-009 hashes and NOT
+> from the draw list** — a draw list is the output of the computation the cache exists to skip.
+> `compileFlarexComp` stamps the root `NodeContentHash` onto the draw it emits (`flarexContentToken`,
+> transport only); `build-scene-draws` appends the layer's own identity digest, because the graph hash
+> is total over the GRAPH and blind to everything the TIMELINE decides — where the clip sits, its trim,
+> its wrapping effects. The layer is folded WHOLE rather than field by field: an enumerated list of
+> "the fields that matter" is the shape of DEBT-016, and it is memoized on object identity, so an
+> immutable layer is serialized once.
+>
+> **The matte vector/raster tag was CHECKED, not assumed, and needs no term of its own.** Enumerating
+> its producers: mask nodes always yield vector; `matteInput` yields raster when the socket is fed by
+> an image (topology); `matteControl` degrades to raster only when an input already is one, and its
+> feather/invert route reads node params via `num(at, node, …)`. Every term is node type, topology or a
+> resolved param — exactly what R1+R3 fold. The one exception is a 2D-context allocation failure, an
+> environment degrade rather than a content variable.
+>
+> **I-P9 is satisfied, and note the inversion.** This cache evicts at RANDOM; its sibling
+> `ContentArtifactCache` uses LRU and is right to — access pattern decides, not consistency, because
+> node artifacts are intra-frame fan-out while frames are a cycle. On a 20-frame cycle at capacity 8:
+> **LRU 0.0%, shipped random 8.3%** in simulation, and the real GL cache measured 5 hits in 60 — 8.3%,
+> agreeing with the simulation to the frame.
+>
+> **SCOPE, and it is narrower than the ADR's framing suggests.** A frame is cacheable only if EVERY
+> draw in it carries a content token, and today only the Flarex compiler stamps one. So a frame
+> containing a plain clip, a text layer, a transition, or a comp proxy is NOT cacheable and renders
+> exactly as before. That is this ADR's own sequencing — step 4 is where the timeline earns the same
+> identity — and widening the predicate earlier would mean inventing an identity for draws that do not
+> have one, where the failure surfaces as a wrong picture rather than a miss.
+>
+> **THE HOST WIRING SHIPS DEFAULT OFF AND IS UNVERIFIED.** `compileFlarexComp` stamps the token,
+> `build-scene-draws` completes it with the layer's identity digest, and `ScenePreviewCanvas` declares
+> the key — all present and reviewable behind `?frameCache=1`. What is not established is whether that
+> key is COMPLETE on a real project, and four generations of `flarex:frame-cache-field` have not
+> settled it. The best-designed one (all sweeps in a single load, the cache toggled at runtime) reports
+> **`attributable = 0` with the cache serving 10/10 — and VOIDS anyway**, because two BYPASSED sweeps
+> seconds apart in the same load disagree at 2 of 6 positions while the host reports `declined = 0`.
+>
+> **That is a finding about I-P8, not about caching.** "Same `t` → same picture" is the premise a frame
+> cache rests on, and on this path it does not currently hold: the picture at a fixed `t` is not
+> reproducible in the live editor for a Flarex comp on live media, and the settle predicate calls those
+> frames complete. Whether that is a settle predicate that is too EAGER (fixable, and the cache is then
+> sound) or genuine NONDETERMINISM (in which case no re-render oracle can ever verify a frame cache
+> here) is open, and `FIELD_SETTLE_MS` exists to split the two. See **DEBT-024**, which also records the
+> measurement hazard that invalidates the later runs: the machine hit **0 bytes free on C:** during
+> them, silently truncating one probe's output entirely.
+>
+> **NOT a playback win, and §7 has not moved:** composite 20.9–855.2 ms against decode's 2.8–9.0 ms at
+> every N. A first pass over new ground is all misses. The claim is scrub-back and loop.
+>
+> **Registered, not built (founder instruction):** narrowing `mediaEpoch` from a global sum to
+> per-source epochs. It is the only change that would make the live steady-state reuse rate non-zero,
+> and it is a behaviour change to shipped ADR-012 code with its own risk.
+
 **Step 4 — The timeline last**, once the seam is proven on the harder case.
+
+> **Step-4 obligation carried forward from 3b:** the resolved text DIRECTION (ADR-023 D6a) is a
+> property of a timeline TEXT LAYER, not of a Flarex text node — it does not exist in `node-defs.ts`.
+> It was briefly specified as a 3b key term and withdrawn by founder correction: 3b has no business
+> carrying it, and there is no coupling to the parallel ADR-023 programme. When the timeline moves onto
+> the seam and its layers earn content tokens, direction must be one of the terms those tokens fold.
 
 **Not in the sequence, and newly ordered ahead of the all-intra proxy by §3.3:** reducing the cost
 and the frequency of decoder resets. Provider-local (§4.2), needs no seam change, and worth more

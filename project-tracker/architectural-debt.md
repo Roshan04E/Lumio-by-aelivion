@@ -3805,3 +3805,86 @@ could plausibly have broken), and `flarex:test` fails exactly one assertion, the
 **DEBT-021** one, verified by stashing this change and re-running at the merge base to get the
 identical single failure.
 
+
+---
+
+### DEBT-023 — `mediaEpoch` is a global SUM, so ANY decode dirties EVERY MediaIn
+
+**Registered 2026-08-16, deliberately NOT built** (founder instruction, during ADR-021 3b).
+
+**Status:** open. **Expiry:** when the ADR-021 seam gives each source its own identity, or sooner if a
+live reuse rate above zero becomes load-bearing for a performance claim.
+
+The incremental evaluator's `source` axis is driven by `mediaEpoch`, a single number summed over every
+media-pool content version. One frame arriving on one source moves the sum, which marks the axis
+dirty, which dirties every `mediaIn`, which propagates through the merge chain to the whole graph.
+
+**What it costs, measured** (`flarex:reuse-measure`, 61-node/12-source comp on real footage): live
+steady-state reuse is **0** — not because the mechanism fails, but because on a video comp the only
+thing that WAKES the compositor is a decode, and a decode invalidates globally. Every non-zero figure
+in that harness's table is an EDIT-triggered recomposite. So the node-output cache's real-world value
+today is confined to editing, exactly as ADR-021 §3.2(c) says, and this is the reason.
+
+**The fix is per-source epochs** — a decode on source A dirties the `mediaIn` nodes bound to A and
+nothing else. It is the only change that would make the live reuse rate non-zero.
+
+**Why it is registered rather than done.** It is a behaviour change to shipped ADR-012 code with its
+own risk, and it is not on the critical path of anything currently claimed: ADR-021 3b's win is
+scrub-back and loop, which is a FRAME cache and independent of this axis. Doing it opportunistically
+inside a cache commit would also make any resulting stale-picture report ambiguous between two layers
+— the precise mistake DEBT-022 was fixed ahead of 3b to avoid.
+
+**Do not fix this by exempting `mediaIn` from the source axis.** That is the DEBT-009 shape (proving
+liveness by a signal the consumer never emits) wearing the opposite sign, and it would trade a
+conservative invalidation for a stale one.
+
+---
+
+### DEBT-024 — the ADR-021 3b HOST wiring is UNVERIFIED, and the reason is the instrument, not the cache
+
+**Open 2026-08-16.** The 3b host wiring ships **DEFAULT OFF** (`getFrameCacheEnabled()` returns false;
+`?frameCache=1` opts in). **Expiry:** when `flarex:frame-cache-field` returns a non-VOID verdict.
+
+**Not in doubt: the MECHANISM.** `flarex:frame-cache-gate` is green on every arm and provably
+falsifiable — `FRAME_CACHE_SABOTAGE=drop-t` gives 16 failures, `drop-graph` 2. That gate hosts its own
+experiment and has no load-to-load axis, so nothing below touches it.
+
+**What is unverified is whether the SHIPPED HOST declares the right key**, and four instrument
+generations have not settled it.
+
+1. **Cross-load, no control.** Compared a cache-on page load against a cache-off one and called every
+   difference a stale serve. Two loads of a video editor are not a controlled comparison.
+2. **Cross-load, control added** (cache off, run twice, as a noise floor). Still red.
+3. **Cross-load, warm-up added** (ARM A had been running FIRST against cold proxies and decoders while
+   the floor was measured between the two later, warmer loads). One green run, then a red one whose
+   noise floor was **5 of 6 positions forward and 6 of 6 backward** — at which point "no divergence
+   above the floor" is a vacuous pass. Measured cross-load noise ranged **0 to 6 of 6**.
+4. **Same-load** (the cache toggled at runtime via `__rfFrameCacheBypass`, all five sweeps seconds
+   apart over the same warmed decoders). The right design, and the most informative result:
+   **`attributable = 0`, cache served 10/10 — and the run still VOIDED**, because two BYPASSED sweeps
+   in one load disagreed at 2 of 6 positions while the host reported `declined = 0`.
+
+**The finding, and it is not about caching.** The picture at a fixed `t` is not reproducible in the
+live editor for a Flarex comp on live media, and the settle predicate calls those frames complete.
+**ADR-021's I-P8 — "same `t` → same picture" — is the premise a frame cache rests on, and it does not
+currently hold on this path.** That also re-explains the cross-load noise: not load-to-load variance
+so much as this same instability sampled further apart.
+
+**Two readings remain open, with opposite consequences.** `FIELD_SETTLE_MS` exists to split them:
+- **Still CONVERGING** — a longer settle stabilises it. Then the settle predicate is too eager, the
+  fix belongs there, and the cache is sound once it stops storing early.
+- **Genuinely NONDETERMINISTIC** — no settle stabilises it. Then a frame cache here can never be
+  verified by comparison against a re-render, because re-renders differ from each other, and 3b's
+  ceiling is set by the media path rather than by anything in the cache.
+
+**MEASUREMENT HAZARD, recorded because it invalidates the runs above.** During generation-4 the
+machine reached **0 bytes free on C:**. That is not a background detail: it silently truncated a
+probe's output ("grep: write error", run 2 lost entirely) and browser gates write profiles,
+screenshots and vite caches continuously. **Every number in generation 3 and 4 was taken on a disk at
+or near zero free space and should be re-taken before being believed.** 24 stale Playwright profile
+directories (oldest 2026-08-10) were reclaimed for 0.25 GB — real garbage, but not the cause. The
+remaining ~500 GB is the user's own data and was left alone.
+
+**Do NOT read the VOID as "the cache is broken."** In the only well-designed run, the cache
+introduced zero divergence and served every frame it was asked for. What is missing is a trustworthy
+oracle, and a machine with room to run one.

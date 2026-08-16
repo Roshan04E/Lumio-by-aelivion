@@ -84,7 +84,7 @@ import { advanceBlockingClock, decideSceneReadiness } from "../playback/scene-re
 import { runLiveFrameScope } from "../playback/scene-frame-scope";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
-import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
+import { getFrameCacheEnabled, getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
 import type { ScenePreviewMediaSource } from "./scene-media-source";
 import { STALE_HOLD_MAX_MS, isStale } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
@@ -1014,6 +1014,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // the cloud renderer flip in lockstep instead of drifting from the preview.
       compositorRef.current = new SceneCompositor(canvas, width, height, {
         precision: getHdrPipelineEnabled() ? "rgba16f" : "rgba8",
+        // ADR-021 3b. `?frameCache=0` makes the compositor ignore every frame key this host declares,
+        // which is the A/B that answers "is the cache what is wrong with this picture?".
+        frameCache: getFrameCacheEnabled(),
       });
       matteCacheRef.current = new SceneMaskMatteCache(width, height);
       // A late async raster (text/font) re-arms the settle window so it lands on screen even when idle.
@@ -1751,7 +1754,65 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       mediaPool: sharedMediaRenderersRef.current,
     });
 
-    const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t, effectLight: fxLight };
+    /**
+     * ADR-021 3b — declare this frame's cache identity, or decline to.
+     *
+     * ELIGIBILITY IS THE SAFETY PROPERTY. A frame may be keyed only if EVERY draw in it carries a
+     * `flarexContentToken`, because a token is the only thing that says "the content of this draw is
+     * fully described by a hash". Today the Flarex compiler is the only thing that stamps one, so a
+     * frame containing a plain clip, a text layer, a transition or a comp proxy is simply not
+     * cacheable — it renders exactly as it did before this existed. That is ADR-021's own sequencing:
+     * step 4 is where the timeline moves onto the seam and earns the same identity. Widening this
+     * predicate before then would be inventing an identity for draws that do not have one, and the
+     * failure would surface as a wrong picture rather than as a cache miss.
+     *
+     * The key is `(graph content hash, t)` plus the CONTEXT the hash deliberately excludes (ADR-009
+     * keeps resolution and environment out of `NodeContentHash` on purpose, so the cache layer owns
+     * them) and the grade-compare wipe, which changes delivered pixels and lives on neither.
+     *
+     * `storable` is the settle predicate — the same two arrays the hold gate just used, so the two
+     * cannot drift. A frame presented with a stale or unready source is a picture the renderer would
+     * not have produced had it waited, and storing it would memoize a half-decoded frame under a key
+     * that claims to mean the finished one. Such a frame still PRESENTS; it just never becomes an
+     * answer to a later question.
+     */
+    let frameCacheRequest: { key: string; storable: boolean } | undefined;
+    /**
+     * RUNTIME BYPASS, for the field probe and for nothing else.
+     *
+     * Verifying this cache means comparing a cached frame against the frame the renderer would have
+     * produced. Doing that ACROSS PAGE LOADS — cache-on load vs cache-off load — turned out to be
+     * structurally unsound: a Flarex comp on live footage does not render byte-identically from one
+     * load to the next (decode timing, proxy state), and the noise floor between two cache-off loads
+     * was measured anywhere from 0 to 6 of 6 positions. An instrument whose noise can swallow its
+     * whole signal cannot answer the question it was built for.
+     *
+     * Declining to declare a key for ONE frame forces that frame to re-render from scratch, in the
+     * same load, a fraction of a second after the cached one — which removes load-to-load variance
+     * from the comparison entirely instead of trying to measure it. Absent ⇒ no effect whatsoever.
+     */
+    const bypass = (window as unknown as { __rfFrameCacheBypass?: boolean }).__rfFrameCacheBypass === true;
+    if (!bypass && draws.length > 0) {
+      let tokens = "";
+      let eligible = true;
+      for (const draw of draws) {
+        const token = (draw as { flarexContentToken?: string }).flarexContentToken;
+        if (token === undefined) {
+          eligible = false;
+          break;
+        }
+        tokens += `${token};`;
+      }
+      if (eligible) {
+        const compare = fxCompare ? `${fxCompare.split.toFixed(4)}|${fxCompare.gradedSide}` : "";
+        frameCacheRequest = {
+          key: `fc1|${renderW}x${renderH}@${rScale}|${bg}|${fxLight ?? "display"}|${compare}|${tokens}|t${t.toFixed(6)}`,
+          storable: staleIds.length === 0 && notReadyIds.length === 0,
+        };
+      }
+    }
+
+    const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t, effectLight: fxLight, ...(frameCacheRequest ? { frameCache: frameCacheRequest } : {}) };
     try {
       // HOT SPOT: composite + present (renderFrame ends in presentFrame). Unlike `frameProfiler`,
       // which only records while the transport is PLAYING, this fires whenever the call exceeds 40ms —
@@ -1776,6 +1837,14 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // ready" that woke on those would capture the wrong moment. The two predicates are computed from
       // the same two arrays the hold gate just used, so they cannot drift apart.
       settledRef.current = staleIds.length === 0 && notReadyIds.length === 0;
+      // ADR-021 3b observability. Read as `__rfFrameCache` — hits vs misses is the scrub/loop win,
+      // `declined` is how often the settle gate refused to memoize an unsettled picture, and
+      // `eligible` is the honest denominator: how many frames could be keyed at all today.
+      {
+        const w = window as unknown as { __rfFrameCache?: Record<string, unknown> };
+        const stats = compositor.frameCacheStats?.() ?? null;
+        w.__rfFrameCache = { eligible: frameCacheRequest !== undefined, ...(stats ?? {}) };
+      }
       notePresent({
         targetTime: t,
         participants: liveMediaSourceIds.size,

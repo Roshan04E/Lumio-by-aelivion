@@ -239,6 +239,41 @@ export function getRegionPassesEnabled(): boolean {
 }
 
 /**
+ * Composited-frame cache (ADR-021 step 3b) — the RAM-Preview cache that makes scrub-back and loop
+ * over already-rendered ground instant. `?frameCache=1` turns it on; `?frameCache=0` off.
+ *
+ * DEFAULT OFF, and the default is the finding rather than caution.
+ *
+ * `flarex:frame-cache-gate` proves the mechanism is correct and that its own gate can be made to fail
+ * on a broken key. `flarex:frame-cache-field` then asks the different question — does the SHIPPED
+ * HOST declare the right key on a real project — and the answer today is no. With every arm equally
+ * warmed and a zero noise floor between two cache-off runs, the cache-on arm still diverges from
+ * cache-off at real positions. Something changes the picture at a fixed `t` that this host's key does
+ * not fold. See DEBT-024.
+ *
+ * That is exactly the defect the field probe exists to catch, caught before the wiring reached anyone,
+ * and it is the one class where shipping-and-watching is not an option: a stale serve presents as a
+ * rendering bug, so the cost of being wrong is paid by whoever debugs the compositor for a day.
+ *
+ * FLIP THIS TO `true` WHEN `flarex:frame-cache-field` IS GREEN, and not before. It is a one-line
+ * change with a named acceptance gate, deliberately, so the decision is not re-derived.
+ */
+export function getFrameCacheEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has("frameCache")) return truthy(params.get("frameCache"));
+      const stored = window.localStorage?.getItem("orreris.frameCache");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return false;
+}
+
+/**
  * Viewer-capture proxy generation (todo.md Phase 6B P1a — "the proxy IS the viewer"): background spans are
  * rendered through the VISIBLE preview's own SceneCompositor (offscreen, no present) with pooled `<video>`
  * decode + shared-context grading, instead of the second WebCodecs pipeline in the export Worker. Faithful
