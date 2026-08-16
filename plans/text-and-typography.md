@@ -26,6 +26,7 @@ S4b `reference` renderable in PropertyFieldList  SHIPPED 2026-08-14; both picker
 S5  tier-1 texture + CSS depth            SHIPPED 2026-08-15; variable axes deferred (not OQ2)
 S5b `fillTexture` presetable + an editor   SHIPPED 2026-08-15; decomposed, no new kind
 S6  caption + text preset library         SHIPPED 2026-08-15; OQ8 closed; 18 first-party looks
+                                          COMPLETE 2026-08-16 — captionStylePresets folded in, no migration
 S7  the text matte (tier 2) + matte ops + warp rework   half B (warp) SHIPPED 2026-08-15;
                                                           half A gated on the OQ1 spike
 S8  SVG: multi-stroke + path text          SHIPPED 2026-08-16; D8 amended — multi-stroke needed no SVG
@@ -808,8 +809,64 @@ The sheet also earned the Extrude preset a `lineHeight` of 1.35 rather than its 
 7×4px stack reaches 28px past the baseline and lands on the next line at tight leading. Nothing but
 looking finds that.
 
-**Left standing deliberately: `captionStylePresets` in `captions.ts`.** The AUTO_CAPTIONS tool still
-carries its own six-entry look list — a hand-written struct of nine fields, which is a parallel copy
+### The last item — `captionStylePresets` folded in. **SHIPPED 2026-08-16. ADR-023 is complete.**
+
+`CaptionStylePreset` **extends `StylePreset`**: the same object S6's library is built from, carrying
+the same `{schemaId, version, values}` envelope the clipboard carries and a saved project style
+carries. T-10 taken literally rather than approximately — there is now one preset format in the
+product, not two with one name.
+
+**Two fields are held OUT of the envelope, and the reason is the boundary rather than convenience.**
+`positionY` is PLACEMENT (`textWidthPercent`'s reason, one type over: a look that moved its target is
+not a look) and `highlightColor` is a RUN style — it colours highlighted words inside the line, which
+is `TextRun.color`, not the layer's. Folding it in would put a field in the envelope that
+`applyTextStyle` would happily stamp across a whole layer. Both are asserted, not described.
+
+**NO MIGRATION WAS WRITTEN, and that is the result rather than a caveat.** `stylePresetId` is
+persisted project data; every id and every value is unchanged, so a caption track saved before this
+resolves the same preset and produces byte-identical layers. `CaptionSegmentStyleOverride` — the
+second saved bag — is untouched on disk and keeps its exact field-by-field precedence over the preset.
+Absent stays absent (D1a) for the twelfth stage running.
+
+**What the fold actually bought, which is the half a "nothing moved" gate cannot see.** The old struct
+was nine fields; the layer builder then hand-picked six of them. Rehousing those in a nicer container
+would have passed every golden. So the remaining look is now SPREAD onto the caption layer, and a
+caption preset reaches the renderer with the gradient and image fill (S5/S5b), the per-line pill,
+`paintOrder` (S1), the concentric outer stroke and arc curve (S8), the pinned `fontRef` and its
+variable axes (S2/S9a), the shadow stack, and the per-character reveal (S9) — **ten fields asserted
+individually**, none of which a caption could express before. For the six shipped presets the spread
+is EMPTY, which is why byte-identity survives a change that widens what a caption can say.
+
+**Verification.** `caption:golden` — the reference was captured from the code **before** the fold
+(`ad02e8a`) rather than after, because capturing after would have recorded whatever the refactor did
+and called it the baseline. 8 cases byte-identical: all six presets, a segment naming a *different*
+preset (the second id lookup, the one a refactor leaves pointing at the old list), and a full override
+bag. Paired with the T-15 falsifier above, **and the falsifier was proved to fail**: removing the
+spread leaves all 8 goldens green and turns the falsifier red, which is exactly the failure mode this
+stage was most likely to have. `presets:test`, `caption:qa`, `textstyle:golden` 109, `textstyle:schema`
+35, `pnpm -r typecheck` all clean. The type change itself named every consumer at compile time — the
+two-way constraint doing the job it was added for.
+
+**`render:baseline`, full and unbatched: 84 byte-identical, 2 irreproducible, 6 not checked** (no
+baseline — the pre-existing transition fixtures, deliberately left unregistered). Stated in that form
+per the founder's noise-floor rule; all 10 cross-fixture relations passed.
+
+The two that flagged are `multi-stroke` (1/2073600) and `cluster-text` (3/2073600), and **neither can
+be about this change** — not as a judgement but structurally: both are `useTextFixture` fixtures, and
+that flag SKIPS captions, so neither contains a caption layer at all. The 84 byte-identical ones
+include every caption-carrying fixture in the set, which is the fold's pixel evidence. `multi-stroke`
+came back `unchanged` when re-run narrowed, so it is capable of matching; `cluster-text` is the
+minority-state capture written up as `infrastructure.md` v4, with the recommendation recorded and not
+acted on. **Nothing was re-baselined.**
+
+It took three attempts to get this number: two full sweeps voided on harness collisions with a
+parallel session (`infrastructure.md` v3 — a preflight cannot see a run that starts after it, and this
+box fits one browser harness). The voided runs are not reported as partial passes.
+
+---
+
+**The original note, kept because it is what the decision was made against:** the AUTO_CAPTIONS tool
+carried its own six-entry look list — a hand-written struct of nine fields, which is a parallel copy
 list of the same kind T-15 is about, one layer up from the field list. It can express nine of the
 `text-style` schema's 28 presetable fields; no gradient, no per-line pill, no paint order, no
 `fontRef`. Folding it into the envelope is a real improvement and a real migration (`CaptionTrackData.
@@ -817,6 +874,14 @@ stylePresetId` is persisted project data, and `CaptionSegmentStyleOverride` is a
 on top of it), and doing it inside S6 would have meant migrating caption project data in the stage
 that was supposed to ship a library. **Not in scope, and now cheap:** the target shape exists, and
 `applyStylePresetToTrack` already does the applying.
+
+**One prediction in that note was wrong, and it is the useful part to carry forward: it is NOT "a real
+migration".** The fold reads persisted data — it does not rewrite it. `stylePresetId` stays a string
+naming a preset that still exists under the same id, and the override bag's on-disk shape is
+untouched, so there was nothing to migrate and no founder call to record. What made it look like a
+migration from the outside was that the data is persisted; what makes it not one is that the ids are
+the interface, and the ids did not move. Worth remembering the next time "it touches saved data" is
+read as "it needs a migration".
 
 ---
 

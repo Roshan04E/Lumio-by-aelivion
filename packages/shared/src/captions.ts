@@ -1,4 +1,6 @@
-import type { TextRun, TimelineComposition, TimelineLayer } from "./types";
+import { readStylePreset, type StylePreset } from "./style-presets";
+import { textStylePreset } from "./text-style-schema";
+import type { TextRun, TextStyleFields, TimelineComposition, TimelineLayer } from "./types";
 
 export interface TranscriptWord {
   id: string;
@@ -24,18 +26,46 @@ export interface TranscriptArtifactData {
   source: "manual" | "srt" | "vtt" | "mock" | "browser" | "cloud";
 }
 
-export interface CaptionStylePreset {
-  id: string;
-  name: string;
-  description: string;
-  color: string;
-  strokeColor: string;
-  strokeWidth: number;
-  fontSize: number;
-  fontFamily: string;
+/**
+ * A caption look — ADR-023 S6's last item, and the last copy list in the text programme.
+ *
+ * ## WHAT CHANGED, AND WHAT DELIBERATELY DID NOT
+ *
+ * This used to be a hand-written struct of nine fields that could express nine of the `text-style`
+ * schema's presetable set and nothing else: no gradient, no per-line pill, no paint order, no
+ * `fontRef`, no outer stroke, no shadow stack, no per-character reveal. It was the same defect shape
+ * T-15 exists for — a parallel list of "the fields a look has" — one layer up from a field list, and
+ * every stage that added a text capability silently failed to reach captions.
+ *
+ * It is now a {@link StylePreset}: the SAME object S6's library is built from, carrying the SAME
+ * `{schemaId, version, values}` envelope the clipboard carries and a saved project style carries.
+ * That is T-10 taken literally rather than approximately — one format, one migration set, so a
+ * caption preset saved today still loads after the schema changes, and a caption look can now say
+ * anything a text look can say.
+ *
+ * **The two fields held OUT of the envelope are held out for a reason, not for convenience.**
+ *
+ * - `positionY` is PLACEMENT, not a look. `textWidthPercent` is described-but-not-presetable one type
+ *   over for exactly this reason: a look that moved its target is not a look. Captions need a default
+ *   vertical position, so it travels beside the envelope rather than inside it.
+ * - `highlightColor` is a RUN style — it colours the highlighted words inside the line, which is
+ *   `TextRun.color`, not the layer's `color`. The schema describes a layer's look; a run-level
+ *   override is a different object (`buildCaptionTextRuns` consumes it) and folding it in would put a
+ *   field in the envelope that `applyTextStyle` would happily stamp onto a whole layer.
+ *
+ * ## NO MIGRATION, AND THAT IS THE WHOLE POINT
+ *
+ * `CaptionTrackData.stylePresetId` is persisted project data. Every id below is unchanged, every
+ * value below is unchanged, so a caption track saved before this change resolves the same preset and
+ * produces byte-identical layers — asserted by `caption:golden`, whose reference was recorded from
+ * the code BEFORE this fold. Nothing rewrites saved data; absent stays absent (D1a), for the twelfth
+ * stage running.
+ */
+export interface CaptionStylePreset extends StylePreset {
+  /** Default vertical position, percent of frame. Placement, not a look — see above. */
   positionY: number;
+  /** Colour of highlighted WORDS — a run style, not a layer style. See above. */
   highlightColor: string;
-  backgroundColor?: string | undefined;
 }
 
 export type CaptionEmphasisMode = "none" | "pop-word" | "zoom-phrase" | "shake-warning";
@@ -89,81 +119,111 @@ export interface TranscriptValidationIssue {
   segmentId?: string | undefined;
 }
 
+/**
+ * One caption preset. The look goes into the envelope; placement and the highlight colour travel
+ * beside it (see {@link CaptionStylePreset}).
+ *
+ * `category: "caption"` and `origin: "first-party"` are carried because a `StylePreset` has them, and
+ * they make these structurally listable next to S6's library. **They are not listed together today**
+ * — `stylePresetsForCategory` reads `firstPartyStylePresets`, and these live in their own array
+ * because `stylePresetId` names them and merging the arrays would change which ids resolve. Stated
+ * rather than implied: the two lists are now the same TYPE, which is what makes merging them a
+ * product decision about ids instead of a refactor.
+ */
+function captionPreset(
+  id: string,
+  name: string,
+  description: string,
+  placement: { positionY: number; highlightColor: string },
+  values: TextStyleFields
+): CaptionStylePreset {
+  return {
+    id,
+    name,
+    description,
+    category: "caption",
+    origin: "first-party",
+    envelope: textStylePreset(values),
+    ...placement
+  };
+}
+
+/**
+ * The six shipped caption looks, **value for value as they were before the fold**.
+ *
+ * Nothing here was improved while it was being moved, and that restraint is the stage. Every one of
+ * these ids is live in saved projects, so a richer `fontRef` or a per-line pill added "while we are
+ * in here" would silently repaint captions in work someone already finished. The point of the fold is
+ * that these CAN now say those things — not that they suddenly do. `caption:golden` holds the line.
+ */
 export const captionStylePresets: CaptionStylePreset[] = [
-  {
-    id: "minimal",
-    name: "Minimal",
-    description: "Clean white captions. No stroke, no motion — the safe default.",
+  captionPreset("minimal", "Minimal", "Clean white captions. No stroke, no motion — the safe default.", { positionY: 82, highlightColor: "#4D9FFF" }, {
     color: "#FFFFFF",
     strokeColor: "#000000",
     strokeWidth: 0,
     fontSize: 52,
-    fontFamily: "Arial, Helvetica, sans-serif",
-    positionY: 82,
-    highlightColor: "#4D9FFF"
-  },
-  {
-    id: "subtitle",
-    name: "Subtitle",
-    description: "Readable broadcast-style lower-third captions.",
+    fontFamily: "Arial, Helvetica, sans-serif"
+  }),
+  captionPreset("subtitle", "Subtitle", "Readable broadcast-style lower-third captions.", { positionY: 86, highlightColor: "#4D9FFF" }, {
     color: "#F4F4F5",
     strokeColor: "#000000",
     strokeWidth: 2,
     fontSize: 48,
-    fontFamily: "Arial, Helvetica, sans-serif",
-    positionY: 86,
-    highlightColor: "#4D9FFF"
-  },
-  {
-    id: "bold-center",
-    name: "Bold Center",
-    description: "Large hook captions centered over the subject.",
+    fontFamily: "Arial, Helvetica, sans-serif"
+  }),
+  captionPreset("bold-center", "Bold Center", "Large hook captions centered over the subject.", { positionY: 70, highlightColor: "#FFD23F" }, {
     color: "#FFFFFF",
     strokeColor: "#000000",
     strokeWidth: 6,
     fontSize: 80,
-    fontFamily: "Arial, Helvetica, sans-serif",
-    positionY: 70,
-    highlightColor: "#FFD23F"
-  },
-  {
-    id: "bold-outline",
-    name: "Bold Outline",
-    description: "Thick outline, no fill — high-engagement creator style.",
+    fontFamily: "Arial, Helvetica, sans-serif"
+  }),
+  captionPreset("bold-outline", "Bold Outline", "Thick outline, no fill — high-engagement creator style.", { positionY: 74, highlightColor: "#FFD23F" }, {
     color: "#FFFFFF",
     strokeColor: "#000000",
     strokeWidth: 9,
     fontSize: 76,
-    fontFamily: "Arial, Helvetica, sans-serif",
-    positionY: 74,
-    highlightColor: "#FFD23F"
-  },
-  {
-    id: "karaoke",
-    name: "Karaoke",
-    description: "Short bursts built for word-by-word highlighting.",
+    fontFamily: "Arial, Helvetica, sans-serif"
+  }),
+  captionPreset("karaoke", "Karaoke", "Short bursts built for word-by-word highlighting.", { positionY: 76, highlightColor: "#4D9FFF" }, {
     color: "#FFFFFF",
     strokeColor: "#000000",
     strokeWidth: 4,
     fontSize: 66,
-    fontFamily: "Arial, Helvetica, sans-serif",
-    positionY: 76,
-    highlightColor: "#4D9FFF"
-  },
-  {
-    id: "boxed",
-    name: "Boxed",
-    description: "Caption pill for busy or bright footage.",
+    fontFamily: "Arial, Helvetica, sans-serif"
+  }),
+  captionPreset("boxed", "Boxed", "Caption pill for busy or bright footage.", { positionY: 86, highlightColor: "#FFD23F" }, {
     color: "#FFFFFF",
     strokeColor: "#000000",
     strokeWidth: 0,
     fontSize: 46,
     fontFamily: "Arial, Helvetica, sans-serif",
-    positionY: 86,
-    highlightColor: "#FFD23F",
     backgroundColor: "#16161A"
-  }
+  })
 ];
+
+/**
+ * A caption preset's look, read through the ONE reader (T-10) so its migrations run.
+ *
+ * Not `preset.envelope.values` directly, and the difference is the obligation: reading the member
+ * skips `migratePropertyValues`, so a preset written by an older schema version would be consumed
+ * raw. Going through `readStylePreset` is what makes "a preset saved today still loads after the
+ * schema changes" true of caption presets rather than true only of the library's.
+ *
+ * A REFUSAL yields the empty look rather than throwing. A refusal here means the envelope names
+ * another schema or a newer version — for the built-in six that is unreachable and `caption:golden`
+ * would catch it, and for a user-authored caption preset the honest degradation is the layer's own
+ * defaults, which is exactly what an absent field resolves to everywhere else (D1a).
+ */
+export function captionPresetLook(preset: CaptionStylePreset): TextStyleFields {
+  const read = readStylePreset(preset);
+  return read.ok && read.schemaId === "text-style" ? read.values : {};
+}
+
+/** Resolve a persisted `stylePresetId` to its preset. One lookup, so the two call sites cannot drift. */
+export function findCaptionStylePreset(id: string | undefined): CaptionStylePreset | undefined {
+  return id ? captionStylePresets.find((preset) => preset.id === id) : undefined;
+}
 
 export const mockTranscriptText = `1
 00:00:00,200 --> 00:00:01,700
@@ -551,14 +611,36 @@ function createCaptionLayer(
   index: number,
   override?: CaptionSegmentStyleOverride | undefined
 ): TimelineLayer {
-  const presetOverride = override?.stylePresetId ? captionStylePresets.find((item) => item.id === override.stylePresetId) : undefined;
+  const presetOverride = findCaptionStylePreset(override?.stylePresetId);
   const resolvedPreset = presetOverride ?? preset;
-  const resolvedColor = override?.color ?? resolvedPreset.color;
-  const resolvedFontSize = override?.fontSize ?? resolvedPreset.fontSize;
-  const resolvedFontFamily = override?.fontFamily ?? resolvedPreset.fontFamily;
-  const resolvedStrokeColor = override?.strokeColor ?? resolvedPreset.strokeColor;
-  const resolvedStrokeWidth = override?.strokeWidth ?? resolvedPreset.strokeWidth;
-  const resolvedBackgroundColor = override?.backgroundColor ?? resolvedPreset.backgroundColor;
+  /**
+   * The preset's LOOK, out of the envelope. The override bag still wins field by field, unchanged:
+   * it is per-segment data a user authored by hand and cannot be re-derived, so it keeps the exact
+   * precedence it had (`override ?? preset`), and its shape on disk is untouched by this fold.
+   */
+  const look = captionPresetLook(resolvedPreset);
+  /**
+   * EVERYTHING ELSE THE LOOK SAYS — and this is what makes the fold buy something rather than move a
+   * copy list from one file to another.
+   *
+   * The six fields destructured out are the ones the per-segment override bag can address, and they
+   * keep their exact hand-written precedence below. What remains is every OTHER presetable field a
+   * caption look can now carry and never could before: the gradient and image fill (S5/S5b), the
+   * per-line pill, `paintOrder`, the concentric outer stroke and the arc curve (S8), the pinned
+   * `fontRef` and its variable axes (S2/S9a), the shadow stack, and the per-character reveal (S9).
+   * Without this spread the envelope would be a nicer container for the same nine fields.
+   *
+   * Spread FIRST, so the explicit assignments below win — and, for the six shipped presets, `rest` is
+   * EMPTY, so the emitted layer object is key-for-key what it was. That is not a happy accident; it is
+   * why `caption:golden` can hold at byte-identity across a change that widens what a caption can say.
+   */
+  const { color: _c, fontSize: _s, fontFamily: _ff, strokeColor: _sc, strokeWidth: _sw, backgroundColor: _bg, ...restOfLook } = look;
+  const resolvedColor = override?.color ?? look.color;
+  const resolvedFontSize = override?.fontSize ?? look.fontSize;
+  const resolvedFontFamily = override?.fontFamily ?? look.fontFamily;
+  const resolvedStrokeColor = override?.strokeColor ?? look.strokeColor;
+  const resolvedStrokeWidth = override?.strokeWidth ?? look.strokeWidth;
+  const resolvedBackgroundColor = override?.backgroundColor ?? look.backgroundColor;
   const resolvedBackgroundPadding = override?.backgroundPaddingEm;
   const resolvedPositionX = override?.positionX ?? 50;
   const resolvedPositionY = override?.positionY ?? resolvedPreset.positionY;
@@ -574,6 +656,7 @@ function createCaptionLayer(
   });
   const animations = createCaptionAnimations(trackId, index, override?.emphasis ?? "none");
   return {
+    ...restOfLook,
     id: `${trackId}_layer_${index + 1}`,
     trackId,
     type: "text",
@@ -592,9 +675,9 @@ function createCaptionLayer(
     backgroundColor: resolvedBackgroundColor,
     backgroundPaddingEm: resolvedBackgroundPadding,
     shadowColor: "#000000",
-    shadowBlur: resolvedPreset.backgroundColor ? 0 : 16,
+    shadowBlur: look.backgroundColor ? 0 : 16,
     shadowOffsetX: 0,
-    shadowOffsetY: resolvedPreset.backgroundColor ? 0 : 5,
+    shadowOffsetY: look.backgroundColor ? 0 : 5,
     transform: {
       position: { x: resolvedPositionX, y: resolvedPositionY },
       scale: 1,
@@ -607,12 +690,12 @@ function createCaptionLayer(
         type: "shadow",
         name: "Caption readability",
         enabled: true,
-        intensity: resolvedPreset.backgroundColor ? 28 : 52,
+        intensity: look.backgroundColor ? 28 : 52,
         params: {
           color: "#000000",
-          blur: resolvedPreset.backgroundColor ? 4 : 18,
+          blur: look.backgroundColor ? 4 : 18,
           x: 0,
-          y: resolvedPreset.backgroundColor ? 2 : 6
+          y: look.backgroundColor ? 2 : 6
         }
       }
     ],

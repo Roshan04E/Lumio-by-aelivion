@@ -300,3 +300,86 @@ they have no baseline** (`cluster-text` before this capture, plus `liquid-morph-
 `portal-transition`, `motion-smear-transition` and their three `linear-` twins). Those six transition
 fixtures are pre-existing unbaselined coverage, are not S9's, and were deliberately left alone: a
 blanket `--capture` would have registered six references nobody has looked at.
+
+## render:baseline — a preflight cannot see a run that starts AFTER it (v3, 2026-08-16)
+
+**Symptom.** A full `render:baseline` died ~40 fixtures in with `Navigation failed because browser has
+disconnected!` and exit 1. Every fixture up to that point had reported `unchanged`.
+
+**That is a VOID RUN, not a partial pass, and the 40 readings are not evidence of anything.** Stating
+it because the output is seductive: forty consecutive `unchanged` lines followed by a crash looks like
+"it was fine until the end", and the founder's standing rule is that a void run is not netted out.
+
+**Cause: a SECOND browser harness started while this one was mid-sweep.** A parallel session in the
+`adr021-step2` worktree launched `flarex-frame-cache-*` at 16:23:58, roughly two minutes into a sweep
+that takes many. Free RAM was 4.5 GB with both alive. Two Chrome-driving harnesses on one machine is
+the collision `browser-preflight` was written for — measured before at three lost pixel-gate runs.
+
+**The new part, and the reason this is a version rather than a duplicate.** The existing entries are
+about LEFTOVER trees: debris from an earlier run, alive before this one starts, which is exactly what
+`assertQuietBrowserMachine` catches. **This machine was clean at launch.** A preflight is a check at a
+point in time, and it cannot see a process that does not exist yet. The class is therefore wider than
+"clean the machine first": on a box where another session may launch work, a long gate needs the
+machine to be quiet *for its whole duration*, and nothing enforces that.
+
+**Mitigation used, and its limit.** The re-run waited for four consecutive clear checks 30 s apart
+before starting — sustained quiet rather than a single sample. That lowers the odds of starting into a
+gap; it does NOT prevent a collision that begins later. The honest posture is that a full sweep on a
+shared box is best-effort, and a crash mid-sweep must be re-run rather than reported.
+
+**What would actually close it** (not built, and not this stage's to build): a machine-wide lock the
+browser gates take and the probes respect, so the second harness waits instead of colliding. Every
+gate already calls `assertQuietBrowserMachine`, which is the natural place for it — the check is
+present, it is only the wrong shape, testing a moment instead of holding a claim.
+
+**SECOND OCCURRENCE, same session, and the sustained-quiet mitigation did not save it.** The re-run
+waited out four clear checks, started into a genuinely idle machine, got 79 fixtures deep — and died
+on `Protocol error (Runtime.callFunctionOn): Target closed` when the parallel harness launched again
+at 16:53:37. Two full sweeps voided, roughly forty minutes, for a change that touches no render path.
+
+**The number that reframes it: this box has 13.9 GB of RAM, and two browser harnesses leave 4.7 GB
+free.** The first write-up called this a collision, which is true and incomplete — it is also memory
+pressure, and `Target closed` is what a Chrome renderer being reaped under pressure looks like from
+Remotion's side. That matters for the fix: a lock is still the right answer, but "wait for quiet" is
+the wrong framing if the real constraint is that this machine fits ONE browser harness at a time.
+`browser-preflight`'s free-DISK check has a missing sibling — free RAM — and it would have refused
+both of these runs at launch rather than after forty minutes.
+
+**Operational consequence, recorded because the next person will hit it:** a full `render:baseline`
+on this box is not obtainable while another session is doing browser work. It is not a matter of
+retrying harder. Either the other work pauses, or the sweep is owed and said to be owed.
+
+**Resolved by pausing the other session** (founder, third attempt): the sweep then ran to completion
+on the first try. That is the confirmation, not a coincidence — same code, same fixtures, same
+machine, one harness instead of two.
+
+## `cluster-text`'s baseline caught the MINORITY state, and the entry should probably go (v4, 2026-08-16)
+
+**Four runs against the reference captured at `d46ed61b2753`:**
+
+    capture                     d46ed61b2753
+    verify run 1  (narrowed)    CHANGED   3/2073600
+    verify run 2  (narrowed)    unchanged
+    full sweep                  CHANGED   3/2073600
+    confirm       (narrowed)    CHANGED   3/2073600
+
+**It flags 3 of 4, always at exactly 3 pixels, and matched once.** The single match is what excludes a
+code change — a deterministic difference cannot render byte-identically in one run and 3 pixels off in
+the next, from the same code against the same reference. So this is the same floor v1 and v2 describe.
+
+**But the CAPTURE landed on the rarer state**, which v1 and v2 did not anticipate: their fixtures
+mostly match and occasionally flag, so their baselines are usable. This one mostly flags. Left as it
+is, `cluster-text` makes every future full sweep report an irreproducible fixture in perpetuity.
+
+**Re-capturing is still forbidden** (v1) and would be worse here, not better: with a 3-of-4 split a
+re-capture is a coin toss that freezes whichever state that run happened to produce, and the founder's
+standing instruction for this batch was explicitly not to re-baseline around the floor. **The action
+worth considering instead is REMOVING the entry** — `cluster-text` keeps its `render:compare:pixels`
+coverage, which passed at 0.000% and is the gate that actually answers S9's parity question, and it
+stops advertising a zero-tolerance reference it cannot hold. That is a decision about what the gate is
+for, so it is recorded here rather than taken: **the entry is still present.**
+
+**The same-run control that makes the caption fold's own claim safe, independent of all this:**
+`multi-stroke` and `cluster-text` are `useTextFixture` fixtures, and that flag SKIPS captions
+(`render-comparison-fixture.ts`). Neither flagged fixture contains a caption layer, and all 84
+byte-identical fixtures include every caption-carrying one. The two readings cannot be about captions.

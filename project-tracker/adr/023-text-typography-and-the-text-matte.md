@@ -577,6 +577,30 @@ schema refusal reachable — a text look dropped on a shape is a refusal with a 
 paste. Two schemas now share the envelope (`text-style`, `shape-style`); that is the rule working,
 not an exception to it.
 
+**EXTENDED 2026-08-16 (S6's last item) — the caption preset joins, and the interesting part is that
+it did not need a migration to.** `captionStylePresets` was the last hand-written look list in the
+product: nine fields against the schema's thirty-plus, and the reason no text capability shipped since
+S1 had ever reached a caption. `CaptionStylePreset` now **extends `StylePreset`**, so a caption look
+is the same object with the same envelope, read by `readStylePreset` and migrated by the same runner.
+
+**`stylePresetId` is persisted project data and was not rewritten.** The ids are the interface, the
+ids did not move, and `CaptionSegmentStyleOverride`'s on-disk shape is untouched — so a caption track
+saved before the fold produces byte-identical layers, asserted against a reference captured BEFORE the
+change. "It touches saved data" was read as "it needs a migration" for a month; it did not.
+
+**Two fields are deliberately NOT in the envelope, and the boundary is worth stating because the next
+adopter will meet it.** `positionY` is placement — `textWidthPercent`'s exclusion, one type over.
+`highlightColor` is a RUN style (`TextRun.color`), and the schema describes a LAYER's look; folding it
+in would have put a field in the envelope that `applyTextStyle` stamps across the whole layer. The
+envelope is not "everything about the preset", it is the LOOK, and things that are not the look travel
+beside it exactly as `id`, `name` and `category` already do.
+
+**The rule this stage adds to T-10: sharing an envelope is not the same as reaching the renderer.**
+Folding the storage format while the layer builder still hand-picked six fields would have passed every
+"nothing moved" golden and bought nothing — the copy list would have moved house. What closes it is
+that the remaining look is spread onto the layer, asserted field by field (`caption:golden`'s second
+half), with the assertion proved to fail when the spread is removed.
+
 **T-11 — A mirrored font is never stored, and never served, without its license file alongside it.**
 (D4a) The mirror write path and the license-file write are one operation, not two steps a future
 change can drift apart. A mirror entry missing its license file is a defect to fix before ship, not

@@ -18,6 +18,7 @@
     "textstyle:golden": "tsx src/text-style-resolution.test.ts",
     "textstyle:schema": "tsx src/text-style-schema.test.ts",
     "cluster:model": "tsx src/text-cluster-animation.test.ts",
+    "caption:golden": "tsx src/caption-track.golden.test.ts",
     "color:test": "tsx src/color/color.test.ts",
     "idt:test": "tsx src/color/input-transform.test.ts",
     "textmatte:test": "tsx src/flarex/text-matte.test.ts",

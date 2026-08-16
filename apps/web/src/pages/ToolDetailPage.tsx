@@ -35,7 +35,10 @@ import {
 } from "lucide-react";
 import {
   applyCaptionTrackToComposition,
+  captionPresetLook,
+  compositionTextDefaults,
   captionStylePresets,
+  findCaptionStylePreset,
   createAutoCaptionPrompt,
   createAutoCaptionAssistantPlan,
   createMockSubjectAnalysis,
@@ -1877,10 +1880,21 @@ function AutoCaptionsPanel({
   const durationSeconds = Math.max(selectedAsset?.durationSeconds ?? 0, captionTrack.segments.at(-1)?.endSeconds ?? 0, 1);
   const selectedSegment = captionTrack.segments.find((segment) => segment.id === selectedSegmentId);
   const globalOverride = captionTrack.segments[0] ? captionStyleOverrides[captionTrack.segments[0].id] ?? {} : {};
-  const globalStyle = captionStylePresets.find((preset) => preset.id === (globalOverride.stylePresetId ?? captionStyleId)) ?? captionStylePresets[0]!;
-  const globalStrokeColor = globalOverride.strokeColor ?? globalStyle.strokeColor;
-  const globalStrokeWidth = globalOverride.strokeWidth ?? globalStyle.strokeWidth;
-  const backgroundParsed = parseBackgroundColor(globalOverride.backgroundColor, globalStyle.backgroundColor ?? "#08090d");
+  const globalStyle = findCaptionStylePreset(globalOverride.stylePresetId ?? captionStyleId) ?? captionStylePresets[0]!;
+  // ADR-023 S6 (final): a caption preset's look lives in its envelope now, so it is READ rather than
+  // reached into — through the same function the renderer uses, so the panel and the picture cannot
+  // disagree about what the preset says.
+  const globalLook = captionPresetLook(globalStyle);
+  /**
+   * Every envelope field is OPTIONAL, because absent is a real state that stays absent (D1a) — so a
+   * control needs a concrete value to show for a preset that does not name one. The fallbacks are
+   * `compositionTextDefaults` and `resolveTextStyle`'s own absent-values, deliberately: the control
+   * then shows what the layer will actually RENDER, rather than a placeholder the renderer disagrees
+   * with. For the six shipped presets every one of these is unreachable — they all name every field.
+   */
+  const globalStrokeColor = globalOverride.strokeColor ?? globalLook.strokeColor ?? "#000000";
+  const globalStrokeWidth = globalOverride.strokeWidth ?? globalLook.strokeWidth ?? 0;
+  const backgroundParsed = parseBackgroundColor(globalOverride.backgroundColor, globalLook.backgroundColor ?? "#08090d");
   const applyToAllSegments = (patch: CaptionSegmentStyleOverride) => {
     captionTrack.segments.forEach((segment) => onChangeSegmentStyle(segment.id, patch));
   };
@@ -2305,18 +2319,18 @@ function AutoCaptionsPanel({
                     <span>Font</span>
                     <ThemedSelect
                       ariaLabel="Font"
-                      value={globalOverride.fontFamily ?? globalStyle.fontFamily}
+                      value={globalOverride.fontFamily ?? globalLook.fontFamily ?? compositionTextDefaults.fontFamily}
                       options={renderSafeFonts.map((font) => ({ value: font.family, label: font.label }))}
                       onChange={(next) => applyToAllSegments({ fontFamily: next })}
                     />
                   </label>
-                  <CaptionSlider label="Size" min={12} max={160} value={globalOverride.fontSize ?? globalStyle.fontSize} onChange={(value) => applyToAllSegments({ fontSize: value })} />
+                  <CaptionSlider label="Size" min={12} max={160} value={globalOverride.fontSize ?? globalLook.fontSize ?? compositionTextDefaults.fontSize} onChange={(value) => applyToAllSegments({ fontSize: value })} />
                   <div className="control-grid">
                     <ColorControl
                       icon={<PaintBucket size={14} />}
                       label="Text color"
                       palette={imagePalette}
-                      value={globalOverride.color ?? globalStyle.color}
+                      value={globalOverride.color ?? globalLook.color ?? compositionTextDefaults.color}
                       onChange={(value) => applyToAllSegments({ color: value })}
                     />
                     <ColorControl
@@ -2802,10 +2816,14 @@ function getScaledCaptionRunStyle(run: ReturnType<typeof getCompositionTextRuns>
 function CaptionPreview({ captionTrack, stylePreset }: { captionTrack: CaptionTrackData; stylePreset: CaptionStylePreset }) {
   const previewSegment = captionTrack.segments[0];
   const override = previewSegment ? captionTrack.segmentStyleOverrides?.[previewSegment.id] : undefined;
-  const resolvedStyle = captionStylePresets.find((preset) => preset.id === override?.stylePresetId) ?? stylePreset;
-  const color = override?.color ?? resolvedStyle.color;
+  const resolvedStyle = findCaptionStylePreset(override?.stylePresetId) ?? stylePreset;
+  const look = captionPresetLook(resolvedStyle);
+  const color = override?.color ?? look.color;
+  // `highlightColor` is deliberately NOT in the envelope — it is a RUN style, not a layer style —
+  // so it is still read off the preset itself. See CaptionStylePreset for why that is a boundary
+  // rather than an omission.
   const highlightColor = override?.highlightColor ?? resolvedStyle.highlightColor;
-  const fontSize = override?.fontSize ?? resolvedStyle.fontSize;
+  const fontSize = override?.fontSize ?? look.fontSize;
 
   return (
     <div className="caption-preview-frame">
@@ -2814,9 +2832,9 @@ function CaptionPreview({ captionTrack, stylePreset }: { captionTrack: CaptionTr
         className="caption-preview-text"
         style={{
           color,
-          fontFamily: resolvedStyle.fontFamily,
-          fontSize: `${Math.max(28, fontSize * 0.46)}px`,
-          WebkitTextStroke: resolvedStyle.strokeWidth ? `${Math.max(1, resolvedStyle.strokeWidth * 0.35)}px ${resolvedStyle.strokeColor}` : undefined
+          fontFamily: look.fontFamily,
+          fontSize: `${Math.max(28, (fontSize ?? 0) * 0.46)}px`,
+          WebkitTextStroke: look.strokeWidth ? `${Math.max(1, look.strokeWidth * 0.35)}px ${look.strokeColor}` : undefined
         }}
       >
         {previewSegment ? renderHighlightedCaptionText(previewSegment.text, captionTrack.highlightedWords, highlightColor) : "Upload or paste transcript"}

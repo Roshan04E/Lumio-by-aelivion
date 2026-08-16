@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   applyCaptionTrackToComposition,
+  captionPresetLook,
   captionStylePresets,
   createAutoCaptionAssistantPlan,
   createCaptionInterchangeArtifact,
@@ -56,7 +57,9 @@ assert.equal(
   "NewDrop",
   "Highlighted words should be reflected as bold text runs, not uppercased."
 );
-assert.equal(captionLayers[0]?.fontFamily, style.fontFamily, "Caption fixture should use render-safe preset font.");
+// ADR-023 S6 (final): the preset's look is in its envelope, so the expected font is READ through
+// the same accessor the renderer uses rather than off the preset struct that no longer has it.
+assert.equal(captionLayers[0]?.fontFamily, captionPresetLook(style).fontFamily, "Caption fixture should use render-safe preset font.");
 // Captions auto-size to their text now (width 0 = max-content) with adjustable background padding,
 // instead of a forced fixed-width box. A constrained width is only present when the user opts into one.
 assert.ok((captionLayers[0]?.textWidthPercent ?? 0) >= 0, "Caption layers should expose a text width value.");
