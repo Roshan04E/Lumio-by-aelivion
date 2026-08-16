@@ -28,7 +28,7 @@ S5b `fillTexture` presetable + an editor   SHIPPED 2026-08-15; decomposed, no ne
 S6  caption + text preset library         SHIPPED 2026-08-15; OQ8 closed; 18 first-party looks
 S7  the text matte (tier 2) + matte ops + warp rework   half B (warp) SHIPPED 2026-08-15;
                                                           half A gated on the OQ1 spike
-S8  SVG: multi-stroke + path text
+S8  SVG: multi-stroke + path text          SHIPPED 2026-08-16; D8 amended — multi-stroke needed no SVG
 S9  per-character + variable-axis animation
 ```
 
@@ -888,6 +888,56 @@ detail at high local magnification.
 **Watch:** this is a second rendering surface for text, so every style property in S5 needs a
 defined behaviour on it (or an explicit "not available in path mode" in the schema). The schema
 from S4 is what makes that expressible rather than a pile of runtime conditionals.
+
+### SHIPPED 2026-08-16, in two commits — and the stage's own premise was RE-TESTED first, and failed
+
+**D8 said SVG was needed for two things. It is needed for one.** The premise probe
+(`apps/worker/tmp/s8-premise-probe.mjs`, `543b302`) ran before any S8 code, and concentric
+multi-strokes turned out to be native on both surfaces that ship a picture: the canvas raster strokes
+widest-first then fills, and the DOM overlay stacks copies of the same browser-shaped text. Both
+reproduce SVG's own band profile at the authored widths. **A second surface for that half would have
+bought a second surface and nothing else.** See the D8 amendment in the ADR — the plan is not the
+place that decision lives.
+
+**Half one — the concentric ring** (`dd74511`): `strokeOuterColor` + `strokeOuterWidth`, two fields
+for the reason the gradient is three (a list of independently-coloured strokes is the frozen `list`
+kind; a third ring is **not** approximated). Three refusals, resolved in one place: no width, no
+inner stroke to ring, or a ring no wider than what it surrounds — each byte-identical to no ring.
+One copy list died: the inner stroke's hand-rolled `slice(String(num(s)).length + 3)` became
+`parseTextStroke`, shared by both rings.
+
+**Half two — text on a path** (`3f02248`): `textPathCurve`, one number, so it is emitted and
+therefore keyed like every other look rather than becoming a second `textWarp`-shaped special case.
+The SVG surface carries its own fonts as data URIs and **refuses to draw** when it cannot (T-21).
+What a curve cannot carry is declared in `textPathUnsupported`, not dropped quietly.
+
+**Two findings worth carrying out of this stage:**
+
+1. **"Warp wins over a curve" was declared and not enforced.** Warp rasterizes by recursively calling
+   the ordinary draw, which applied the curve and then deformed it. Caught only because the control
+   was written as an EQUALITY against warp-alone rather than as "the picture differs" — a difference
+   assertion would have passed on the composed geometry (T-15 addendum 3, again, and this time in a
+   control rather than in a subject).
+2. **Two constants were replaced by measurements before they could ship.** The arc's ink box used
+   0.8/0.2 of the font size for ascent/descent; it reads the face's own metrics now, because the ink
+   box is what centres the run and a guess there makes the text JUMP the instant a user drags the
+   curve off zero.
+
+**Evidence:** `render:baseline` 85/85 unchanged at zero tolerance across the full unbatched sweep,
+twice (once per commit); `multi-stroke` and `path-text` at 0.000% parity, captured and then
+re-checked from a cold browser so their determinism is measured rather than assumed;
+`text:s5-falsifier` gains eight arms; `textstyle:schema` sweeps 31 fields; `textstyle:golden` 99/99
+with the pre-existing cases differing by exactly the appended key each commit adds, checked
+mechanically; and `apps/worker/tmp/s8-dom-probe.mjs`, which is the S5 lesson taken literally — the
+pixel gate compares the two RASTER consumers, so the DOM overlay is covered by nothing, and the ring
+is an absolutely-positioned copy that would paint straight over the glyphs without the
+`position: relative` lift. It matches the DOM's bands against the AUTHORED look rather than against
+the raster's output, because two implementations checked against each other both pass when both are
+wrong the same way.
+
+**Looked at, not just hashed:** the ring still (white fill, dark inner stroke, yellow ring,
+concentric) and the arc still (glyphs rotated to the tangent, both rings reproduced by the SVG
+surface exactly as the canvas surface draws them).
 
 ---
 

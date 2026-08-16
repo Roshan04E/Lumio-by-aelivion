@@ -324,12 +324,60 @@ In priority order:
 5. **Per-line background pills** — the existing pill is one box around the block; per-line boxes
    (with the CSS box-decoration-break behaviour) is the caption look people actually want.
 
-### D8 — SVG is added for exactly two things CSS cannot do. (Accepted)
+### D8 — SVG is added for exactly two things CSS cannot do. (Accepted — **AMENDED 2026-08-16 (S8): it is ONE thing, not two, and the amendment is measured.**)
 
 **Multiple independent strokes** (concentric outlines of different widths and colours) and
 **text on a path / arc text**. Both are `<text>`/`<textPath>` in SVG, which **still uses browser
 shaping** — so D6 holds. SVG is a second *rendering surface*, not a second *text engine*, and it is
 used only when a style actually needs it. A style that does not is plain DOM.
+
+**AMENDMENT — the multi-stroke half was never true, and nobody had checked.** (S8, `543b302`,
+`apps/worker/tmp/s8-premise-probe.mjs`.) Concentric multi-strokes are NATIVE on both surfaces that
+ship a picture:
+
+- the **canvas raster** strokes widest-first and then fills — canvas centres a stroke on the outline
+  exactly as `-webkit-text-stroke` does, so N rings are N `strokeText` passes, each narrower one
+  covering the inner half of the last;
+- the **DOM overlay** stacks N absolutely-positioned copies of the same browser-shaped text, widest
+  at the back. This is not an approximation of a second stroke; it *is* a second stroke, drawn by the
+  same rasterizer on the same shaped glyphs.
+
+Both reproduce SVG's own band profile — red 12px, green 12px, yellow 12px, then the fill, at the
+authored widths. **A second surface for that half would have bought a second surface and nothing
+else.** The concentric ring therefore ships as `strokeOuterColor`/`strokeOuterWidth` over the
+existing paths (`dd74511`), and SVG is reached for `<textPath>` alone (`3f02248`).
+
+**What survives unamended is the load-bearing half of D8, and S8 confirmed it rather than assuming
+it:** `<textPath>` keeps browser shaping, so D6/T-5 hold. An Arabic run on a straight path measures
+91.64px against flat text's 91.63px, where the same run's isolated-glyph sum is 110.88px — the
+instrument could have seen a different shaper and did not, which is what makes the equality worth
+reading. A curved path makes a 48px run 166px tall, so glyphs really are placed along the geometry.
+
+**T-21 — an SVG text surface carries its own fonts, or it declines to draw.** (S8.) The raster gets
+these pixels by drawing the SVG as an `<img>`, and such a document is ISOLATED: it cannot see the
+page's `@font-face` rules, cannot follow an HTTP or blob URL, and has no network. A pinned face must
+therefore be embedded as a data URI inside the document — proven by rendering two DIFFERENT pinned
+faces and asserting they differ **from each other**, since two faces that both failed to load
+collapse onto one identical fallback (T-15 addendum 3; "it differs from the fallback" would have
+passed with neither face loading). **When the bytes cannot be had, the feature refuses**: the run
+renders straight rather than curved in a substitute face, because a substitution nobody is told
+about is §1's warp-catalogue incident and precisely what D3/T-2 forbid. The resolver is passed as an
+argument (`OverlayStyleOptions.resolveFontFaceCss`), never installed as module state — T-20's rule,
+and the same reason.
+
+**A second surface needs a declared style SUBSET, and "declared" is the obligation.** Not everything
+survives a curve: per-line pills (a path has no line boxes), image texture fill, text shadows and the
+S5 stack, multi-line text, and warp are each unavailable in path mode, listed in
+`scene/text-path.ts`'s `textPathUnsupported` with the reason for each. Approximating any of them
+would put the two surfaces visibly out of step, which is the specific hazard a second surface
+introduces.
+
+**Warp wins over a curve, and that had to be ENFORCED rather than declared.** The rule was true of
+the outer draw and false underneath: warp rasterizes by recursively calling the ordinary draw, which
+applied the curve and *then* deformed it — two geometries composing in an order nobody chose. Caught
+by writing the control as an EQUALITY against warp-alone rather than as "the picture differs". The
+curve is now stripped in the recursion, in **both** homes (top-level field and style bag), which is
+the same both-homes fact recorded in §8b as having cost this file an infinite recursion.
 
 ### D9 — Text emits a matte, and `FlarexMatteValue` widens to admit a raster. (**Accepted** 2026-08-15 — OQ1's spike cleared it; was Provisional)
 
