@@ -25,6 +25,44 @@ Assets -> Timeline -> Project Graph -> Render Manifest -> Renderer Adapter
 
 The render manifest is the product contract. Every renderer should consume deterministic data so preview, export, local render, and cloud render stay aligned.
 
+## Chapter Order (founder call 2026-08-16)
+
+Four chapters, strictly sequential. Do not start a later one because an earlier one is
+tedious; each is a precondition for the next, not merely ahead of it in a queue.
+
+1. **Flarex engine** — CURRENT. Stabilisation, then speed. The lever is composite
+   pass-count reduction (20.9–855.2 ms measured), not caching; ADR-021 §7 says in as many
+   words that the pull seam does not address it. See `project-tracker/` and the ADR-021
+   step-4 remainder.
+2. **Flarex nodes** — each node worked properly, one at a time. The Phase 2 remainder
+   (interpreter / RTT / Text / aiMatte / Tracker / auxInputs) plus whatever the engine work
+   exposes. The engine is a precondition: a node built on an unstable evaluator gets built
+   twice.
+3. **ORIS** — the cognitive layer (`ORIS_ARCHITECTURE.md`, deliberately separate from
+   `ORRERIS_OS.md`: habitat vs inhabitant).
+4. **CLI / agent-drivable surface** — LAST.
+
+### Why the CLI is last, and why it is on the list at all
+
+Diffusion Studio (`diffusionstudio/core` + `editor`, MPL-2.0) shipped this surface first:
+their DAPI CLI has a coding agent write a composition as a SolidJS TSX module, mount it
+into the editor, and render it. It is a real distribution story and we do not have one.
+
+We are not chasing it, for a reason worth writing down. Their composition is a *program*
+that must execute to mean anything. Ours is a `TimelineComposition` — deterministic data
+both renderers already consume, addressable in natural language via `clip-reference.ts`
+ordinals, with the GradeIntent compiler as standing proof that an LLM emitting compact
+intent into a deterministic expander produces real editable output. **The hard half of an
+agent surface already exists here; what is missing is the CLI and the mount loop.** That
+ordering only holds if the thing an agent drives is worth driving, which is chapters 1–3.
+
+Their engine is Canvas 2D compositing over WebCodecs with no colour management stated. We
+are above that ceiling already (GPU transition engine, Rec.709-linear managed grade,
+trustworthy scopes, node compositor). One asymmetry runs the other way and should not be
+forgotten: they have ONE renderer in two modes, so the whole T-9 / `render:compare:pixels`
+parity apparatus is a cost of our Remotion export path, not a virtue. Our discipline makes
+that cost survivable; it does not make it free.
+
 ## Two Usage Paths
 
 Orreris must support two different user realities.
