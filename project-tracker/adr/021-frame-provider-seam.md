@@ -499,20 +499,17 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 >
 > **THE HOST WIRING SHIPS DEFAULT OFF AND IS UNVERIFIED.** `compileFlarexComp` stamps the token,
 > `build-scene-draws` completes it with the layer's identity digest, and `ScenePreviewCanvas` declares
-> the key — all present and reviewable behind `?frameCache=1`. What is not established is whether that
-> key is COMPLETE on a real project, and four generations of `flarex:frame-cache-field` have not
-> settled it. The best-designed one (all sweeps in a single load, the cache toggled at runtime) reports
-> **`attributable = 0` with the cache serving 10/10 — and VOIDS anyway**, because two BYPASSED sweeps
-> seconds apart in the same load disagree at 2 of 6 positions while the host reports `declined = 0`.
+> the key — all present and reviewable behind `?frameCache=1`. Whether that key is COMPLETE on a real
+> project is **not yet measured**: every `flarex:frame-cache-field` reading was taken while C: ran down
+> to zero bytes free, and all of them are VOID (DEBT-024, DEBT-025).
 >
-> **That is a finding about I-P8, not about caching.** "Same `t` → same picture" is the premise a frame
-> cache rests on, and on this path it does not currently hold: the picture at a fixed `t` is not
-> reproducible in the live editor for a Flarex comp on live media, and the settle predicate calls those
-> frames complete. Whether that is a settle predicate that is too EAGER (fixable, and the cache is then
-> sound) or genuine NONDETERMINISM (in which case no re-render oracle can ever verify a frame cache
-> here) is open, and `FIELD_SETTLE_MS` exists to split the two. See **DEBT-024**, which also records the
-> measurement hazard that invalidates the later runs: the machine hit **0 bytes free on C:** during
-> them, silently truncating one probe's output entirely.
+> **In particular, this ADR does NOT record a finding against I-P8.** An earlier draft of this note
+> claimed the picture at a fixed `t` is not reproducible in the live editor. That claim came from runs
+> on a full disk, where a failed cache write, a partial screenshot or a dead decoder all present as
+> "the frame did not reproduce" — indistinguishable from a real renderer result. I-P8 is **untested**
+> here, not falsified. If the same-load probe still shows irreproducibility with disk free, the finding
+> becomes real at that point, and `FIELD_SETTLE_MS` splits converging (settle predicate too eager) from
+> nondeterministic (3b's ceiling set by the media path).
 >
 > **NOT a playback win, and §7 has not moved:** composite 20.9–855.2 ms against decode's 2.8–9.0 ms at
 > every N. A first pass over new ground is all misses. The claim is scrub-back and loop.

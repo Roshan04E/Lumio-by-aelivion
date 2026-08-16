@@ -54,7 +54,14 @@ Iterate narrowed (`render-pixel-comparison.ts:220`, `render-baseline-gate.ts:74`
 
 **The one thing never to batch:** a commit whose claim *is* "nothing else changed" (a legacy/compat path, a refactor asserted byte-neutral). `render:baseline` at zero tolerance is the only instrument that can say so, and folding it in with another change makes a moved byte ambiguous between them - then you pay the full gate again per bisect step, which costs more than the per-commit run you skipped.
 
-**Most lost hours are void runs, not slow runs.** A stray Chrome tree or a leftover vite child from an interrupted run burns a full sweep for nothing. Run `apps/worker/src/browser-preflight.ts` before any gate, and treat the first run in a fresh worktree as a throwaway (see the vite pre-bundle note above).
+**Most lost hours are void runs, not slow runs.** A stray Chrome tree or a leftover vite child from an interrupted run burns a full sweep for nothing. Run `apps/worker/src/browser/browser-preflight.ts` before any gate, and treat the first run in a fresh worktree as a throwaway (see the vite pre-bundle note above).
+
+**CHECK FREE DISK BEFORE ANY BROWSER RUN.** `assertQuietBrowserMachine` now enforces this first (5 GB floor, `GATE_MIN_FREE_DISK_GB` overrides, 0 disables), but know why it is there: on 2026-08-16 a full C: voided a night of field-probe readings and very nearly put a false renderer-nondeterminism finding into the tracker. A full disk does not fail honestly - Chrome cannot write its cache, screenshots come back partial, decoders fail, and what you SEE is "the same frame did not reproduce". The cause is self-inflicted and recurring: every headless launch leaks a browser profile into `%TEMP%` and nothing reaps them (13,813 dirs / 195.8 GB measured, DEBT-025). If a gate refuses on disk, reap those before doing anything clever:
+
+```bash
+# count them first; delete only ones older than a couple of hours so a live run keeps its profile
+powershell -NoProfile -Command "(Get-ChildItem $env:TEMP -Directory -Filter 'puppeteer_dev_chrome_profile*').Count"
+```
 
 ## Architecture
 

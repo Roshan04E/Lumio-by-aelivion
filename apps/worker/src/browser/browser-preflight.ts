@@ -40,10 +40,126 @@
  * also refuses on a live process running THIS gate's own script, excluding this process and its
  * ancestors (the `pnpm`/`tsx` chain that launched it carries the script name in its command line too,
  * and a preflight that fails on its own launcher is worse than no preflight).
+ *
+ * AND IT COUNTS FREE DISK (2026-08-16), which is the same lesson a third time. "The machine is clean"
+ * had meant no stray browser and no stale harness; it now also means the machine can still WRITE. A
+ * full disk is the worst member of this family because it is the quietest: it surfaces as frames that
+ * do not reproduce, which reads as a renderer defect rather than an environment one. See
+ * `assertDiskHeadroom` below for the measured cost.
+ *
+ * THE PATTERN, for whoever adds the fourth. Each entry here was paid for by a run whose OUTPUT LOOKED
+ * LIKE DATA -- negative memory deltas, a 25-minute hang, an irreproducible frame. If a precondition
+ * can only be noticed after the fact by disbelieving a plausible number, it belongs in this file as a
+ * hard refusal, not in a checklist someone reads afterwards.
  */
 import { execSync } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 
 const isWindows = process.platform === "win32";
+
+/**
+ * FREE DISK IS A PRECONDITION (added 2026-08-16, and it cost a night's readings).
+ *
+ * `%LOCALAPPDATA%\Temp` had grown to 239.7 GB across 13,843 directories -- 13,813 of them leaked
+ * `puppeteer_dev_chrome_profile-*` trees at ~14 MB each (195.8 GB measured, oldest 2026-08-09) -- and
+ * C: reached ZERO bytes free. Every reading `flarex:frame-cache-field` took in that state is void.
+ *
+ * WHY THIS IS WORSE THAN A CRASH, and why it belongs next to the process checks above. A full disk
+ * does not announce itself as a disk problem. Chrome cannot write its cache, a screenshot comes back
+ * partial or not at all, a decoder fails, a heredoc dies mid-write -- and what the harness SEES is:
+ * *the picture at a fixed `t` is not reproducible*. That is indistinguishable from a real renderer
+ * nondeterminism finding, and it was very nearly written into the tracker as one (see DEBT-024/025).
+ * The moment the condition became loud enough to notice -- "No space left on device" -- was NOT the
+ * moment it started; it had been silently corrupting runs for an unknown stretch before that.
+ *
+ * So: a browser gate on a full disk must VOID AT STARTUP rather than produce numbers. The existing
+ * preconditions on this file are "no stray browser" and "no stale harness"; the machine being clean
+ * now also means the machine can still WRITE.
+ */
+const DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024 ** 3;
+
+function minFreeDiskBytes(): number {
+  const override = Number(process.env.GATE_MIN_FREE_DISK_GB);
+  return Number.isFinite(override) && override >= 0 ? override * 1024 ** 3 : DEFAULT_MIN_FREE_DISK_BYTES;
+}
+
+/**
+ * Free bytes on the volume holding `target`, or null if it cannot be determined.
+ *
+ * Null means "cannot see", never "full": like `listStaleHarnessProcesses`, a guard that cannot read
+ * the machine must not invent a reason to block work.
+ */
+export function freeDiskBytes(target: string): number | null {
+  try {
+    const resolved = path.resolve(target);
+    if (isWindows) {
+      const root = path.parse(resolved).root.replace(/[\\/]+$/, "");
+      if (!root) return null;
+      const raw = execSync(`powershell -NoProfile -Command "(New-Object System.IO.DriveInfo('${root}')).AvailableFreeSpace"`, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      const bytes = Number(raw);
+      return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+    }
+    const raw = execSync(`df -Pk ${JSON.stringify(resolved)}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const line = raw.split(/\r?\n/)[1];
+    if (!line) return null;
+    const availableKb = Number(line.trim().split(/\s+/)[3]);
+    return Number.isFinite(availableKb) ? availableKb * 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
+const gb = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+
+/**
+ * Refuse to run when either volume a browser gate writes to is below the floor.
+ *
+ * BOTH volumes are checked because the writes are split: the browser's profile, its cache and its
+ * crash dumps go to the TEMP volume (that is where the 195.8 GB of leaked profiles accumulated),
+ * while screenshots, fixture output and the vite dep cache go to the REPO volume. On this machine
+ * they are both C:, but the check must not assume that -- a gate is just as void when the drive it
+ * writes screenshots to is the full one.
+ *
+ * Exported separately from `assertQuietBrowserMachine` so a measurement ladder can re-assert it
+ * between rungs: a long ladder can EXHAUST the disk partway through, and the rungs after that point
+ * are void while the rungs before are fine. That is the same reason `assertZeroBrowserFloor` exists.
+ */
+export function assertDiskHeadroom(label: string): void {
+  const floor = minFreeDiskBytes();
+  if (floor <= 0) return;
+  const volumes = [
+    { what: "temp (browser profiles, caches, crash dumps)", dir: os.tmpdir() },
+    { what: "repo (screenshots, fixture output, vite cache)", dir: process.cwd() },
+  ];
+  const seen = new Map<string, { what: string; dir: string; free: number }>();
+  for (const volume of volumes) {
+    const free = freeDiskBytes(volume.dir);
+    if (free == null) continue;
+    const key = isWindows ? path.parse(path.resolve(volume.dir)).root.toUpperCase() : volume.dir;
+    const prior = seen.get(key);
+    // Same volume reached by two paths -> keep one row, but name both roles in the message.
+    if (prior) prior.what = `${prior.what} + ${volume.what}`;
+    else seen.set(key, { what: volume.what, dir: volume.dir, free });
+  }
+  const starved = [...seen.values()].filter((v) => v.free < floor);
+  if (!starved.length) return;
+  throw new Error(
+    `${label}: REFUSING TO RUN — only ${starved.map((v) => gb(v.free)).join(" / ")} free, below the ${gb(floor)} floor.\n` +
+      starved.map((v) => `    ${gb(v.free)} free on ${path.parse(path.resolve(v.dir)).root} — ${v.what}`).join("\n") +
+      `\n  A full disk does NOT fail honestly. Chrome cannot write its cache, screenshots come back partial, ` +
+      `decoders fail — and what a gate reports is "the same frame did not reproduce", which is ` +
+      `indistinguishable from a real renderer finding (measured 2026-08-16: a night of field-probe readings ` +
+      `voided, and an I-P8 nondeterminism conclusion nearly written into the tracker as fact — DEBT-024/025).\n` +
+      `  Likeliest cause here: leaked headless-browser profiles. Every launch leaves one and nothing reaps them ` +
+      `(measured: 13,813 puppeteer_dev_chrome_profile-* dirs, 195.8 GB, oldest 7 days).\n` +
+      `  Check:  powershell -NoProfile -Command "(Get-ChildItem $env:TEMP -Directory -Filter 'puppeteer_dev_chrome_profile*').Count"\n` +
+      `  Floor is overridable for a genuinely small job: GATE_MIN_FREE_DISK_GB=2 (0 disables).`
+  );
+}
 
 /** Automation markers. A real user-launched Chrome carries none of these. */
 const AUTOMATION_MARKERS = ["--remote-debugging-port", "--enable-automation", "--headless", "--disable-blink-features=AutomationControlled"];
@@ -246,6 +362,10 @@ export function assertQuietBrowserMachine(options: BrowserPreflightOptions): voi
   if (preflightDone) return;
   preflightDone = true;
   const { label, reap = false, scriptMarker } = options;
+  // FIRST, before any process check. It is the cheapest of the three, and it is the one that makes
+  // the other two's numbers lie: a stray-browser count read off a machine that cannot write is not
+  // wrong so much as meaningless. Refusing here also refuses before the gate spends minutes on vite.
+  assertDiskHeadroom(label);
   if (scriptMarker) {
     const stale = listStaleHarnessProcesses(scriptMarker);
     if (stale.length) {

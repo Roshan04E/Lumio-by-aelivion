@@ -3053,37 +3053,37 @@ sides genuinely differ when the defect is present. A pixel oracle over a pixel-i
 green light with nothing behind it — the same class as v34a's never-deleted diagnostic row, and the
 same cost if believed.
 
-**Second instrument, four generations, still no verdict — and that is the honest outcome.**
-`flarex:frame-cache-field` asks the question the gate cannot: does the SHIPPED HOST declare the right
-key on a real project.
+**Second instrument: four generations, and NO VERDICT — every reading is VOID.**
+`flarex:frame-cache-field` asks what the mechanism gate cannot: does the SHIPPED HOST declare the
+right key on a real project. It has not answered, and the readings must not be quoted as if it had.
 
-- Gen 1, cross-load, no control: called every cache-on/cache-off difference a stale serve. Two page
-  loads of a video editor are not a controlled comparison.
-- Gen 2, cross-load + a control arm (cache off, twice) as a noise floor. Still red.
-- Gen 3, + a warm-up arm (ARM A had been running FIRST, against cold proxies and decoders, while the
-  floor was measured between the two later warmer loads). One green, then a red whose noise floor was
-  5 of 6 positions forward and 6 of 6 backward. Cross-load noise measured anywhere from 0 to 6 of 6.
-- Gen 4, SAME-LOAD — the cache toggled at runtime, all five sweeps seconds apart over the same warmed
-  decoders. `attributable = 0`, cache served 10/10, **and it voided anyway**: two BYPASSED sweeps in
-  one load differed at 2 of 6 positions with the host reporting `declined = 0`.
+**All of it was measured while C: ran down to ZERO bytes free** (195.8 GB of leaked headless-browser
+profiles — see architectural-debt DEBT-025). Void, and specifically not to be repeated as facts about
+the renderer: run 1's apparent stale serve; the 0-to-6-of-6 cross-load noise floor; the same-load
+2-of-6 bypass disagreement; and the conclusion drawn from it that **I-P8 does not hold in the live
+editor**.
 
-**The finding is about I-P8, not about caching.** The picture at a fixed `t` is not reproducible in
-the live editor for a Flarex comp on live media, and the settle predicate calls those frames complete.
-"Same t -> same picture" is the premise a frame cache rests on. Whether the predicate is merely too
-EAGER (fixable) or the path is genuinely NONDETERMINISTIC (in which case no re-render oracle can
-verify a frame cache here) is open; `FIELD_SETTLE_MS` splits them.
+**A full disk is the most dangerous environment fault this tracker has recorded, because of HOW it
+presents.** Chrome cannot write its cache, a screenshot comes back partial, a decoder fails — and what
+the harness observes is *the picture at a fixed `t` did not reproduce*. That is indistinguishable by
+inspection from a real renderer finding. The moment it became visible ("No space left on device") was
+not the moment it began, so nothing in the window can be rescued by arguing it looked fine at the time.
 
-**Two generalisable rules.**
+**What survives is the instrument design, and it is worth keeping.** Gens 1-3 compared cache-on and
+cache-off across separate page LOADS, with ARM A running first against cold proxies and decoders; gen
+4 replaced that with runtime bypass (`__rfFrameCacheBypass`), five sweeps inside ONE load over warmed
+decoders, and a noise floor treated as a **precondition that VOIDs** rather than a quantity to
+subtract. Re-run that instrument on a clean machine; do not rebuild it.
+
+**Two design rules, independent of any reading:**
 1. A differential instrument's arms must differ in EXACTLY the variable under test. Order-of-execution
-   is a variable; so is warmth. The tell that gens 1-3 were chasing confounds rather than a defect was
-   in the numbers: each fix made the result *less* red without making it green. A defect does not
-   shrink when you improve the control.
+   is a variable; so is warmth.
 2. **A noise floor is a PRECONDITION, not a subtraction.** Gen 3 printed `ok` on a pass whose floor was
    6 of 6 — every position unstable, so "no divergence above the floor" was arithmetically guaranteed.
-   Gen 4 voids instead. If the oracle is not reproducible, the run has no verdict to give.
 
-**And a measurement hazard worth its own line: the machine hit 0 bytes free on C: during gen 4.** It
-truncated a probe's output silently ("grep: write error"; one run lost entirely) and browser gates
-write profiles, screenshots and vite caches continuously. Every number from gens 3-4 was taken at or
-near zero free space and should be re-taken before being believed. Check free space before trusting a
-browser gate — it belongs on the measurement-preconditions list next to a quiet browser machine.
+**And the durable output, which outlives the cache question: FREE DISK IS NOW A HARD PRECONDITION.**
+`assertDiskHeadroom` in `apps/worker/src/browser/browser-preflight.ts` refuses at startup below a 5 GB
+floor (`GATE_MIN_FREE_DISK_GB` overrides; 0 disables), checking both the temp volume and the repo
+volume, and runs FIRST in `assertQuietBrowserMachine` — ahead of the stray-browser and stale-harness
+checks, because a browser count read off a machine that cannot write is meaningless rather than wrong.
+"The machine is clean" now means: no stray browser, no stale harness, **and it can still write.**

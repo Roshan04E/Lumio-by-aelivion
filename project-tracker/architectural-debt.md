@@ -3840,54 +3840,47 @@ conservative invalidation for a stale one.
 
 ---
 
-### DEBT-024 — the ADR-021 3b HOST wiring is UNVERIFIED, and the reason is the instrument, not the cache
+### DEBT-024 — ADR-021 3b's host wiring is UNVERIFIED, and every field reading taken so far is VOID
 
 **Open 2026-08-16.** The 3b host wiring ships **DEFAULT OFF** (`getFrameCacheEnabled()` returns false;
-`?frameCache=1` opts in). **Expiry:** when `flarex:frame-cache-field` returns a non-VOID verdict.
+`?frameCache=1` opts in). **Expiry:** when `flarex:frame-cache-field` returns a non-VOID verdict on a
+machine with free disk.
 
 **Not in doubt: the MECHANISM.** `flarex:frame-cache-gate` is green on every arm and provably
 falsifiable — `FRAME_CACHE_SABOTAGE=drop-t` gives 16 failures, `drop-graph` 2. That gate hosts its own
-experiment and has no load-to-load axis, so nothing below touches it.
+experiment, has no load-to-load axis, and writes nothing large. Nothing below touches it.
 
-**What is unverified is whether the SHIPPED HOST declares the right key**, and four instrument
-generations have not settled it.
+**VOID, AND NOT TO BE CITED AS FACTS ABOUT THE RENDERER.** Every `flarex:frame-cache-field` reading
+was taken while C: ran down to **zero bytes free** (DEBT-025: 195.8 GB of leaked browser profiles).
+Specifically void, and *not* to be repeated as findings:
+- run 1's apparent **stale serve**;
+- the cross-load noise floor of **0-to-6-of-6**;
+- the same-load **2-of-6** bypass disagreement;
+- and the conclusion drawn from it, that **I-P8 does not hold in the live editor**.
 
-1. **Cross-load, no control.** Compared a cache-on page load against a cache-off one and called every
-   difference a stale serve. Two loads of a video editor are not a controlled comparison.
-2. **Cross-load, control added** (cache off, run twice, as a noise floor). Still red.
-3. **Cross-load, warm-up added** (ARM A had been running FIRST against cold proxies and decoders while
-   the floor was measured between the two later, warmer loads). One green run, then a red one whose
-   noise floor was **5 of 6 positions forward and 6 of 6 backward** — at which point "no divergence
-   above the floor" is a vacuous pass. Measured cross-load noise ranged **0 to 6 of 6**.
-4. **Same-load** (the cache toggled at runtime via `__rfFrameCacheBypass`, all five sweeps seconds
-   apart over the same warmed decoders). The right design, and the most informative result:
-   **`attributable = 0`, cache served 10/10 — and the run still VOIDED**, because two BYPASSED sweeps
-   in one load disagreed at 2 of 6 positions while the host reported `declined = 0`.
+**Why these are facts about a machine, not a renderer.** A full disk does not announce itself. Chrome
+cannot write its cache, a screenshot returns partial or fails, a decoder fails — and what the harness
+observes is *the picture at a fixed `t` did not reproduce*. That is indistinguishable by inspection
+from genuine renderer nondeterminism, which is exactly the conclusion that was nearly recorded here as
+established. The moment the condition became visible (a heredoc failing with "No space left on
+device") was **not** when it began; it had been corrupting runs silently for an unknown stretch before
+that, so no reading in the window can be rescued by arguing it "looked fine".
 
-**The finding, and it is not about caching.** The picture at a fixed `t` is not reproducible in the
-live editor for a Flarex comp on live media, and the settle predicate calls those frames complete.
-**ADR-021's I-P8 — "same `t` → same picture" — is the premise a frame cache rests on, and it does not
-currently hold on this path.** That also re-explains the cross-load noise: not load-to-load variance
-so much as this same instability sampled further apart.
+**What survives, and it is not a measurement.** The instrument REDESIGN stands on its own merits and
+is not in question: runtime bypass via `__rfFrameCacheBypass`, five sweeps inside a single load over
+warmed decoders, and a noise floor treated as a **precondition that VOIDs the run** rather than a
+quantity to subtract. Re-run that instrument; do not rebuild it.
 
-**Two readings remain open, with opposite consequences.** `FIELD_SETTLE_MS` exists to split them:
-- **Still CONVERGING** — a longer settle stabilises it. Then the settle predicate is too eager, the
-  fix belongs there, and the cache is sound once it stops storing early.
-- **Genuinely NONDETERMINISTIC** — no settle stabilises it. Then a frame cache here can never be
-  verified by comparison against a re-render, because re-renders differ from each other, and 3b's
-  ceiling is set by the media path rather than by anything in the cache.
+**The open question is untouched — it was never answered, not even wrongly.** On a machine with disk:
+1. Re-run the same-load probe **three times**.
+2. If the oracle is reproducible, decide the default on that evidence.
+3. If it is **still** not reproducible with disk free, the I-P8 finding is real *then*, and
+   `FIELD_SETTLE_MS` splits the fork already framed: **converging** (a longer settle stabilises it →
+   the settle predicate is too eager, and the fix belongs there) versus **nondeterministic** (no settle
+   does → 3b's ceiling is set by the media path, and no re-render oracle can ever verify a frame cache
+   on this path).
 
-**MEASUREMENT HAZARD, recorded because it invalidates the runs above.** During generation-4 the
-machine reached **0 bytes free on C:**. That is not a background detail: it silently truncated a
-probe's output ("grep: write error", run 2 lost entirely) and browser gates write profiles,
-screenshots and vite caches continuously. **Every number in generation 3 and 4 was taken on a disk at
-or near zero free space and should be re-taken before being believed.** 24 stale Playwright profile
-directories (oldest 2026-08-10) were reclaimed for 0.25 GB — real garbage, but not the cause. The
-remaining ~500 GB is the user's own data and was left alone.
-
-**Do NOT read the VOID as "the cache is broken."** In the only well-designed run, the cache
-introduced zero divergence and served every frame it was asked for. What is missing is a trustworthy
-oracle, and a machine with room to run one.
+**Keep the default OFF until that probe answers on a clean machine.**
 
 ---
 
