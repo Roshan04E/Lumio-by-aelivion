@@ -17,15 +17,24 @@
  * a lookup missed. That is the exact confusion the bug produced — "ten free fonts blamed for a lookup
  * miss" — and it is what this test can prove stays fixed regardless of which way upstream moves.
  *
+ * ALSO asserts the second half of that fix: `font:index-build` must not simply refuse forever while
+ * these ten stay unresolved upstream. Each is on `KNOWN_UNRESOLVED_LICENSES`, dated — this test checks
+ * that acknowledgement actually lets `classifyFamilyLicense` proceed (`failBuild: false`, coded
+ * `UNRESOLVED_LICENSE_CODE`) rather than the build being stuck red on a live upstream gap it cannot
+ * control.
+ *
  * Run: pnpm --filter @orreris/worker font:index-license-test
  */
 import assert from "node:assert/strict";
 import {
   buildLicenseCodeBySlug,
+  classifyFamilyLicense,
+  KNOWN_UNRESOLVED_LICENSES,
   RESTRICTED_FAMILIES,
   RESTRICTED_LICENSE_CODE,
   resolveLicenseCode,
-  TREE_URL
+  TREE_URL,
+  UNRESOLVED_LICENSE_CODE
 } from "./font-index-build";
 
 /**
@@ -86,9 +95,31 @@ async function main(): Promise<void> {
   );
   process.stdout.write(
     stillUnresolved.length
-      ? `${stillUnresolved.length} of 10 still unresolved via google/fonts right now (upstream gap, not this fix's job to paper over): ${stillUnresolved.join(", ")}\n` +
-          `  — correctly reported as UNRESOLVED, not silently RESTRICTED. font:index-build would refuse to write a catalogue while this is true, by design.\n`
+      ? `${stillUnresolved.length} of 10 still unresolved via google/fonts right now (upstream gap, not this fix's job to paper over): ${stillUnresolved.join(", ")}\n`
       : "all 10 now resolve a real licence path — the upstream gap this investigation found has closed.\n"
+  );
+
+  // THE BUILD MUST STILL RUN. Every still-unresolved family must be acknowledged and dated on
+  // KNOWN_UNRESOLVED_LICENSES, and that acknowledgement must actually let classifyFamilyLicense
+  // proceed rather than fail the whole build — the "landmine" this stage's own build failure would be
+  // if the acknowledgement path did not exist.
+  const missingAcknowledgement: string[] = [];
+  const stillFailsBuild: string[] = [];
+  for (const family of stillUnresolved) {
+    if (!KNOWN_UNRESOLVED_LICENSES[family]) missingAcknowledgement.push(family);
+    const outcome = classifyFamilyLicense(family, licenseCodeBySlug);
+    if (outcome.failBuild) stillFailsBuild.push(family);
+    else assert.equal(outcome.code, UNRESOLVED_LICENSE_CODE, `"${family}" is acknowledged-unresolved but did not code as UNRESOLVED_LICENSE_CODE (got "${outcome.code}").`);
+  }
+  assert.equal(
+    missingAcknowledgement.length,
+    0,
+    `still-unresolved but NOT on KNOWN_UNRESOLVED_LICENSES (font:index-build would refuse the whole run): ${missingAcknowledgement.join(", ")}`
+  );
+  assert.equal(
+    stillFailsBuild.length,
+    0,
+    `acknowledged on KNOWN_UNRESOLVED_LICENSES but classifyFamilyLicense still reports failBuild — the acknowledgement path is broken: ${stillFailsBuild.join(", ")}`
   );
 
   // THE HAPPY PATH, unchanged: an ordinary well-known family still resolves normally.
@@ -97,7 +128,10 @@ async function main(): Promise<void> {
     assert.ok(code && code !== RESTRICTED_LICENSE_CODE, `"${family}" — an ordinary, unambiguously-licensed family — failed to resolve a real licence code (got ${code ?? "undefined"}).`);
   }
 
-  process.stdout.write("PASS — the restricted set is exactly {Google Sans, Google Sans Flex}, no properly-licensed family reads as restricted, and the happy path is unchanged.\n");
+  process.stdout.write(
+    "PASS — the restricted set is exactly {Google Sans, Google Sans Flex}, no properly-licensed family reads as restricted, " +
+      "every still-unresolved family is acknowledged and coded UNRESOLVED (font:index-build can complete), and the happy path is unchanged.\n"
+  );
 }
 
 main().catch((error) => {

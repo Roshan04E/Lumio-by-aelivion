@@ -56,6 +56,15 @@ const LEGACY_STACK = `${SHARED_FAMILY_NAME}, sans-serif`;
  * for a reason that had nothing to do with S10). The real D1a claim is narrower — LAYER-level legacy
  * behaviour, untouched — so the control compares LAYER against a single matching RUN, never run
  * count against run count.
+ *
+ * A second confound surfaced the same way: the fixture's default text layer pins a real `FontRef`
+ * (Arimo), so a naive one-run arm that changed only the RUN's `fontFamily` still inherited the LAYER's
+ * pinned weight/style through `baseStyle` (a system run has no opinion on weight/style — S10's own
+ * documented rule) while the layer-only arm explicitly clears the pin. Comparing those two would be
+ * comparing two different layer baselines dressed up as a run-boundary test. `renderWithRuns`'s
+ * `layerBaseFontFamily` parameter fixes this: the one-run arm below clears the layer's own pin to the
+ * SAME family the layer-only arm uses, so the only thing that differs between the two renders is
+ * whether that family arrives via an explicit `textRuns` entry or the implicit single-run fallback.
  */
 async function renderWithLayerFont(text: string, fontFamily: string, label: string): Promise<string> {
   const fixture = createRenderComparisonFixture("scaled-text");
@@ -90,8 +99,22 @@ async function renderWithLayerFont(text: string, fontFamily: string, label: stri
   return createHash("sha256").update(fs.readFileSync(outputLocation)).digest("hex");
 }
 
-/** Render `scaled-text` with its text layer's runs set to two runs, and hash the PNG. */
-async function renderWithRuns(runs: TextRun[], label: string): Promise<string> {
+/**
+ * Render `scaled-text` with its text layer's runs set to two runs, and hash the PNG.
+ *
+ * `layerBaseFontFamily`, when given, ALSO overwrites the layer's OWN `fontFamily`/`fontRef` (clearing
+ * the pin) rather than leaving them at the fixture's default. Needed for the D1a control below: the
+ * fixture's default text layer pins a real `FontRef` (Arimo — see `render-comparison-fixture.ts`), so
+ * a run that only overrides `fontFamily` still falls back to the LAYER's baseStyle for weight/style
+ * (`getCompositionTextRunStyle`'s documented rule — a system run has no opinion on weight/style, by
+ * design), and that baseStyle would silently carry the pinned layer's resolved weight/style. Comparing
+ * that against `renderWithLayerFont` (which explicitly clears the pin) would be comparing two DIFFERENT
+ * layer baselines, not one run boundary — the confound `renderWithLayerFont`'s own doc already warns
+ * about for run COUNT, one layer further up the same trap. Arms A/B below don't need this: every run in
+ * both of THOSE arms carries its own `fontFamily`/`fontRef`, so the layer's baseline stays constant
+ * across the one comparison that matters there and never leaks into the assertion.
+ */
+async function renderWithRuns(runs: TextRun[], label: string, layerBaseFontFamily?: string): Promise<string> {
   const fixture = createRenderComparisonFixture("scaled-text");
   const composition = fixture.graph.composition;
   if (!composition) throw new Error(`Fixture "scaled-text" must include a composition.`);
@@ -106,7 +129,8 @@ async function renderWithRuns(runs: TextRun[], label: string): Promise<string> {
         layers: track.layers.map((layer) => {
           if (layer.type !== "text") return layer;
           textLayersTouched += 1;
-          return { ...layer, text: runs.map((r) => r.text).join(""), textRuns: runs };
+          const layerFontOverride = layerBaseFontFamily !== undefined ? { fontFamily: layerBaseFontFamily, fontRef: undefined } : {};
+          return { ...layer, ...layerFontOverride, text: runs.map((r) => r.text).join(""), textRuns: runs };
         })
       }))
     }
@@ -173,7 +197,7 @@ async function main(): Promise<void> {
   // one-run-vs-two-runs, deliberately: see `renderWithLayerFont`'s doc for why a run-COUNT change is
   // the wrong control (it reintroduces a kerning confound this arm is not asking about).
   const layerFont = await renderWithLayerFont("LEGACY", LEGACY_STACK, "layer-font-legacy");
-  const oneRunFont = await renderWithRuns([{ text: "LEGACY", fontFamily: LEGACY_STACK }], "one-run-legacy");
+  const oneRunFont = await renderWithRuns([{ text: "LEGACY", fontFamily: LEGACY_STACK }], "one-run-legacy", LEGACY_STACK);
   process.stdout.write(`layer-font=${layerFont.slice(0, 12)}  one-run-font=${oneRunFont.slice(0, 12)}\n`);
   assert.equal(
     layerFont,

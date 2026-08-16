@@ -71,6 +71,43 @@ const LICENSE_PATHS: Record<string, string> = {
 export const RESTRICTED_LICENSE_CODE = "x";
 export const RESTRICTED_FAMILIES = new Set(["Google Sans", "Google Sans Flex"]);
 
+/**
+ * The code for a family this run could not resolve a licence for, and which is not on
+ * `RESTRICTED_FAMILIES` either — an ACKNOWLEDGED gap, not a verified permanent answer.
+ *
+ * Distinct from `RESTRICTED_LICENSE_CODE` on purpose: "restricted" is a checked, permanent fact about
+ * the family. This code means "the lookup missed, a human has seen that and written the date down,
+ * and the catalogue is choosing to ship anyway rather than block on a live upstream repo." The picker
+ * must treat it as unpickable-for-now (see `entry.unresolved` in `font-index.ts` / `FontPicker.tsx`),
+ * never silently offered — that offerable-but-unpickable gap is the same surface-reports-the-symptom
+ * defect this stage exists to remove, one layer down.
+ */
+export const UNRESOLVED_LICENSE_CODE = "?";
+
+/**
+ * Families a human has SEEN unresolved and chosen to ship anyway, dated. This is an ACKNOWLEDGEMENT,
+ * never a mute button: `main()` below still fails the whole build for any family that is unresolved
+ * and NOT on this list. Being on this list only changes the row's code from "refuse to write the
+ * catalogue" to "write it, flagged `unresolved: true`, and let the picker say so."
+ *
+ * Re-check periodically — a family here that starts resolving normally should be REMOVED (main() logs
+ * when that happens, but does not fail the build over it; removing a stale entry is housekeeping, not
+ * urgency). Dated 2026-08-16 investigation: `google/fonts`'s live tree had no licence file reachable at
+ * these ten families' expected path, despite each declaring `license: "OFL"` in its own METADATA.pb.
+ */
+export const KNOWN_UNRESOLVED_LICENSES: Record<string, string> = {
+  Tinos: "2026-08-16",
+  "M PLUS Rounded 1c": "2026-08-16",
+  "Kumar One Outline": "2026-08-16",
+  "Playwrite NZ Basic Guides": "2026-08-16",
+  "Edu NSW ACT Cursive": "2026-08-16",
+  "Edu SA Hand": "2026-08-16",
+  "Edu VIC WA NT Hand Pre": "2026-08-16",
+  "Edu NSW ACT Hand Pre": "2026-08-16",
+  "Edu VIC WA NT Hand": "2026-08-16",
+  "Edu QLD Hand": "2026-08-16"
+};
+
 interface GoogleFamily {
   family: string;
   category: string;
@@ -123,6 +160,18 @@ export function resolveLicenseCode(familyName: string, licenseCodeBySlug: Readon
   return licenseCodeBySlug.get(familySlug(familyName)) ?? (RESTRICTED_FAMILIES.has(familyName) ? RESTRICTED_LICENSE_CODE : undefined);
 }
 
+/**
+ * The full three-way outcome `main()` writes into a row, and what `font-index-license-test.ts`
+ * exercises directly — the whole "unresolved must never become a silent blank OR a silent restriction"
+ * claim lives in this one function, network calls aside.
+ */
+export function classifyFamilyLicense(familyName: string, licenseCodeBySlug: ReadonlyMap<string, string>): { code: string; failBuild: boolean } {
+  const resolved = resolveLicenseCode(familyName, licenseCodeBySlug);
+  if (resolved !== undefined) return { code: resolved, failBuild: false };
+  if (KNOWN_UNRESOLVED_LICENSES[familyName]) return { code: UNRESOLVED_LICENSE_CODE, failBuild: false };
+  return { code: "", failBuild: true };
+}
+
 async function main(): Promise<void> {
   const response = await fetch(METADATA_URL);
   if (!response.ok) throw new Error(`metadata fetch failed: ${response.status}`);
@@ -169,9 +218,13 @@ async function main(): Promise<void> {
     return code;
   };
 
-  /** Families that expected a licence (not on `RESTRICTED_FAMILIES`) and found none. See the
-   *  exhaustiveness check right after `lines` below. */
+  /** Families that expected a licence (not on `RESTRICTED_FAMILIES`, not on
+   *  `KNOWN_UNRESOLVED_LICENSES`) and found none. See the exhaustiveness check right after `lines`
+   *  below. */
   const unresolvedLicenses: string[] = [];
+  /** Families ON `KNOWN_UNRESOLVED_LICENSES` that resolved fine this run — the acknowledgement is
+   *  stale and should be removed (housekeeping, not a build failure). */
+  const staleAcknowledgements: string[] = [];
 
   const lines = usable.map((family) => {
     // Google keys faces as "400" / "400i". Kept verbatim: the decoder reads the trailing "i" as
@@ -191,20 +244,25 @@ async function main(): Promise<void> {
     // needs escaping is a signal the format is wrong, not a case to paper over.
     if (/[|`\n]|\$\{/.test(family.family)) throw new Error(`family name is not safe for the index format: ${family.family}`);
     /**
-     * A code from THREE sources, in order, and an empty string is no longer one of them:
+     * A code from FOUR sources, in order, and an empty string is no longer one of them:
      *  1. A real licence file found in `google/fonts` — the common case.
      *  2. `RESTRICTED_LICENSE_CODE` — this family is on the manually-verified "genuinely has none"
-     *     list, checked by hand, not inferred.
-     *  3. Neither — collected into `unresolvedLicenses` below rather than emitted as `""`. An empty
+     *     list, checked by hand, not inferred. A permanent fact.
+     *  3. `UNRESOLVED_LICENSE_CODE` — the lookup missed, but a human has SEEN that and dated it on
+     *     `KNOWN_UNRESOLVED_LICENSES`. The catalogue ships this family flagged `unresolved: true`
+     *     rather than blocking on a live upstream repo; the picker keeps it visible-but-unpickable
+     *     with a stated reason (D3), never silently offered.
+     *  4. Neither — collected into `unresolvedLicenses` below rather than emitted as `""`. An empty
      *     field here used to mean "no licence file in google/fonts", read downstream as a licence
      *     FACT (`fontIndex()`'s own doc: "the mirror falls back to the name table"); it was actually
      *     just as often "the lookup missed" — ten free, properly-licensed families came back this
      *     way, and a silent miss reads exactly like the two that are genuinely unlicensed. See
      *     `main`'s exhaustiveness check for what happens to this list.
      */
-    const license = resolveLicenseCode(family.family, licenseCodeBySlug);
-    if (license === undefined) unresolvedLicenses.push(family.family);
-    return `${family.family}|${CATEGORY_CODE[family.category]}|${faces}|${subsets}|${license ?? ""}`;
+    const outcome = classifyFamilyLicense(family.family, licenseCodeBySlug);
+    if (outcome.failBuild) unresolvedLicenses.push(family.family);
+    else if (outcome.code !== UNRESOLVED_LICENSE_CODE && KNOWN_UNRESOLVED_LICENSES[family.family]) staleAcknowledgements.push(family.family);
+    return `${family.family}|${CATEGORY_CODE[family.category]}|${faces}|${subsets}|${outcome.code}`;
   });
 
   /**
@@ -221,15 +279,24 @@ async function main(): Promise<void> {
   if (unresolvedLicenses.length) {
     throw new Error(
       `${unresolvedLicenses.length} famil${unresolvedLicenses.length === 1 ? "y" : "ies"} expected a licence and none was found ` +
-        `(not in google/fonts, not on RESTRICTED_FAMILIES): ${unresolvedLicenses.join(", ")}. ` +
-        `Either google/fonts genuinely lacks this family's licence file right now (check by hand, then ` +
-        `re-run once it lands — this is a live upstream repo and this can be transient), or it belongs on ` +
-        `RESTRICTED_FAMILIES if it is verified proprietary. Never widen this into a silent empty field.`
+        `(not in google/fonts, not on RESTRICTED_FAMILIES, not acknowledged on KNOWN_UNRESOLVED_LICENSES): ${unresolvedLicenses.join(", ")}. ` +
+        `This is not a mute-and-move-on situation. Check each by hand, then either: (a) if google/fonts genuinely ` +
+        `lacks the licence file right now, add the family to KNOWN_UNRESOLVED_LICENSES with today's date so the ` +
+        `build can proceed with it flagged unresolved-but-visible, or (b) if it is verified proprietary with no ` +
+        `public licence at all, add it to RESTRICTED_FAMILIES. Never widen this into a silent empty field.`
+    );
+  }
+
+  if (staleAcknowledgements.length) {
+    console.log(
+      `${staleAcknowledgements.length} famil${staleAcknowledgements.length === 1 ? "y" : "ies"} on KNOWN_UNRESOLVED_LICENSES resolved a real ` +
+        `licence this run and no longer need the acknowledgement — remove from the list: ${staleAcknowledgements.join(", ")}`
     );
   }
 
   const faceCount = usable.reduce((total, family) => total + Object.keys(family.fonts).length, 0);
   const restrictedCount = lines.filter((line) => line.endsWith(`|${RESTRICTED_LICENSE_CODE}`)).length;
+  const unresolvedCount = lines.filter((line) => line.endsWith(`|${UNRESOLVED_LICENSE_CODE}`)).length;
 
   const source = `/**
  * ADR-023 S2.6 — GENERATED. Do not edit by hand.
@@ -246,10 +313,13 @@ async function main(): Promise<void> {
  * One line per family, in POPULARITY order — the order is the default sort and costs nothing to
  * store. Fields: family|category|faces|subsets|licence, where category is one of s/f/d/h/m, faces
  * are Google's own keys ("400", "700i"), subsets are indices into FONT_INDEX_SUBSETS, and licence is
- * either a key of FONT_INDEX_LICENSE_PATHS, or "${RESTRICTED_LICENSE_CODE}" for a family verified to
- * have no public licence at all (Google-proprietary — see RESTRICTED_FAMILIES in
- * font-index-build.ts). NEVER empty: a family this build could not resolve either way fails the
- * whole run rather than shipping a blank that reads as a licence fact — ${restrictedCount} famil${restrictedCount === 1 ? "y is" : "ies are"} restricted this run.
+ * either a key of FONT_INDEX_LICENSE_PATHS, "${RESTRICTED_LICENSE_CODE}" for a family verified to have
+ * no public licence at all (Google-proprietary — see RESTRICTED_FAMILIES in font-index-build.ts), or
+ * "${UNRESOLVED_LICENSE_CODE}" for a family a human has acknowledged and dated on
+ * KNOWN_UNRESOLVED_LICENSES (the lookup missed, shipped anyway, flagged unresolved). NEVER empty: a
+ * family this build could not resolve AND could not find acknowledged fails the whole run rather than
+ * shipping a blank that reads as a licence fact — ${restrictedCount} famil${restrictedCount === 1 ? "y is" : "ies are"} restricted,
+ * ${unresolvedCount} famil${unresolvedCount === 1 ? "y is" : "ies are"} unresolved-but-acknowledged, this run.
  */
 export const FONT_INDEX_SUBSETS: readonly string[] = ${JSON.stringify(subsetTable, null, 0).replace(/","/g, '", "')};
 

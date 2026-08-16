@@ -520,14 +520,21 @@ export function FontPicker({
                     data-font-family={entry.family}
                     data-preview-ready={ready ? "true" : "false"}
                     data-pin-state={pin?.status ?? ""}
+                    disabled={entry.unresolved}
+                    aria-disabled={entry.unresolved}
                     title={
                       pin?.status === "failed"
                         ? pin.message
                         : entry.restricted
                           ? "Restricted use — Google has published no redistribution licence for this family, so it can never be mirrored."
-                          : entry.subsets.join(", ")
+                          : entry.unresolved
+                            ? "Licence check pending — this family's licence could not be located in the last catalogue refresh. Try again after the next refresh."
+                            : entry.subsets.join(", ")
                     }
-                    onClick={() => void choose(entry.family)}
+                    onClick={() => {
+                      if (entry.unresolved) return;
+                      void choose(entry.family);
+                    }}
                   >
                     <span
                       className="font-picker-sample"
@@ -538,9 +545,11 @@ export function FontPicker({
                       {ready ? previewSample(entry.subsets, script) : "·"}
                     </span>
                     <span className="font-picker-name">{entry.family}</span>
-                    {/* ADR-023 S10.5. `restricted` is a PERMANENT answer (font-index.ts's own doc) —
-                        said here, before a click, rather than only after the mirror refuses. "No
-                        licence" reads as a gap the catalogue might close later; this family never will. */}
+                    {/* ADR-023 S10.5/S10.6. `restricted` is a PERMANENT answer (font-index.ts's own
+                        doc) — said here, before a click, rather than only after the mirror refuses.
+                        "No licence" reads as a gap the catalogue might close later; this family never
+                        will. `unresolved` is the opposite shape: NOT permanent, said here so the row
+                        never sits offerable-but-unpickable — the click is disabled above. */}
                     <span className="font-picker-meta">
                       {pin?.status === "resolving"
                         ? "adding…"
@@ -548,9 +557,11 @@ export function FontPicker({
                           ? pinFailureMeta(pin.message)
                           : entry.restricted
                             ? "restricted"
-                            : row.bundled
-                              ? "bundled"
-                              : entry.category}
+                            : entry.unresolved
+                              ? "licence pending"
+                              : row.bundled
+                                ? "bundled"
+                                : entry.category}
                     </span>
                     {selected ? <Check size={13} aria-hidden="true" /> : null}
                   </button>

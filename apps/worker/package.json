@@ -27,6 +27,7 @@
     "text:s5-falsifier": "tsx src/text-s5-falsifier.ts",
     "font:ref-falsifier": "tsx src/font-ref-falsifier.ts",
     "font:run-ref-falsifier": "tsx src/font-run-ref-falsifier.ts",
+    "font:paste-sanitization-probe": "tsx src/font-ref-paste-sanitization-probe.ts",
     "font:ingest-test": "tsx src/font-ingest-test.ts",
     "font:mirror-test": "tsx src/font-mirror-test.ts",
     "font:install-gate": "tsx src/font-install-gate.ts",

@@ -50,6 +50,13 @@ export interface FontIndexFace {
  */
 const RESTRICTED_LICENSE_CODE = "x";
 
+/**
+ * ADR-023 S10.6 — the licence code for a family a human has acknowledged and DATED as unresolved
+ * (`KNOWN_UNRESOLVED_LICENSES` in `font-index-build.ts`), as opposed to `RESTRICTED_LICENSE_CODE`'s
+ * verified-permanent answer. Must match that file's copy of the same constant.
+ */
+const UNRESOLVED_LICENSE_CODE = "?";
+
 export interface FontIndexFamily {
   family: string;
   category: FontIndexCategory;
@@ -75,6 +82,14 @@ export interface FontIndexFamily {
    * than showing the same "unavailable" a transient mirror failure would.
    */
   restricted: boolean;
+  /**
+   * True for a family the index generator could not find a licence for THIS RUN, but which a human
+   * has seen and dated on `KNOWN_UNRESOLVED_LICENSES` rather than blocking the whole catalogue on a
+   * live upstream gap. Not permanent like `restricted` — a future regeneration may clear it. The
+   * picker must still treat it as unpickable-for-now with a stated reason: offering it and letting the
+   * mirror fail on click is the same surface-reports-the-symptom defect this stage removed elsewhere.
+   */
+  unresolved: boolean;
 }
 
 /** The `google/fonts` directory name for a family. Must match the generator's derivation. */
@@ -108,9 +123,10 @@ export function fontIndex(): readonly FontIndexFamily[] {
       .map((code) => FONT_INDEX_SUBSETS[Number(code)])
       .filter((name): name is string => Boolean(name));
     const restricted = licenseCode === RESTRICTED_LICENSE_CODE;
-    const licenseTemplate = licenseCode ? FONT_INDEX_LICENSE_PATHS[licenseCode] : undefined;
+    const unresolved = licenseCode === UNRESOLVED_LICENSE_CODE;
+    const licenseTemplate = licenseCode && !unresolved ? FONT_INDEX_LICENSE_PATHS[licenseCode] : undefined;
     const licensePath = licenseTemplate?.replace("%", fontFamilySlug(family));
-    if (faces.length) families.push({ family, category, faces, subsets, licensePath, restricted });
+    if (faces.length) families.push({ family, category, faces, subsets, licensePath, restricted, unresolved });
   }
   decoded = families;
   return decoded;
