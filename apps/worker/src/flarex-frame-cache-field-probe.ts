@@ -103,6 +103,8 @@ interface Sample {
   stop: string;
   hash: string;
   time: number | null;
+  /** Per-draw served source times for this composite, folded to one string. `null` = the host did not publish. */
+  served: string | null;
 }
 
 async function rulerGeometry(page: Page): Promise<{ y: number; left: number; width: number } | null> {
@@ -190,7 +192,16 @@ async function sweep(page: Page, rulerY: number): Promise<Sample[]> {
     await page.mouse.click(stop.x, rulerY);
     await page.waitForTimeout(SETTLE_MS);
     const time = await page.evaluate(() => (window as unknown as { __rfClock?: { committed: number } }).__rfClock?.committed ?? null);
-    out.push({ stop: stop.label, hash: await shotHash(page), time });
+    // WHICH MOMENT the pixels are of, read in the SAME evaluate-then-screenshot order as `time` and
+    // before the screenshot, so all three describe one composite rather than three adjacent ones.
+    // Folded to a single string because the comparison is "did this stop serve the same material
+    // twice", not per-layer arithmetic; `-` is a draw that cannot say, which is not the same as 0.
+    const served = await page.evaluate(() => {
+      const fc = (window as unknown as { __rfFrameCache?: { served?: { id: string; served: number | null }[] } }).__rfFrameCache;
+      if (!fc?.served) return null;
+      return fc.served.map((s) => `${s.id}@${s.served == null ? "-" : s.served.toFixed(4)}`).join(" ");
+    });
+    out.push({ stop: stop.label, hash: await shotHash(page), time, served });
   }
   return out;
 }
@@ -368,6 +379,23 @@ async function main(): Promise<void> {
   // one — a single unstable position there is not tolerable noise, it is an unexplained result, and
   // accepting one would re-create in miniature exactly the vacuous pass this precondition exists to
   // prevent. The media arm allows 1 because its instability is the QUESTION it is asking.
+  // WHY the oracle is unstable, whenever it is — the whole point of ADR-021 4b's served-time fact.
+  //
+  // Two BYPASSED sweeps disagreeing at a position has two causes with opposite owners. Either the
+  // renderer is nondeterministic given identical input (which would be a real renderer defect and is
+  // what DEBT-027 was originally read as), or the DECODER handed the second sweep a different source
+  // moment for the same request — in which case the two renders had different input and agreeing was
+  // never on the table. Printed BEFORE the void below, because when the run is about to void this is
+  // the only line that says which of the two it voided on.
+  for (let i = 0; i < b.length; i++) {
+    if (b[i]!.hash === c[i]!.hash) continue;
+    const same = b[i]!.served !== null && b[i]!.served === c[i]!.served;
+    console.log(
+      `      ${b[i]!.stop}: two fresh renders differ and the served moment ${same ? "DID NOT move" : "MOVED"}` +
+        (b[i]!.served === null ? " (host published no served times — cannot attribute)" : `\n        B ${b[i]!.served}\n        C ${c[i]!.served}`),
+    );
+  }
+
   const noiseBudget = mode === "media" ? 1 : 0;
   if (noise.length > noiseBudget) {
     console.error(

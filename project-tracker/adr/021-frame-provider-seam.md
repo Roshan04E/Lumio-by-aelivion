@@ -606,6 +606,50 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > `build-scene-draws.ts` stashed, the same arm reads `eligible=false` with `blockedBy` naming the
 > shape layer and 0 hits.
 
+> **THE SERVED-SOURCE-TIME FACT — SHIPPED 2026-08-16, AND IT CORRECTS THE 4b BLOCKER RECORDED ABOVE.**
+>
+> The scoping note says "there is no third option available today, because the decode path does not
+> report WHICH source time the frame it served actually is". **That is wrong, and it was wrong when
+> written.** The decode path has reported it since ADR-012 S4.2: `ScenePreviewMediaSnapshot`
+> `.servedSourceTime` reaches `SceneTextureSource.servedTime` (`scene-compositor.ts`), whose own doc
+> says the thing in as many words — "the producer already knows this, and the grade stage threw it
+> away, because a texture was modelled as pixels rather than as pixels-at-a-moment".
+>
+> What was actually missing is one hop further up, and it is the same mistake one layer higher: the
+> **DRAW** threw it away. `buildLayerPreFlarexDraw`'s media branch read `.version` off the texture and
+> not `.servedTime`, so every consumer downstream of the scene build — the frame cache's key, any
+> probe, any oracle — was reasoning about media with no access to a fact the object in its hand was
+> already carrying. Fixed by carrying it: `SceneLayerDraw.servedTime`, spread so that "cannot say"
+> stays ABSENT rather than becoming `undefined`, plus the same carry on the comp-proxy draw (T7's "a
+> proxy is a source; it carries a time", the half that was still missing at the draw level).
+>
+> The second correction is narrower but matters for anyone reading the blocker: the wall clock is the
+> **legacy** path's value, not the default path's. `sourceVersion` prefers
+> `(mediaSource as SceneTextureSource).version` — a real S6.2 content version — whenever the source is
+> a same-context texture, which the single-context path (default since 2026-07-07) always produces.
+> `getTexImageSourceProducerInfo(...).updatedAt` is the fallback for uploaded canvases only.
+>
+> **USED TWICE, AS SCOPED, AND ONLY ONE OF THE TWO CLOSED.**
+>
+> *Use one — DEBT-027 is now attributable, and the answer is not what the debt assumed.* Published as
+> `__rfFrameCache.served` beside `targetTime`, the field probe prints, for every position where two
+> bypassed renders disagree, whether the served moment MOVED. Over live footage it moves at five of
+> six: sweep B tracks the request exactly (`5.0000` for t=5.000 … `16.1000` for t=16.100) while sweep C
+> pins at `4.9333` and then reports `-`. **The renderer is deterministic given its input; the decoder
+> stopped supplying.** DEBT-027's "a decode whose output differs between two seeks to the same t" is
+> falsified — it is a supply failure, which is why no settle length ever converged.
+>
+> *Use two — 4b is viable and still not acceptable, and the distinction is the point.* `served ==
+> requested` to four decimals whenever supply works, so a media token folding `servedTime` would HIT
+> across two visits to one `t` rather than being a term that can never repeat. That answers the
+> question the wall clock could not. **The token is still not written**, because accepting it requires
+> a gate on the media fixture and that fixture VOIDS on supply — and shipping a cache-key term with no
+> arm that can accept it is the one thing 3b's whole gate order was arranged against. 4b is now
+> blocked on DEBT-027's decoder, not on a missing fact, which is a different and much smaller problem.
+>
+> Green: shared + web + worker typecheck; `FIELD_FIXTURE=deterministic` unchanged and green (the carry
+> is inert where nothing decodes, as designed).
+
 **Not in the sequence, and newly ordered ahead of the all-intra proxy by §3.3:** reducing the cost
 and the frequency of decoder resets. Provider-local (§4.2), needs no seam change, and worth more
 than the transcode it was assumed to require.

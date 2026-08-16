@@ -4023,8 +4023,11 @@ typecheck, `render:compare:pixels`.
 
 ### DEBT-027 — the picture at a fixed `t` does not reproduce over the live media path
 
-**Open 2026-08-16.** **Status:** registered, deliberately NOT being chased. **Expiry:** when a
-`FIELD_FIXTURE=media` run reaches a zero noise floor three times running, or when the cause is named.
+**Open 2026-08-16.** **Status:** **CAUSE NAMED the same day — it is DECODER SUPPLY, not renderer
+nondeterminism.** See the update at the end of this entry. Still not being chased from here.
+**Expiry:** when a `FIELD_FIXTURE=media` run reaches a zero noise floor three times running.
+**Header updated 2026-08-16:** Status was "registered, deliberately NOT being chased", and the Expiry
+clause "or when the cause is named" is now discharged. (`README.md`, "State fields vs. history.")
 
 **The finding.** `flarex:frame-cache-field` renders the same six playhead positions twice in one page
 load, with the frame cache bypassed on both sweeps, over a Flarex comp on real footage. Two such
@@ -4059,6 +4062,43 @@ implicates. That it improves but does not converge says there are (at least) two
 predicate can see and one it cannot. The obvious suspect for the second is a decode whose output
 differs between two seeks to the same `t` (GOP position, reset timing — the ~34 ms reset cost of
 ADR-021 §3.3 and OQ1 is the same subsystem). **Do not chase it from the frame-cache side.**
+
+**UPDATE 2026-08-16 — the cause is named, and it took a fact rather than a longer wait.**
+
+The suspicion above was right about the subsystem and wrong about the shape. It is not "a decode whose
+output differs between two seeks to the same `t`". **It is a decoder that stops supplying altogether
+partway through a sweep**, which is a coarser and much more visible failure than the one being looked
+for — and it was invisible only because nothing downstream of the grade published WHICH MOMENT the
+pixels were of. ADR-021 4b's served-time carry (`SceneLayerDraw.servedTime`, published per draw as
+`__rfFrameCache.served`) makes the probe print it, and the two bypassed sweeps separate immediately:
+
+```
+stop    B (fresh)                    C (fresh)
+0.248   media_1@5.0000               media_1@4.9333
+0.387   media_1@7.8000               media_1@4.9333
+0.526   media_1@10.6000              media_1@4.9333
+0.665   media_1@13.3000              media_1@-          <- no served time at all
+0.804   media_1@16.1000              media_1@-
+```
+
+Two readings fall out, and the second is the more useful one:
+
+1. **The renderer is exonerated.** In sweep B the served moment tracks the request EXACTLY at every
+   stop — 5.0000 for t=5.000, 7.8000 for t=7.800, 16.1000 for t=16.100. Given its input the renderer
+   is deterministic and on time. Sweep C's pictures differ because its INPUT differed: the source
+   pinned at 4.9333 and then lost its frame entirely. Two renders of different material were never
+   going to agree, and every settle-length in the table above was waiting for something that had
+   already stopped arriving.
+2. **`served == requested`, to four decimals, whenever supply works.** That is the fact ADR-021 4b's
+   media content token needs — a token folding `servedTime` would HIT across two visits to one `t`,
+   rather than being a term that can never repeat. 4b is viable in principle and still not
+   acceptable, because its gate would have to run on this fixture and this fixture voids.
+
+**So the remaining question is narrower and belongs to the decoder**: what makes a source stop
+supplying during a repeated scrub sweep in the same page load, and why does it report `-` (no served
+time) rather than an error. `awaitReason` / `elementTime` / `wcBusy` are already on the snapshot and
+already published to `__rfSourceMap`; the next session on this can read them at the failing stop
+without building anything. **Still not the frame cache's, and still not to be chased from that side.**
 
 ---
 

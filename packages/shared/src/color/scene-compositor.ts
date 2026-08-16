@@ -320,6 +320,23 @@ export interface SceneLayerDraw {
    * and a frame containing such a draw is not cacheable.
    */
   flarexContentToken?: string | undefined;
+  /**
+   * The media time these pixels ACTUALLY represent, carried up from `SceneTextureSource.servedTime`
+   * (ADR-012 T5) onto the draw. TRANSPORT AND DIAGNOSIS ONLY: the renderer never reads it.
+   *
+   * The producer has known this since S4.2 and the DRAW threw it away, which is a smaller version of
+   * the same mistake S4.2 fixed one layer down — a texture was modelled as pixels rather than as
+   * pixels-at-a-moment, and here a draw was. Two things need it and neither could ask: a re-render
+   * oracle over live footage cannot tell "the frame cache served a stale picture" from "the decoder
+   * served a different moment" without it (DEBT-027), and a media content token cannot be written at
+   * all, because `sourceVersion` answers "have these pixels changed" and a cache key needs "WHICH
+   * moment are these pixels of".
+   *
+   * Optional on the same terms as everything else in this family: absent means THIS PATH CANNOT SAY —
+   * honest for a still, a raster, or an export source with no decoder behind it — and absent is never
+   * "assume it is current".
+   */
+  servedTime?: ServedTime | undefined;
 
   /**
    * Element-box half-extents in comp px (unscaled). Media's element IS the comp, so omit it (defaults

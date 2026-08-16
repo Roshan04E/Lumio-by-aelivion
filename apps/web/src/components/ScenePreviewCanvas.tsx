@@ -1854,6 +1854,22 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
           eligible: frameCacheRequest !== undefined,
           draws: draws.length,
           blockedBy: frameCacheBlocker,
+          // ADR-021 4b / DEBT-027. `targetTime` is the moment ASKED FOR; `served` is the moment each
+          // draw's pixels are OF. Published per composite as a pair because the interesting reading is
+          // the DIFFERENCE, and separating them across two globals is how a probe ends up comparing a
+          // served time to the wrong request. `null` = this draw cannot say (a raster, a still, an
+          // uploaded canvas) and is not the same claim as 0.
+          //
+          // This is the fact a re-render oracle over live footage was missing. "The same t gave a
+          // different picture" has two causes with opposite owners — the cache served something stale,
+          // or the DECODER served a different moment for the same request — and until now nothing
+          // downstream of the grade could tell them apart, so I-P8 could be observed and never
+          // attributed. Reading `served` across two visits to one `t` splits it in one comparison.
+          targetTime: t,
+          served: draws.map((draw) => {
+            const d = draw as { debugLayerId?: string; servedTime?: number };
+            return { id: d.debugLayerId ?? "unnamed-draw", served: d.servedTime ?? null };
+          }),
           ...(stats ?? {}),
         };
       }

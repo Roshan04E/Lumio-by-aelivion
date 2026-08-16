@@ -744,6 +744,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       sourceVersion: isSceneTextureSource(mediaSource as never)
         ? (mediaSource as unknown as SceneTextureSource).version
         : getTexImageSourceProducerInfo(mediaSource as unknown as TexImageSource)?.updatedAt,
+      // WHICH MOMENT these pixels are, as distinct from whether they changed (ADR-021 step 4b). The
+      // single-context path (default since 2026-07-07) hands us a `SceneTextureSource` that has
+      // carried `servedTime` since ADR-012 S4.2 and nothing downstream ever read it. Spread rather
+      // than assigned so "cannot say" stays ABSENT under `exactOptionalPropertyTypes` — the uploaded
+      // path genuinely cannot say, and `servedTime: undefined` would be a different claim.
+      ...(isSceneTextureSource(mediaSource as never) && (mediaSource as unknown as SceneTextureSource).servedTime !== undefined
+        ? { servedTime: (mediaSource as unknown as SceneTextureSource).servedTime }
+        : {}),
     };
   };
 
@@ -964,6 +972,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
         blendMode: "normal",
         ...(proxy.sourceVersion === undefined ? {} : { sourceVersion: proxy.sourceVersion }),
+        // T7: "a proxy is a source; it carries a time". The frame has carried one since S4.2 and the
+        // draw dropped it, so the one participant standing in for a whole comp was the one a
+        // per-draw coherence read could not evaluate.
+        ...(proxy.servedTime === undefined ? {} : { servedTime: proxy.servedTime }),
       };
     }
     // Profiler-only: isolate compile-only time from the rest of buildSceneDraws (the gate metric — is the
