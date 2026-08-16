@@ -30,7 +30,7 @@ S7  the text matte (tier 2) + matte ops + warp rework   half B (warp) SHIPPED 20
                                                           half A gated on the OQ1 spike
 S8  SVG: multi-stroke + path text          SHIPPED 2026-08-16; D8 amended — multi-stroke needed no SVG
 S9a STATIC variable axis                  SHIPPED 2026-08-16; OQ2's deferral REVERSED
-S9b ANIMATING the axis                    not started; the trap is per-frame registration COST
+S9b ANIMATING the axis                    MEASURED 2026-08-16, not built; N unestablished at display sizes
 S9  per-character animation                not started; OQ6 ANSWERED, precedence gate written + red
 ```
 
@@ -1019,14 +1019,48 @@ emitted styles, 4 added, **0 changed**) and on `font:axis-falsifier`'s absent-==
 arm, in pixels, both of which completed. Stills read, not just hashed: the 700 is the same Arimo letterform
 with interpolated stems, not a faux-bold smear or a substituted face.
 
-### S9b — ANIMATING the axis. **Not started.**
+### S9b — ANIMATING the axis. **MEASURED 2026-08-16, not built.**
 
-Only after S9a. **The trap is registration cost:** a continuously animated axis wants a face per
-sampled value, and registering `FontFace`s per frame is not free — `collectPinnedFontInstances` turns
-from "a handful" into "one per sampled value". **Quantize to N steps and MEASURE N against visible
-banding** rather than picking a number. If the cost makes continuous animation impractical, saying so
-with the number is a real answer. S9a deliberately ships the axis rows WITHOUT keyframe wiring, so
-this half cannot arrive by accident.
+`apps/worker/tmp/s9b-axis-cost-probe.mjs`.
+
+**The trap did not fire.** The scope's fear was that a continuously animated axis wants a face per
+sampled value and that registering `FontFace`s is expensive. Measured:
+
+| N | instanced | per face | plain (no axis) | overhead |
+|---|---|---|---|---|
+| 8 | 49 ms | 6.2 ms | 73 ms | −33% |
+| 32 | 168 ms | 5.2 ms | 143 ms | +17% |
+| 64 | 274 ms | 4.3 ms | 273 ms | +0.3% |
+| 128 | 531 ms | 4.1 ms | 537 ms | −1.1% |
+
+The **control is the finding**: N faces of the same file with NO `variationSettings` cost the same.
+**Instancing is free; the cost is parsing the file N times.** So "lower N" is the wrong lever — if
+this ever needs to be cheaper, the lever is not to re-parse. And registration is **one-time per
+instance, not per frame** (aliases are cached), so a 3-second reveal at 30fps quantized to N=32 pays
+~170 ms once and reuses the faces on every frame after. That is practical.
+
+**The banding floor is a CURVE, not a constant**, because a `wght` delta moves a stem in proportion
+to the em:
+
+- **24px → N=32** (step 9.7 wght, worst adjacent edge shift 0.771px). Floor established.
+- **72px → just above N=64** (step 4.8 wght, 1.008px — still a whisker over the one-pixel line).
+- **200px → NOT ESTABLISHED.** Does not converge (7.7px at both N=32 and N=48). The single-scanline
+  instrument meets the typeface's OWN topology changes across the range at that size — features
+  appearing and disappearing — which is not quantization and must not be reported as though it were.
+
+**Why S9b is not built:** its one parameter is unestablished at display sizes, and a title is exactly
+where a variable-weight animation would be used. Picking N now is picking a number that sounds
+reasonable, which is the one thing this stage was scoped to not do. **What it needs next** is a
+multi-scanline (or ink-profile-correlation) instrument robust to topology change, then the 200px
+floor, then the implementation — where the real design question is that
+`collectPinnedFontInstances` must enumerate the instances an animation will VISIT over the layer's
+duration, because the worker installs faces before the first frame.
+
+**Two instrument faults were found and fixed before any number above was believed**, both of the sort
+that produce a confident wrong answer rather than an obvious failure — index-matched edges gave 72px
+a plateau at ~26px that no amount of quantization moved (equal edge COUNTS are not the same features),
+and the first nearest-neighbour radius was so tight that any displacement over 1px reported as
+"unmatched". Written up in the probe's own header.
 
 ---
 
