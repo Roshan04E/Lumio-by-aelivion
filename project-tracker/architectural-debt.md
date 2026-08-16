@@ -3888,3 +3888,39 @@ remaining ~500 GB is the user's own data and was left alone.
 **Do NOT read the VOID as "the cache is broken."** In the only well-designed run, the cache
 introduced zero divergence and served every frame it was asked for. What is missing is a trustworthy
 oracle, and a machine with room to run one.
+
+---
+
+### DEBT-025 — every headless browser launch leaks a Chrome profile directory, and nothing reaps them
+
+**Found 2026-08-16, while a browser gate failed for a reason that had nothing to do with the gate.**
+
+**Status:** open. **Expiry:** when `browser-preflight.ts` reaps stale profile directories as well as
+stale processes, or the launcher passes a user-data-dir it cleans up.
+
+**The measurement.** `%LOCALAPPDATA%\Temp` had grown to **239.7 GB across 13,843 directories** and the
+disk reached **0 bytes free on C:**. Of those, **13,813 are `puppeteer_dev_chrome_profile-*`** —
+oldest 2026-08-09 09:18, newest 2026-08-16 11:24 (i.e. still being created during this session),
+**totalling a measured 195.8 GB** — essentially the entire tail, at ~14 MB each. A further 16.5 GB sits in
+`debt019-profile-120s`, itself a leftover Chrome user-data-dir from a finished investigation, and 24
+`playwright_chromiumdev_profile-*` dirs (0.25 GB) were reaped by hand during this session.
+
+**Why it matters beyond disk.** A full disk does not fail a gate honestly. It **silently truncated a
+probe's output mid-write** (`grep: write error`; one full run lost) while every other part of the run
+looked normal. Browser gates write profiles, screenshots and vite caches continuously, so a run near
+zero free space produces numbers that look like measurements and are not. Generations 3–4 of
+`flarex:frame-cache-field` were taken in that state and are marked for re-taking in DEBT-024.
+
+**This is the disk half of a hazard the repo already knows.** `browser-preflight.ts` exists because
+leftover browser PROCESSES corrupt gates, and the memory note about stray Chrome trees says the same.
+Nobody was watching the directories those processes leave behind. One launch leaks one profile; a week
+of gate runs leaks fourteen thousand.
+
+**The fix has two halves, and the second is the one that lasts:**
+1. Reap stale `puppeteer_dev_chrome_profile-*` / `playwright_*` / named user-data-dirs in
+   `browser-preflight.ts`, on the same age filter it already uses for processes.
+2. Better, have the launch sites pass an explicit user-data-dir under the repo's own scratch and delete
+   it on exit, so the garbage is owned rather than merely swept.
+
+**Add free disk space to the measurement preconditions.** Alongside "prove the subsystem ran", "prove
+the flag applied" and "prove the machine is clean", there is now "prove the machine can still write".
