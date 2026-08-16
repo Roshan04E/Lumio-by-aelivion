@@ -953,12 +953,19 @@ class FrameProfiler {
     }
     // Also stash the latest report for headless inspection (window.__flarexProfile).
     try {
+      const rttByLabel: Counters = {};
+      for (const label of this.rttTransient) rttByLabel[label] = (rttByLabel[label] ?? 0) + 1;
       (globalThis as { __flarexProfile?: unknown }).__flarexProfile = {
         frame: this.frameNo,
         gpuMs,
         cpuMs,
         counters: { ...this.counters },
         timers: { ...this.timers },
+        // Structured attribution (2026-08-17, composite pass-count measurement) — the printed report
+        // already renders both of these as text; a headless caller needs them as data instead of
+        // parsing lines back out of `report`. Same source, same numbers, no new instrumentation.
+        drawByScope: { ...this.drawByScope },
+        rttByLabel,
         snapshot: snap,
         report: body,
       };
