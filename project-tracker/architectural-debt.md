@@ -3639,7 +3639,11 @@ mechanism that produced two bugs in two slices is still in place and still silen
 
 ### DEBT-021 — the un-retimed pending soft-degrade regressed, and its guard is a known-flaky fixture's only backstop
 
-- Status: **open**, unowned, and NOT attributable to the text programme
+- Status: **RESOLVED 2026-08-16 — there was no regression.** The behaviour was DELETED ON PURPOSE by
+  `366860c` (S7.2 5/n) under I-27, and the assertion outlived it. Bisected; see the closing update at
+  the end of this entry, which also falsifies the `flarex-generators` inheritance below.
+- **Header updated 2026-08-16:** Status was "open, unowned, and NOT attributable to the text
+  programme". (`README.md`, "State fields vs. history.")
 - Registered: 2026-08-14, by the auditor, on a report from the ADR-023 S4b session
 - Symptom: `pnpm --filter @orreris/shared flarex:test` fails one assertion at HEAD —
 
@@ -3676,6 +3680,48 @@ mechanism that produced two bugs in two slices is still in place and still silen
   test that runs in seconds, so the bisect is cheap — which is the opposite of the usual situation
   here and is the reason to do it before the next full sweep rather than after a flaky failure sends
   someone hunting.
+
+**CLOSED 2026-08-16 — bisected. The guard did not break; the BEHAVIOUR was deleted, on purpose, and
+the assertion was left behind.**
+
+The instruction above was followed exactly and it was the right instruction: 8 arms, seconds each,
+grepping for the assertion by NAME rather than trusting the suite's exit code — necessary, because
+other assertions in the range fail for unrelated reasons and older commits predate this one, so an
+exit code would have mixed three different answers together.
+
+```
+first bad commit  366860c  refactor(kernel): S7.2 (5/n) — one coherence mechanism, and the
+                           fallback that hid the race is gone
+```
+
+That commit's own message says what it did: *"The host-clip substitution for `pending`. I-27 forbids
+resolving scarcity by showing ANOTHER source's content, and only `pending` does that. Now refused
+unconditionally; `allowHostSubstitution` is gone from the compiler's surface and from
+`build-scene-draws`, so no caller can ask for the old behaviour."* The neighbouring cases still pass
+because they were never in scope — `null` means "no loader owns this node", a different answer that
+correctly keeps the Phase-1 degrade.
+
+So the assertion had been asserting the exact thing an accepted invariant forbids, for twelve days,
+and reading as a regression the whole time. **Repaired by INVERTING it to S7.2's own claim** ("an
+UN-retimed unready loader is refused too — nobody can opt out of I-27"), which is what conformance
+note I-34 in that commit already says in prose. `flarex:test` is now green in full.
+
+**THE `flarex-generators` INHERITANCE IS FALSIFIED, and that half mattered more than the assertion.**
+This entry argued, from `flarex.test.ts`'s own comment, that the guard was that fixture's parity
+backstop and that its breakage PREDICTED pixel failures there. The prediction appeared to land — the
+fixture began failing reproducibly at 0.691%. It was tested rather than believed:
+
+| arm | `flarex-generators` |
+| --- | --- |
+| `15d615b`, parent of the deletion | 0.000% |
+| `366860c`, the deletion itself | 0.000% |
+
+The deletion moves that fixture by nothing. A separate 9-arm bisect puts the pixel failure at
+`fe4f77c` (2026-08-15, the pinned-font await), three weeks later and in a different programme —
+`project-tracker/infrastructure.md` v8. **Two symptoms, two causes, and the plausible story joining
+them was wrong.** Worth keeping as a pattern: a comment recording *why* an assertion was added is
+evidence about the past, not a live causal claim, and this one had already been made obsolete by a
+commit nobody connected to it.
 
 ### DEBT-022 — a weaker cache key sits ABOVE the correct one and short-circuits it, so a keyframe edit does not invalidate
 
