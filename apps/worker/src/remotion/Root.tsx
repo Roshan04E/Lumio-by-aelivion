@@ -107,7 +107,9 @@ function TimelineComposition({ manifest, fonts }: { manifest: RenderManifest; fo
   return (
     <>
       <InstallFonts fonts={fonts ?? []} />
-      <SceneStage manifest={manifest} />
+      {/* ADR-023 S8: the installed faces travel on to the scene too. `InstallFonts` above puts them
+          in THIS document; a path-text SVG is a different, isolated one and needs its own copy. */}
+      <SceneStage manifest={manifest} fonts={fonts ?? []} />
     </>
   );
 }

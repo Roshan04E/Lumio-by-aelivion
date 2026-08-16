@@ -145,6 +145,7 @@ export type RenderComparisonFixtureKey =
   | "per-line-pill"
   | "shadow-stack"
   | "multi-stroke"
+  | "path-text"
   | "flarex-key-glow"
   | "flarex-curves"
   | "flarex-keyframed-blur"
@@ -238,6 +239,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "per-line-pill",
   "shadow-stack",
   "multi-stroke",
+  "path-text",
   "flarex-key-glow",
   "flarex-curves",
   "flarex-keyframed-blur",
@@ -1543,6 +1545,8 @@ interface FixtureVariant {
   /** S8 (ADR-023 D8): the concentric outer ring. Undefined everywhere else, so the keys are omitted
    *  and every pre-S8 fixture stays byte-identical. */
   textOuterStroke?: { color: string; width: number };
+  /** S8 (ADR-023 D8): the arc curve. Undefined everywhere else, so pre-S8 fixtures are untouched. */
+  textPathCurve?: number;
   /** ADR-023 D9a — the warp field applied to the text layer. */
   textWarp?: { style: string; bend: number; distortH?: number; distortV?: number };
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
@@ -1901,6 +1905,25 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         textStrokePaintOrder: "under",
         textOuterStroke: { color: "#f5d90a", width: 44 }
       };
+    case "path-text":
+      /**
+       * S8 (ADR-023 D8). A rainbow arc at curve 55 — enough bend that the end glyphs are visibly
+       * rotated rather than merely raised, which is what separates "text on a path" from "text that
+       * has been moved". Carries both rings so the fixture also pins that the SVG surface reproduces
+       * the concentric construction the canvas surface does; that is the one thing a second surface
+       * is most likely to get subtly different, and no other fixture would catch it.
+       */
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 150,
+        textStrokeWidth: 8,
+        textStrokePaintOrder: "under",
+        textOuterStroke: { color: "#f5d90a", width: 26 },
+        textContent: "CURVED",
+        textPathCurve: 55
+      };
     case "media-opacity":
       return { effects: [], fit: "cover", mediaOpacity: 50 };
     case "graded-text":
@@ -2258,6 +2281,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
       variant.textPerLinePill ||
       variant.textShadowStack ||
       variant.textOuterStroke ||
+      variant.textPathCurve !== undefined ||
       variant.textWarp
   );
   const textFixtureLayer: TimelineLayer = {
@@ -2309,6 +2333,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
           ...(variant.textFillGradient.angle === undefined ? {} : { fillGradientAngle: variant.textFillGradient.angle })
         }
       : {}),
+    ...(variant.textPathCurve === undefined ? {} : { textPathCurve: variant.textPathCurve }),
     // S8 (ADR-023 D8) — the concentric outer ring, spread conditionally for the same reason.
     ...(variant.textOuterStroke
       ? { strokeOuterColor: variant.textOuterStroke.color, strokeOuterWidth: variant.textOuterStroke.width }

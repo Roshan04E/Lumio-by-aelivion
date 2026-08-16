@@ -97,6 +97,7 @@ import {
   demoteMediaSources,
   suppressMediaSources,
   type ProjectGraph,
+  hasTextPathCurve,
   normalizeProjectColorSettings,
   toOuterStrokeRunStyle,
   type SourceAsset,
@@ -113,7 +114,7 @@ import { WebglColorView } from "./WebglColorView";
 import { WebglVideoOverlay } from "./WebglVideoOverlay";
 import { WebglMediaLayer, requestLiveReprime } from "./WebglMediaLayer";
 import { ProxyPlaybackLayer, type ProxyPlaybackHit } from "./ProxyPlaybackLayer";
-import { fontInstallState, fontInstallVersion, installCompositionFonts, subscribeFontInstalls } from "../lib/font-install";
+import { fontInstallState, fontInstallVersion, installCompositionFonts, resolveFontFaceCss, subscribeFontInstalls } from "../lib/font-install";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { getGlGovernorEnabled, getRegionPassesEnabled, getSingleCtxPreviewEnabled, useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
 import type { SceneMediaSink, ScenePreviewMediaSource } from "./scene-media-source";
@@ -6631,6 +6632,8 @@ function resolvePosterUrl(asset: SourceAsset | undefined) {
  * React's model would need an imperative redraw on every one of them. A data URL is a value, so it
  * follows the same rules as every other piece of derived state here.
  */
+const overlayStyleOptions = { resolveFontFaceCss };
+
 function useWarpedTextImage(
   layer: TimelineLayer,
   currentTime: number,
@@ -6638,7 +6641,14 @@ function useWarpedTextImage(
   compHeight: number
 ): { url: string; width: number; height: number } | null {
   const isText = layer.type === "text";
-  const warpActive = isText && hasTextWarp(layer.textWarp);
+  /**
+   * ADR-023 S8: an arc is drawn by the same shared `drawTextLayer` and arrives as the same kind of
+   * picture the DOM cannot express, so it rides this hook rather than getting a second one. Reusing
+   * the seam is the point — a curved-text image built somewhere else would be a second place that
+   * has to remember the measure, the margin, the dpr and the font wait.
+   */
+  const curveActive = isText && hasTextPathCurve(getCompositionTextStyle(layer, { currentTimeSeconds: currentTime }).textPathCurve as number | undefined);
+  const warpActive = isText && (hasTextWarp(layer.textWarp) || curveActive);
   const style = isText ? getCompositionTextStyle(layer, { currentTimeSeconds: currentTime }) : null;
   const runs = isText ? getVisibleTextRuns(layer, currentTime) : [];
   // Everything the DEFORMED picture depends on. The style object is keyed whole rather than by named
@@ -6669,9 +6679,9 @@ function useWarpedTextImage(
       try {
         const probe = document.createElement("canvas").getContext("2d");
         if (!probe) return;
-        const box = measureOverlayBox(probe, current, t, compWidth, compHeight);
+        const box = measureOverlayBox(probe, current, t, compWidth, compHeight, overlayStyleOptions);
         if (box.boxW <= 0 || box.boxH <= 0) return;
-        const margin = overlayOverhangMargin(current, t, compWidth, compHeight);
+        const margin = overlayOverhangMargin(current, t, compWidth, compHeight, overlayStyleOptions);
         const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
         const cssW = box.boxW + 2 * margin;
         const cssH = box.boxH + 2 * margin;
@@ -6684,8 +6694,8 @@ function useWarpedTextImage(
         // metrics is wrong in a way no later repaint can fix, because the deformation was fitted to
         // the wrong box. The raster path awaits this inside `rasterize`; the DOM path has no
         // rasterizer to do it for it, so it awaits here, on its own consumption path.
-        await ensureOverlayFonts(current, t);
-        await drawTextLayer(ctx, current, t, compWidth, compHeight, "box", dpr);
+        await ensureOverlayFonts(current, t, overlayStyleOptions);
+        await drawTextLayer(ctx, current, t, compWidth, compHeight, "box", dpr, overlayStyleOptions);
         if (cancelled) return;
         setImage({ url: canvas.toDataURL("image/png"), width: cssW, height: cssH });
       } catch {

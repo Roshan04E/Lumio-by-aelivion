@@ -64,6 +64,7 @@ import {
   type ResourceHandle,
   type ColorEffectLight,
 } from "@orreris/shared";
+import { resolveFontFaceCss } from "../lib/font-install";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { KERNEL_FLAGS, readKernelFlag } from "../playback/kernel-flags";
 import { flarexTraceEnabled, traceFlarexChange } from "../playback/flarex-trace";
@@ -1017,7 +1018,10 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       });
       matteCacheRef.current = new SceneMaskMatteCache(width, height);
       // A late async raster (text/font) re-arms the settle window so it lands on screen even when idle.
-      rasterizerRef.current = new SceneTextRasterizer(requestDraw, { resolveAssetUrl });
+      // ADR-023 S8: `resolveFontFaceCss` embeds a pinned face's BYTES in a path-text SVG. An SVG
+      // drawn as an image is an isolated document and cannot see this page's `document.fonts`, so
+      // without it a curved run would render in a fallback — the silent substitution D3 forbids.
+      rasterizerRef.current = new SceneTextRasterizer(requestDraw, { resolveAssetUrl, resolveFontFaceCss });
       // Repaint the current frame after a (re)build — including a recovery rebuild (recoveryTick), so a paused
       // preview immediately shows the restored GPU scene instead of a blank canvas until the next input change.
       requestDraw();

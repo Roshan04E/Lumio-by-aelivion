@@ -70,6 +70,7 @@ import {
   type TransitionSpec,
   type TransitionWindowSides,
 } from "@orreris/shared";
+import { resolveFontFaceCss } from "../lib/font-install";
 import { getExportSingleContext, getRegionPassesEnabled } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
 import { clipSourceKey, graphicSourceKey, type FrameProvider } from "./source-decoder";
@@ -198,7 +199,11 @@ export class SceneFrameCompositor {
     this.matteCache = new SceneMaskMatteCache(this.width, this.height);
     // No `onReady` callback: the export AWAITS `rasterizer.ensure()` per frame, so there's no draw loop to
     // re-arm (unlike the editor's fire-and-forget `get()`).
-    this.rasterizer = new SceneTextRasterizer(undefined, { resolveAssetUrl: options?.resolveAssetUrl });
+    // ADR-023 S8 — see ScenePreviewCanvas: a path-text SVG carries its own faces or declines to draw.
+    this.rasterizer = new SceneTextRasterizer(undefined, {
+      resolveAssetUrl: options?.resolveAssetUrl,
+      resolveFontFaceCss
+    });
     this.nestedGroups = options?.nestedGroups;
     this.rawJunctionLayers = options?.rawJunctionLayers ?? [];
     this.flarexComps = options?.flarexComps;

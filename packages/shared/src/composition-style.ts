@@ -63,6 +63,7 @@ export interface CompositionLayerStyleInput {
   strokePaintOrder?: "over" | "under" | undefined;
   strokeOuterColor?: string | undefined;
   strokeOuterWidth?: number | undefined;
+  textPathCurve?: number | undefined;
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
   fillGradientAngle?: number | undefined;
@@ -780,6 +781,11 @@ export interface ResolvedTextStyle {
    */
   outerStroke: { width: number; color: string } | undefined;
   /**
+   * ADR-023 D8 (S8). The arc curve, or 0 for straight. Resolved (and animated) here so the raster and
+   * the DOM overlay read one answer, exactly as `direction` and `paintOrder` are.
+   */
+  textPathCurve: number;
+  /**
    * ADR-023 S5. The two-stop glyph gradient, or ABSENT — and absent is the state a half-authored
    * gradient collapses to, so "one stop set" can never emit a one-colour gradient that reads as a
    * broken fill. Resolution is where that rule lives, not emission, because the raster and the DOM
@@ -851,6 +857,12 @@ export function resolveTextStyle(
     // ADR-023 D8 (S8). The second ring, or nothing — the gradient's both-or-nothing posture applied
     // to a second axis, and for the same reason: an unfinished edit reads as the look before it.
     outerStroke: resolveOuterStroke(layer, style, options),
+    // ADR-023 D8 (S8). Below the minimum the arc is indistinguishable from a line and its radius
+    // explodes, so it resolves to 0 — one place, not two renderers each picking a threshold.
+    textPathCurve: (() => {
+      const raw = animStyleNumber(layer, options, "style.textPathCurve", numberOr(layer.textPathCurve ?? style.textPathCurve, 0));
+      return hasTextPathCurve(raw) ? Math.max(-100, Math.min(100, raw)) : 0;
+    })(),
     // ADR-023 D7 (S5). BOTH stops or nothing — resolved here so the raster and the DOM cannot answer
     // "is there a gradient" differently, and so a half-authored one falls back to the solid fill
     // rather than emitting a one-colour gradient that reads as a bug.
@@ -905,6 +917,18 @@ function resolveFillGradient(
   const angle = layer.fillGradientAngle ?? (style.fillGradientAngle as number | undefined);
   // 180deg — CSS `linear-gradient`'s own default direction (top → bottom).
   return { from, to, angleDeg: typeof angle === "number" && Number.isFinite(angle) ? angle : 180 };
+}
+
+/**
+ * ADR-023 D8 (S8). Below this the arc is indistinguishable from a straight line and its radius
+ * explodes toward infinity, so it is treated as straight. It lives here rather than in
+ * `scene/text-path.ts` because resolution needs it and that module already reads this one — one
+ * threshold, in the file that decides, rather than a second copy on the paint path.
+ */
+export const MIN_TEXT_PATH_CURVE = 1;
+
+export function hasTextPathCurve(curve: number | undefined): boolean {
+  return typeof curve === "number" && Number.isFinite(curve) && Math.abs(curve) >= MIN_TEXT_PATH_CURVE;
 }
 
 /**
@@ -1075,7 +1099,15 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
      * (`s8-premise-probe.mjs`, arms A/B/C). The DOM path builds that copy from this string; the
      * raster parses it. Same colour-last idiom as `WebkitTextStroke`.
      */
-    textOuterStroke: resolved.outerStroke ? `${resolved.outerStroke.width}px ${resolved.outerStroke.color}` : undefined
+    textOuterStroke: resolved.outerStroke ? `${resolved.outerStroke.width}px ${resolved.outerStroke.color}` : undefined,
+    /**
+     * ADR-023 D8 (S8) — the arc curve. A FIFTH non-CSS key, and the last one this stage adds: there
+     * is no CSS for text on a path, so the DOM overlay consumes it the way it consumes warp — as a
+     * raster of the shared draw — while the raster builds an SVG surface from it. In the style object
+     * for the reason all four before it are: this is what `scene-text-raster` keys its cache on, and
+     * a look outside it is a stale raster nothing can see.
+     */
+    textPathCurve: resolved.textPathCurve || undefined
   };
 }
 
@@ -1618,6 +1650,8 @@ export const MANIFEST_LAYER_STYLE_KEYS = [
   // ADR-023 D8 (S8) — the concentric second ring.
   "strokeOuterColor",
   "strokeOuterWidth",
+  // ADR-023 D8 (S8) — text on a path.
+  "textPathCurve",
   // ADR-023 D7 (S5). Same story as `fontRef` above: the exhaustiveness constraint below refused to
   // compile until these five were listed, which is the constraint doing the job T-15 gave it.
   "fillGradientFrom",

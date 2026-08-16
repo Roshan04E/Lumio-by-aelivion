@@ -10,6 +10,7 @@
 export * from "./canvas-2d";
 export * from "./text-shape";
 export * from "./text-warp-deform";
+export * from "./text-path";
 export * from "./scene-mask-matte";
 export * from "./scene-text-raster";
 export * from "./build-scene-draws";

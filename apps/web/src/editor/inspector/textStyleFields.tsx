@@ -323,6 +323,22 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
   put(slotField(ctx, "strokePaintOrder"));
 
   /**
+   * S8 / ADR-023 D8 — text on a path, as one number. Reset clears it rather than writing 0: absent is
+   * the straight-text state (D1a) and 0 is a value that happens to look like it today.
+   */
+  put(
+    styleNumberField(ctx, {
+      key: "textPathCurve",
+      property: "style.textPathCurve",
+      icon: <RotateCw size={14} />,
+      base: layer.textPathCurve ?? 0,
+      ...boundsOf("textPathCurve", { min: -100, max: 100, step: 1 }),
+      onReset: () => onChange((item) => ({ ...item, textPathCurve: undefined })),
+      onWrite: (value) => onChange((item) => ({ ...item, textPathCurve: value }))
+    })
+  );
+
+  /**
    * S8 / ADR-023 D8 — the concentric OUTER ring. Two rows, one per schema field.
    *
    * The same Reset discipline the gradient established, for the same D1a reason: absence is the "no

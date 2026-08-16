@@ -240,6 +240,8 @@ export interface TextStyleFields {
    *  captured before S8 has no key, which keeps meaning "no outer stroke". */
   strokeOuterColor?: string | undefined;
   strokeOuterWidth?: number | undefined;
+  /** See {@link TimelineLayer.textPathCurve}. ADR-023 S8 — text on a path. */
+  textPathCurve?: number | undefined;
   /** See {@link TimelineLayer.fillGradientFrom}. ADR-023 S5 — tier-1 gradient fill. */
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
@@ -937,6 +939,26 @@ export interface TimelineLayer {
    */
   strokeOuterColor?: string | undefined;
   strokeOuterWidth?: number | undefined;
+  /**
+   * ADR-023 D8 (S8) — **text on a path**: the arc/curve control. `-100`…`100`, where the sign is the
+   * bend direction (positive arcs up like a rainbow, negative down) and the magnitude is how much of
+   * a half-circle the run wraps. Absent or under ±1 is straight text, which is every project today.
+   *
+   * **This is the half of D8 that genuinely needs SVG**, and it is a second rendering SURFACE, never
+   * a second text engine (D6/T-5): `<textPath>` shapes the run with the same shaper `fillText` uses
+   * and then places the shaped glyphs along the geometry. Measured — an Arabic run on a straight
+   * path is 91.64px against flat text's 91.63px, where the isolated-glyph sum is 110.88px.
+   *
+   * **A NUMBER, not a composite.** `textWarp` is the last hand-written cache-key special case left in
+   * the product (S5b), and a second composite would be a second one. One number in one existing kind
+   * is emitted like every other look and therefore keyed like every other look.
+   *
+   * **Not everything survives a curve, and what does not is declared** — see `textPathUnsupported`
+   * in `scene/text-path.ts`. Warp wins over a curve when both are set, because warp shipped first.
+   *
+   * **ABSENT MEANS STRAIGHT, permanently and without migration** (D1a).
+   */
+  textPathCurve?: number | undefined;
   /**
    * ADR-023 D7 (S5) — **tier-1 gradient fill for the glyphs**, the CSS `background-clip: text` look.
    *

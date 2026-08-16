@@ -12,6 +12,7 @@
 import type { CompositionStyleOptions } from "../composition-style";
 import { makeCanvas2D } from "./canvas-2d";
 import { drawWarpedRaster, textWarpField, warpOverhang, warpSupersampleScale } from "./text-warp-deform";
+import { buildArcTextSvg, hasTextPathCurve, textPathOverhang } from "./text-path";
 import {
   compositionTextDefaults,
   getCompositionShapeStyle,
@@ -25,6 +26,9 @@ import {
   parseTextStroke,
 } from "../composition-style";
 import { hasTextWarp } from "../text-warp";
+import type { FontRef } from "../fonts";
+import { isPinnedFontRef } from "../fonts";
+import { getCompositionFontRef } from "../composition-style";
 import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
 
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
@@ -38,7 +42,50 @@ type Ctx = (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) & { le
  * one moment and the paint another. Today it carries `resolveAssetUrl` — the asset id → render address
  * step, which `packages/shared` cannot do for itself and must therefore be given.
  */
-export type OverlayStyleOptions = Pick<CompositionStyleOptions, "resolveAssetUrl">;
+export type OverlayStyleOptions = Pick<CompositionStyleOptions, "resolveAssetUrl"> & {
+  /**
+   * ADR-023 D8 (S8) — the `@font-face` rules to embed in a path-text SVG for a PINNED font.
+   *
+   * Supplied by the app, resolved on the draw's own path, exactly as `resolveAssetUrl` is and for the
+   * reason T-20 gives: a resolver passed as an argument fails at the call site, while a module-level
+   * registry fails SILENTLY when nobody installs it — the shape §1 of ADR-023 records as having
+   * shipped empty and rendered every warped layer in Roboto.
+   *
+   * It is needed at all because an SVG drawn as an `<img>` is an isolated document that cannot reach
+   * the page's own faces, its network, or anything else. **Returning `undefined` is a refusal**, and
+   * the arc then declines to draw rather than rendering the run in whatever the fallback is.
+   */
+  resolveFontFaceCss?: ((ref: FontRef) => Promise<string | undefined> | string | undefined) | undefined;
+};
+
+/**
+ * Decode an SVG document into something `drawImage` accepts.
+ *
+ * Two routes because there are two hosts: the main thread and Remotion's page both have `Image`, and
+ * an OffscreenCanvas worker has only `createImageBitmap`. Both are given the SAME bytes, so neither
+ * host can end up with a different picture.
+ */
+async function loadSvgImage(svg: string): Promise<CanvasImageSource | undefined> {
+  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  if (typeof Image !== "undefined") {
+    return new Promise<CanvasImageSource | undefined>((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      // Undefined rather than a throw: a path that cannot be drawn falls back to straight text, which
+      // is visibly not what was asked for. A throw would take the whole layer down with it.
+      img.onerror = () => resolve(undefined);
+      img.src = url;
+    });
+  }
+  if (typeof createImageBitmap === "function" && typeof Blob !== "undefined") {
+    try {
+      return await createImageBitmap(new Blob([svg], { type: "image/svg+xml" }));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
 
 // ─── Font readiness (ADR-023 D3/T-2) ─────────────────────────────────────────────────────────────
 /**
@@ -206,20 +253,34 @@ function fillTexturePaint(ctx: Ctx, style: Record<string, unknown>, boxW: number
  *
  * Null when the layer has no gradient, or the string does not parse — caller keeps the solid colour.
  */
-function fillGradientPaint(ctx: Ctx, style: Record<string, unknown>, boxW: number, boxH: number): CanvasGradient | null {
-  const declaration = style.textFillGradient;
-  if (typeof declaration !== "string" || !declaration || boxW <= 0 || boxH <= 0) return null;
+/**
+ * Read the emitted `linear-gradient(...)` back into its parts.
+ *
+ * Split out of `fillGradientPaint` by S8 because the SVG path surface needs the STOPS (as
+ * `<linearGradient>`) where the canvas needs a `CanvasGradient`. Two parsers for one emitted string
+ * is the copy-list shape T-15 is about, one surface over.
+ */
+export function parseEmittedGradient(
+  declaration: unknown
+): { from: string; to: string; angleDeg: number } | undefined {
+  if (typeof declaration !== "string" || !declaration) return undefined;
   const match = declaration.match(/^linear-gradient\(\s*(-?[\d.]+)deg\s*,\s*(.+?)\s*,\s*(.+?)\s*\)$/);
-  if (!match) return null;
-  const radians = (num(match[1], 180) * Math.PI) / 180;
+  if (!match) return undefined;
+  return { angleDeg: num(match[1], 180), from: match[2]!, to: match[3]! };
+}
+
+function fillGradientPaint(ctx: Ctx, style: Record<string, unknown>, boxW: number, boxH: number): CanvasGradient | null {
+  const parsed = parseEmittedGradient(style.textFillGradient);
+  if (!parsed || boxW <= 0 || boxH <= 0) return null;
+  const radians = (parsed.angleDeg * Math.PI) / 180;
   const sin = Math.sin(radians);
   const cos = Math.cos(radians);
   const length = Math.abs(boxW * sin) + Math.abs(boxH * cos);
   // Screen coords (y grows downward), so "up" is −y: the direction vector is (sin a, −cos a).
   const half = length / 2;
   const gradient = ctx.createLinearGradient(-half * sin, half * cos, half * sin, -half * cos);
-  gradient.addColorStop(0, match[2]!);
-  gradient.addColorStop(1, match[3]!);
+  gradient.addColorStop(0, parsed.from);
+  gradient.addColorStop(1, parsed.to);
   return gradient;
 }
 
@@ -557,6 +618,20 @@ export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number
       return ink + warpOverhang(field);
     }
   }
+  /**
+   * ADR-023 D8 (S8): an arc displaces ink out of the box for the same reason a warp does — the run
+   * bulges by the arc's sagitta plus a line of glyphs — so it budgets the same way. Warp is checked
+   * FIRST because warp wins when both are set (see `TimelineLayer.textPathCurve`), and budgeting for
+   * a curve that is not going to be drawn would silently enlarge every warped raster.
+   */
+  if (layer.type === "text") {
+    const style = getCompositionTextStyle(layer, { currentTimeSeconds: t, ...styleOptions }) as Record<string, unknown>;
+    const curve = num(style.textPathCurve, 0);
+    if (hasTextPathCurve(curve)) {
+      const layout = measureOverlayBox(makeCanvas2D(1, 1).getContext("2d") as Ctx, layer, t, W, H, styleOptions);
+      if (layout.boxW > 0) return ink + textPathOverhang(curve, layout.boxW, num(style.fontSize, 72));
+    }
+  }
   return ink;
 }
 
@@ -726,10 +801,19 @@ export async function drawTextLayer(
       // bag, because those are the two shapes a layer arrives in (editor vs manifest) — so clearing
       // only the one this layer happens to use makes the recursion terminate for the editor and run
       // forever for the export, which is exactly what it did for one render.
+      // ADR-023 S8: the CURVE is stripped here too, and it is not tidiness — the inner call is an
+      // ordinary draw, so a curve left on it would be applied and THEN deformed, composing two
+      // geometries in an order nobody decided. `TimelineLayer.textPathCurve` says warp wins; this
+      // line is where that is true. Both homes, for the reason the note above gives about `textWarp`
+      // itself: clearing only the one this layer happens to use makes the rule hold in the editor
+      // and fail in the export, which is the shape that already cost this file one hang.
       const plain = {
         ...layer,
         textWarp: undefined,
-        ...("style" in layer && layer.style ? { style: { ...(layer.style as Record<string, unknown>), textWarp: undefined } } : {})
+        textPathCurve: undefined,
+        ...("style" in layer && layer.style
+          ? { style: { ...(layer.style as Record<string, unknown>), textWarp: undefined, textPathCurve: undefined } }
+          : {})
       } as TimelineLayer;
       await drawTextLayer(offCtx, plain, t, W, H, "box", srcScale, styleOptions);
       drawWarpedRaster(ctx, {
@@ -817,6 +901,84 @@ export async function drawTextLayer(
   // Only touch the context when the layer actually declares a direction, so a legacy layer's draw
   // sequence is byte-identical to what it was before this field existed.
   if (baseDirection) ctx.direction = baseDirection;
+
+  /**
+   * ADR-023 D8 (S8) — text on a path.
+   *
+   * Placed AFTER the warp branch and reached only when warp did not return, which is how "warp wins"
+   * (see `TimelineLayer.textPathCurve`) is enforced by control flow rather than by a rule someone has
+   * to remember. Canvas 2D has no text-on-a-path, so this is the one place in the product where a
+   * second rendering SURFACE is used — and it stays a surface rather than a second text engine
+   * because `<textPath>` runs the same shaper `fillText` does (D6/T-5).
+   *
+   * Everything a curve cannot carry is listed in `textPathUnsupported`, declared rather than dropped
+   * quietly. The run is the layer's visible runs joined: a path is one run, and newlines are joined
+   * with a space rather than silently truncating the layer's text to its first line.
+   */
+  const pathCurve = num(style.textPathCurve, 0);
+  if (hasTextPathCurve(pathCurve)) {
+    const flat = getVisibleTextRuns(layer, t)
+      .map((run) => run.text)
+      .join("")
+      .replace(/\s*\n\s*/g, " ")
+      .trim();
+    // The natural width, measured on THIS context with the resolved font already set up above — the
+    // arc is built to that length, so the glyphs neither bunch nor stretch as the curve changes.
+    ctx.font = fontString({
+      fontStyle: style.fontStyle,
+      fontWeight: style.fontWeight,
+      fontSize,
+      fontFamily: style.fontFamily
+    });
+    const metrics = flat ? ctx.measureText(flat) : undefined;
+    const textWidth = metrics?.width ?? 0;
+    // The face's real vertical extent, not a fraction of the font size — see `ArcTextSpec.ascent`.
+    const ascent = metrics?.fontBoundingBoxAscent ?? fontSize * 0.8;
+    const descent = metrics?.fontBoundingBoxDescent ?? fontSize * 0.2;
+    // A pinned face has to travel INSIDE the isolated SVG document. `undefined` from the app is a
+    // refusal, and `buildArcTextSvg` declines on the empty string rather than rendering a fallback.
+    const ref = getCompositionFontRef(layer);
+    const fontFaceCss = isPinnedFontRef(ref) ? (await styleOptions.resolveFontFaceCss?.(ref)) ?? "" : undefined;
+    const margin = textPathOverhang(pathCurve, textWidth, fontSize);
+    const svgW = textWidth + 2 * margin;
+    const svgH = fontSize * 1.4 + 2 * margin;
+    const svg = buildArcTextSvg(
+      {
+        text: flat,
+        curve: pathCurve,
+        fontFamily: String(style.fontFamily ?? "sans-serif"),
+        fontSize,
+        fontWeight: (style.fontWeight as number | string) ?? 400,
+        fontStyle: String(style.fontStyle ?? "normal"),
+        letterSpacing: num(style.letterSpacing, 0),
+        textWidth,
+        ascent,
+        descent,
+        fill: String(style.color ?? "#ffffff"),
+        gradient: parseEmittedGradient(style.textFillGradient),
+        stroke: style.WebkitTextStroke ? String(style.WebkitTextStroke) : undefined,
+        outerStroke: style.textOuterStroke ? String(style.textOuterStroke) : undefined,
+        strokeUnderFill,
+        direction: baseDirection,
+        fontFaceCss
+      },
+      svgW,
+      svgH
+    );
+    const image = svg ? await loadSvgImage(svg) : undefined;
+    if (image) {
+      ctx.drawImage(image, -svgW / 2, -svgH / 2, svgW, svgH);
+      ctx.restore();
+      ctx.letterSpacing = "";
+      if (baseDirection) ctx.direction = "inherit";
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      return { boxW, boxH };
+    }
+    // Fall through to straight text. Not a silent success: the run is visibly NOT curved, which is
+    // the degradation D3 asks for over a picture that looks right and is not.
+  }
+
 
   // #3b: alphabetic baseline matching the CSS line-box model. The browser centers the
   // glyph block (ascent+descent) vertically within each line-height box using half-leading.

@@ -16,7 +16,9 @@ import {
   fontLoadSpec,
   fontObjectKey,
   fontStoreKeyFor,
+  isPinnedFontRef,
   type CompositionLayerStyleInput,
+  type FontRef,
   type PinnedFontRef
 } from "@orreris/shared";
 import { readLocalUserFont } from "./user-fonts";
@@ -142,6 +144,76 @@ export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState>
 /** Kick off installation for every pinned font a composition needs. Idempotent. */
 export function installCompositionFonts(layers: CompositionLayerStyleInput[]): void {
   for (const ref of collectPinnedFontRefs(layers)) void installPinnedFont(ref);
+}
+
+/**
+ * ADR-023 D8 (S8) — the `@font-face` rule for a pinned face, with the BYTES inlined as a data URI.
+ *
+ * Path text is drawn by rasterizing an SVG, and an SVG loaded as an image is an isolated document:
+ * it cannot see `document.fonts`, cannot follow an HTTP URL, and cannot reach a blob URL from this
+ * page. The face has to be inside the document, so the bytes have to be read.
+ *
+ * Memoized per ref key for `installPinnedFont`'s reason, restated because it is the same hazard:
+ * two projects pinning different hashes of "Inter 700" are two different faces (D1), and keying this
+ * by family would serve one project the other's outlines.
+ *
+ * Returns `undefined` when the bytes cannot be had — which the raster treats as a REFUSAL to draw
+ * the curve, not as permission to draw it in a fallback (D3/T-2).
+ */
+const faceCssCache = new Map<string, Promise<string | undefined>>();
+
+/**
+ * The `OverlayStyleOptions.resolveFontFaceCss` the editor's three raster consumers hand the shared
+ * draw — the preview canvas, the local export compositor, and the DOM overlay's warp/curve image.
+ *
+ * A `{source: "system"}` ref returns `undefined` and that is not a refusal: a system family resolves
+ * by NAME inside an SVG image, so there is nothing to embed. `buildArcTextSvg` only treats the empty
+ * string as the refusal, and only a PINNED ref can produce it.
+ */
+export function resolveFontFaceCss(ref: FontRef): Promise<string | undefined> | undefined {
+  return isPinnedFontRef(ref) ? pathTextFontFaceCss(ref) : undefined;
+}
+
+export function pathTextFontFaceCss(ref: PinnedFontRef): Promise<string | undefined> {
+  const key = fontRefInstallKey(ref);
+  const existing = faceCssCache.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<string | undefined> => {
+    // T-3 again: the store is discriminated before anything resolves to bytes. This deliberately
+    // repeats `installPinnedFont`'s switch rather than sharing a `urlOf(font)` helper, because that
+    // helper is precisely the "resolvable URL supertype" D4 forbids.
+    const storeKey = fontStoreKeyFor(ref);
+    if (!storeKey) return undefined;
+    let blob: Blob | undefined;
+    try {
+      if (storeKey.store === "catalogue") {
+        const response = await fetch(storageUrl(fontObjectKey(storeKey)));
+        if (!response.ok) return undefined;
+        blob = await response.blob();
+      } else {
+        blob = (await readLocalUserFont(storeKey.ownerId, storeKey.fileHash)) ?? undefined;
+        if (!blob) {
+          const token = localStorage.getItem("orreris_token");
+          if (!token) return undefined;
+          const response = await fetch(storageUrl(fontObjectKey(storeKey)), { headers: { Authorization: `Bearer ${token}` } });
+          if (!response.ok) return undefined;
+          blob = await response.blob();
+        }
+      }
+      const buffer = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < buffer.length; i += 1) binary += String.fromCharCode(buffer[i]!);
+      const dataUrl = `data:font/ttf;base64,${btoa(binary)}`;
+      return (
+        `@font-face{font-family:"${ref.family}";font-weight:${ref.weight};font-style:${ref.style};` +
+        `src:url(${dataUrl})}`
+      );
+    } catch {
+      return undefined;
+    }
+  })();
+  faceCssCache.set(key, promise);
+  return promise;
 }
 
 /** Synchronous read of what we know so far — `undefined` while a load is still in flight. */

@@ -12,6 +12,7 @@ import {
   type OnVideoFrame
 } from "remotion";
 import type { RenderManifest, RenderManifestLayer } from "@orreris/render-templates";
+import type { FontRef, InstalledFontFace } from "@orreris/shared";
 import {
   MediaWebGLRenderer,
   SceneCompositor,
@@ -235,11 +236,19 @@ class SceneController {
     // ADR-023 S5b: asset id -> render address, for a text/shape glyph fill. `manifest.assets` already
     // carries every referenced asset's `fileUrl` (`buildRenderManifest` now collects the fill's id
     // alongside each layer's own), so this is a lookup, not a fetch.
-    private readonly resolveAssetUrl?: (assetId: string) => string | undefined
+    private readonly resolveAssetUrl?: (assetId: string) => string | undefined,
+    // ADR-023 D8 (S8): the `@font-face` rule to embed in a path-text SVG for a pinned face. The
+    // worker's installed faces already carry their bytes as `data:` URLs (that is what
+    // `resolveManifestFonts` produced before the browser was even started), so this is a lookup, not
+    // a fetch — and an SVG drawn as an image cannot reach the page's own faces, only its own.
+    private readonly resolveFontFaceCss?: (ref: FontRef) => string | undefined
   ) {
     this.compositor = new SceneCompositor(canvas, width, height);
     this.matteCache = new SceneMaskMatteCache(width, height);
-    this.rasterizer = new SceneTextRasterizer(undefined, { resolveAssetUrl: this.resolveAssetUrl });
+    this.rasterizer = new SceneTextRasterizer(undefined, {
+      resolveAssetUrl: this.resolveAssetUrl,
+      resolveFontFaceCss: this.resolveFontFaceCss
+    });
   }
 
   private mediaRendererFor(id: string): MediaWebGLRenderer {
@@ -614,7 +623,7 @@ function ImageGrabber({
  * SceneStage — the Remotion single-canvas composite. Renders one output `<canvas>` the shared
  * `SceneCompositor` composites into, plus hidden media decoders that feed it and the unchanged audio sequences.
  */
-export function SceneStage({ manifest }: { manifest: RenderManifest }) {
+export function SceneStage({ manifest, fonts }: { manifest: RenderManifest; fonts?: InstalledFontFace[] }) {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
   const t = frame / fps;
@@ -706,6 +715,25 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     [bump]
   );
 
+  /**
+   * ADR-023 D8 (S8) — the pinned face, as an embeddable `@font-face` rule.
+   *
+   * `undefined` for a face this render does not carry is a REFUSAL: the arc declines to draw rather
+   * than rendering the run in whatever the isolated SVG document falls back to. It cannot normally
+   * happen — the worker aborts by name before the browser starts if any pinned ref failed to resolve
+   * (T-2) — and it is written as a refusal anyway, because "cannot normally happen" is what the
+   * warp catalogue said before it shipped empty.
+   */
+  const fontFaceCssFor = useMemo(() => {
+    const byKey = new Map((fonts ?? []).map((face) => [`${face.family}|${face.weight}|${face.style}`, face]));
+    return (ref: FontRef): string | undefined => {
+      if (ref.source === "system") return undefined;
+      const face = byKey.get(`${ref.family}|${ref.weight}|${ref.style}`);
+      if (!face) return undefined;
+      return `@font-face{font-family:"${face.family}";font-weight:${face.weight};font-style:${face.style};src:url(${face.src})}`;
+    };
+  }, [fonts]);
+
   // Create / dispose the controller with the canvas (re-create only when comp dimensions change).
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -720,7 +748,8 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
         normalizeProjectColorSettings(manifest.output.color).effectLight,
         nestedGroups,
         manifest.flarexComps,
-        assetUrlById
+        assetUrlById,
+        fontFaceCssFor
       );
     } catch (error) {
       console.error("SceneStage: SceneCompositor init failed", error);

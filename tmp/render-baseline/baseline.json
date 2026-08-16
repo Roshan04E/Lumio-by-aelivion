@@ -1,6 +1,6 @@
 {
-  "commit": "66185be26af2065ace7323ad60751521fdd0f330",
-  "capturedAt": "2026-08-15T17:12:29.599Z",
+  "commit": "dd74511b25a6b1942f5c129cff8a8994a305d56d",
+  "capturedAt": "2026-08-16T01:14:22.301Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -263,6 +263,11 @@
       "width": 1080,
       "height": 1920
     },
+    "multi-stroke": {
+      "sha256": "914f69bf4ef5ccc1419b478da6b4b9725f42b482b2ce3a4fd497b044405e5a4d",
+      "width": 1080,
+      "height": 1920
+    },
     "nested-grade": {
       "sha256": "12c011caeb08895193030fdea6fac205396d1430ce8b0e6371215cdb5dfe504a",
       "width": 1080,
@@ -295,6 +300,11 @@
     },
     "overlap-region-effects": {
       "sha256": "83132c5ed29a993cc9f998d7b8d539d9312917b9e606094a717d91a1b9d243d1",
+      "width": 1080,
+      "height": 1920
+    },
+    "path-text": {
+      "sha256": "679a91396f005be919dbecc18ac0c1904bbff6ab88bd98c76d4cc2443ce0ebf8",
       "width": 1080,
       "height": 1920
     },

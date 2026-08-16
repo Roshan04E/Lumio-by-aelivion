@@ -182,6 +182,13 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
     layer: textLayer({ strokeWidth: 10, strokeOuterColor: "rgba(245, 217, 10, 0.6)", strokeOuterWidth: 40 })
   },
 
+  // --- S8: text on a path — the curve, its sign, and the sub-threshold refusal ------------------
+  { name: "text/path-curve-up", layer: textLayer({ textPathCurve: 55 }) },
+  { name: "text/path-curve-down", layer: textLayer({ textPathCurve: -55 }) },
+  { name: "text/path-curve-below-threshold", layer: textLayer({ textPathCurve: 0.4 }) },
+  { name: "text/path-curve-clamped", layer: textLayer({ textPathCurve: 400 }) },
+  { name: "text/path-curve-in-style-bag", layer: textLayer({ style: { textPathCurve: 55 } }) },
+
   // --- S5b: image fill — the id → URL resolution, and every way it can decline -------------------
   { name: "text/fill-texture-absent", layer: textLayer({ color: "#ff0000" }), options: fillTextureOptions },
   { name: "text/fill-texture-no-resolver", layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID }) },

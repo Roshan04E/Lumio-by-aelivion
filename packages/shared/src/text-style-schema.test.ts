@@ -338,7 +338,10 @@ const pinnedLora: FontRef = {
     // S8 (ADR-023 D8). The ring's width must exceed the co-requisite inner stroke below, or
     // `resolveOuterStroke` refuses it — which is the feature, not an obstacle to route around.
     strokeOuterColor: "#f5d90a",
-    strokeOuterWidth: 40
+    strokeOuterWidth: 40,
+    // S8: above MIN_TEXT_PATH_CURVE, or it resolves to 0 and the field would report "changes
+    // nothing" — a report about the threshold rather than about the field.
+    textPathCurve: 60
   };
   /**
    * Some fields are CONDITIONALLY emitted and provably cannot move anything alone: `WebkitTextStroke`

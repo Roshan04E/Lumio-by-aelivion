@@ -274,6 +274,24 @@ const fields = [
     }
   },
   {
+    key: "textPathCurve",
+    kind: "number",
+    min: -100,
+    max: 100,
+    step: 1,
+    group: "typography",
+    label: "Curve",
+    animatableAs: "style.textPathCurve",
+    // Absent is straight text, permanently (D1a). A default of 0 written onto load would be the same
+    // picture today and one refactor away from not being.
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      aiSynonyms: ["arc text", "text on a path", "curved text", "circle text"],
+      description: "Bends the run onto a circular arc. Positive arcs up, negative down; ±100 wraps a half circle."
+    }
+  },
+  {
     key: "strokeOuterWidth",
     kind: "number",
     unit: "px",

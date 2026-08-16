@@ -188,6 +188,34 @@ async function main(): Promise<void> {
       `no-inner=${short(ringNoInner)}  no-inner-no-ring=${short(ringNoInnerNoRing)}\n\n`
   );
 
+  /**
+   * --- S8: text on a path ----------------------------------------------------------------------
+   *
+   * The subject arm is honest here in a way the ring's was not, because a curve moves the glyphs
+   * themselves rather than adding ink around them — but the same addendum-3 discipline still
+   * applies to the CONTROLS, which are the interesting half. `curve-below-threshold` proves the
+   * refusal is a refusal (byte-identical to straight, not merely different from the subject), and
+   * `curve-up` vs `curve-down` share every size, margin and key length and differ only in the SIGN,
+   * which nothing but the arc actually bending can express.
+   */
+  const curveOn = await renderWith("path-text", "curve-on", {});
+  const curveOff = await renderWith("path-text", "curve-off", { textPathCurve: undefined });
+  const curveDown = await renderWith("path-text", "curve-down", { textPathCurve: -55 });
+  const curveTiny = await renderWith("path-text", "curve-below-threshold", { textPathCurve: 0.4 });
+  // Warp wins when both are set — asserted as an EQUALITY against the same layer with no curve at
+  // all, so "warp wins" means the curve contributed nothing, not merely that the picture differs.
+  const curveAndWarp = await renderWith("path-text", "curve-and-warp", {
+    textWarp: { style: "arc", bend: 40, distortH: 0, distortV: 0 }
+  });
+  const warpOnly = await renderWith("path-text", "warp-only", {
+    textPathCurve: undefined,
+    textWarp: { style: "arc", bend: 40, distortH: 0, distortV: 0 }
+  });
+  process.stdout.write(
+    `curve      on=${short(curveOn)}  off=${short(curveOff)}  down=${short(curveDown)}  ` +
+      `below-threshold=${short(curveTiny)}  curve+warp=${short(curveAndWarp)}  warp-only=${short(warpOnly)}\n\n`
+  );
+
   // --- the assertions --------------------------------------------------------------------------
   assert.notEqual(
     gradientOn,
@@ -300,7 +328,39 @@ async function main(): Promise<void> {
       "it would give the layer a second way to say something it can already say, reachable only by accident."
   );
 
+  assert.notEqual(
+    curveOn,
+    curveOff,
+    "FALSIFIER FAILED — removing `textPathCurve` produced a BYTE-IDENTICAL render. Text on a path is " +
+      "not reaching the renderer: check MANIFEST_LAYER_STYLE_KEYS carries textPathCurve, that " +
+      "`getCompositionTextStyle` emits it, and that drawTextLayer's arc branch is reached (warp is " +
+      "checked first and wins, so a stray textWarp on the fixture would also produce this)."
+  );
+  assert.notEqual(
+    curveDown,
+    curveOn,
+    "FALSIFIER FAILED — flipping the curve's SIGN changed nothing. This is the arm that carries the " +
+      "feature: the two renders share the text, the font, both rings, the raster margin and the key " +
+      "length, so the only thing left that can move the picture is the arc bending the other way."
+  );
+  assert.equal(
+    curveTiny,
+    curveOff,
+    "CONTROL FAILED — a curve below the straight-line threshold rendered differently from no curve. " +
+      "Below MIN_TEXT_PATH_CURVE the arc's radius runs away toward infinity, so it resolves to 0; if " +
+      "this differs, the threshold is not being applied and a user dragging the slider through zero " +
+      "gets a jump instead of a straight line."
+  );
+  assert.equal(
+    curveAndWarp,
+    warpOnly,
+    "CONTROL FAILED — a layer carrying BOTH a warp and a curve did not render as warp alone. Warp wins " +
+      "(see TimelineLayer.textPathCurve), and it is enforced by the warp branch returning first; a " +
+      "difference here means the two geometries are composing in some order nobody decided."
+  );
+
   process.stdout.write("PASS — all three S5 fields change the render, and all three no-op arms are byte-identical.\n");
+  process.stdout.write("PASS — the S8 arc bends, its SIGN alone moves the render, a sub-threshold curve is straight, and warp wins over a curve.\n");
   process.stdout.write("PASS — the S8 ring paints, its COLOUR alone moves the render, and both refusal cases are byte-identical to no ring.\n");
   process.stdout.write("PASS — the S5b image fill resolves, its fit and scale move, and an unresolvable id degrades to the solid colour.\n");
   process.stdout.write(`stills: ${outDir}\n`);
