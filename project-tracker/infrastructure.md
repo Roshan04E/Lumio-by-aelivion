@@ -200,3 +200,50 @@ untouched — stays on the loose bar.
 **Verify:** `pnpm --filter @orreris/worker typecheck` clean. 3 consecutive full `render:compare:pixels`
 sweeps (`PIXEL_BROWSER_CHANNEL=chrome`), 76/76 passing each time, `flarex-generators` at 0.000% in all
 three.
+
+---
+
+## render:baseline — two text fixtures are irreproducible in a FULL sweep and clean when narrowed (v1, 2026-08-16)
+
+**Symptom.** A full `render:baseline` reports the picture CHANGED for exactly two fixtures,
+`text-warp` and `multi-stroke`, at 3/2073600 and 0–1/2073600 pixels. Running those same two fixtures
+via `BASELINE_FIXTURES=text-warp,multi-stroke` reports both **unchanged**, repeatably.
+
+**It is not a code change, and here is why that is a conclusion rather than a hope.**
+
+1. **The reading is unstable across runs.** `multi-stroke` read **0** differing pixels in one full
+   sweep and **1** in the next, against the same baseline, on render code that did not change between
+   them (the only commits in between add preflight checks and touch no render path). A deterministic
+   code change cannot produce two different diffs from the same inputs.
+2. **The shape of the diff is wrong for a code change.** A raw byte comparison finds 18 differing
+   bytes in `text-warp` and 2 in `multi-stroke`, every one of them **±1 in a single channel**, and
+   all of them scattered on antialiased glyph edges — e.g. `(334,762) ch0 16→17`,
+   `(540,831) ch0 194→195`. A code change moves a coherent REGION. This is last-significant-bit
+   rasterizer rounding. (The gate reports 3 rather than 18 because `pixelmatch` applies a perceptual
+   threshold; the two numbers are consistent with each other.)
+3. **Two consecutive narrowed runs are byte-clean**, so the fixtures are capable of matching.
+
+**The discriminating variable is the SWEEP, not the fixture**: identical inputs pass cold and
+narrowed, and flag inside a long run. Process age, GPU state accumulated across ~85 prior renders, or
+driver-level scheduling are all consistent with it; none has been measured, and no cause is claimed.
+
+**DO NOT "fix" this by re-capturing the baseline.** That is the one action that makes it permanent:
+a capture taken while the noise is live freezes it into the REFERENCE, where every later run inherits
+it and no re-run can find it. `render-baseline-gate.ts`'s capture loop now carries that warning at the
+line where it would happen.
+
+**It VOIDS the sweep; it is not subtracted.** The founder's standing rule (2026-08-16, and the reason
+a separate session lost a night to a noise floor) is that a noise floor voids a run rather than being
+netted out. So the correct statement about the S9a batch is **"83 of 85 fixtures byte-identical, 2
+irreproducible"** — NOT "83/85 passed". The zero-tolerance claim is not available on this machine
+until this is closed, and the S9a stage's own no-move evidence rests instead on `textstyle:golden`
+(103 emitted styles, 4 added, **0 changed**) and on `font:axis-falsifier`'s absent-==-face-default arm.
+
+**Re-registration trigger.** If a full sweep ever reports these two fixtures with a STABLE pixel count
+across two consecutive runs, this stops being noise and becomes a real regression to bisect. If a
+third fixture joins them, the cause is spreading and this entry re-opens with that run as evidence.
+
+**Not investigated:** whether this predates S9a. A worktree at `5601ab9` plus a full sweep would
+settle it, and was not spent — the three lines of evidence above already exclude a code change, and a
+fresh worktree's first sweep is a documented throwaway (vite pre-bundle), so the run would have cost
+two sweeps rather than one.
