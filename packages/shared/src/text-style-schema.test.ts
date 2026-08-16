@@ -354,7 +354,20 @@ const pinnedLora: FontRef = {
     // than picked. Note these move the emitted FAMILY TOKEN, not a declaration — the instance was
     // baked into the face at registration, which is the only route that reaches the canvas raster.
     fontWeightAxis: 700,
-    fontWidthAxis: 87.5
+    fontWidthAxis: 87.5,
+    /**
+     * S9 (ADR-023 OQ6). Neither of these needs a co-requisite, and that is worth stating because it
+     * is the opposite of how the ring and the gradient behave: DECLARING any one of the three cluster
+     * fields declares the animation, so a rise on its own emits the animation key with a progress of
+     * 1 — an animation that has finished. The emitted style therefore moves for each field alone,
+     * which is what this sweep is asking.
+     *
+     * `clusterRevealProgress` is not swept here because it is not presetable (it is a position in
+     * time, not a look). Its own "does it reach the render" falsifier is the SUBJECT arm of
+     * `text:s9-precedence`, which is the stronger instrument: it asserts pixels, not emission.
+     */
+    clusterRiseEm: 0.8,
+    clusterStaggerFraction: 0.6
   };
   /**
    * Some fields are CONDITIONALLY emitted and provably cannot move anything alone: `WebkitTextStroke`

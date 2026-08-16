@@ -33,6 +33,7 @@ import {
   AlignHorizontalJustifyStart,
   AlignLeft,
   AlignRight,
+  AlertTriangle,
   ArrowLeftRight,
   Bold,
   Italic,
@@ -434,6 +435,9 @@ import {
   normalizeGraphicSvg,
   extractSvgPalette,
   getCompositionTextRuns,
+  getCompositionTextStyle,
+  hasTextPathCurve,
+  textClusterAnimationRefusal,
   getCompositionFontRef,
   isPinnedFontRef,
   detectTextScript,
@@ -15327,6 +15331,15 @@ function TextGraphicControls({
           <div className="icon-control-row">
             <PropertyFieldList fields={pickTextStyleFields(styleFields, ["letterSpacing", "lineHeight", "textWidthPercent"])} />
           </div>
+          {/* ADR-023 S9 (OQ6, T-14) — per-character reveal. The refusal is stated HERE, where the
+              reveal is controlled, rather than by hiding the rows: T-12's discipline, and the
+              incident behind it was a wrong render nobody could see was wrong. */}
+          <TextClusterRefusalNotice layer={layer} />
+          <div className="icon-control-row">
+            <PropertyFieldList
+              fields={pickTextStyleFields(styleFields, ["clusterRevealProgress", "clusterRiseEm", "clusterStaggerFraction"])}
+            />
+          </div>
         </div>
       </InspectorSection>
 
@@ -16149,6 +16162,48 @@ function EffectParamControl({
  * no `direction` and no `unicode-bidi` at all, which is what every project authored before this
  * existed does, permanently.
  */
+/**
+ * ADR-023 S9 (OQ6, T-14) — why this layer's per-character reveal is not going to run.
+ *
+ * Rendered only when the layer has DECLARED one, so a layer nobody animated says nothing. Both
+ * refusals are read through the SAME shared function the renderers call, so what the inspector claims
+ * and what the raster does cannot drift apart — the T-12 discipline, whose original incident was a
+ * wrong render nobody could see was wrong.
+ *
+ * The curve refusal names the remedy (clear the curve) because there is one. The script refusal does
+ * not, because there is not: `measureText` shapes each prefix in isolation, so on a cursive script the
+ * band edges are wrong before a pixel is drawn — 2 of 13 Arabic prefix widths go BACKWARDS, measured.
+ * Telling someone to "try a different font" would be inviting them around a limit that is not the
+ * font's.
+ */
+function TextClusterRefusalNotice({ layer }: { layer: TimelineLayer }) {
+  const declared =
+    layer.clusterRevealProgress !== undefined || layer.clusterRiseEm !== undefined || layer.clusterStaggerFraction !== undefined;
+  if (!declared) return null;
+  const curveActive = hasTextPathCurve(
+    getCompositionTextStyle(layer, { currentTimeSeconds: 0 }).textPathCurve as number | undefined
+  );
+  const refusal = textClusterAnimationRefusal(
+    getCompositionTextRuns(layer)
+      .map((run) => run.text)
+      .join(""),
+    { pathCurveActive: curveActive }
+  );
+  if (!refusal) return null;
+  const message =
+    refusal === "curve"
+      ? "A curved run is drawn as one finished picture with no per-character positions, so it cannot be revealed character by character. Clear the curve to animate the characters instead."
+      : refusal === "script"
+        ? "This text uses a script whose letters change shape depending on their neighbours (Arabic, Hebrew, Devanagari, Thai and similar), or carries combining marks or an emoji sequence. Animating each character separately would break the joining, so it renders all at once rather than with the wrong letterforms."
+        : "This browser cannot identify character boundaries (no Intl.Segmenter), and splitting on code points would break combining marks and emoji — so the reveal is off rather than approximate.";
+  return (
+    <p className="warp-shaping-notice" role="status" data-testid="cluster-refusal-notice">
+      <AlertTriangle size={14} aria-hidden="true" />
+      <span>{message}</span>
+    </p>
+  );
+}
+
 function TextDirectionControl({
   layer,
   onChange

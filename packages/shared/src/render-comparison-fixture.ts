@@ -146,6 +146,7 @@ export type RenderComparisonFixtureKey =
   | "shadow-stack"
   | "multi-stroke"
   | "path-text"
+  | "cluster-text"
   | "flarex-key-glow"
   | "flarex-curves"
   | "flarex-keyframed-blur"
@@ -240,6 +241,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "shadow-stack",
   "multi-stroke",
   "path-text",
+  "cluster-text",
   "flarex-key-glow",
   "flarex-curves",
   "flarex-keyframed-blur",
@@ -1549,6 +1551,16 @@ interface FixtureVariant {
   textPathCurve?: number;
   /** ADR-023 D9a — the warp field applied to the text layer. */
   textWarp?: { style: string; bend: number; distortH?: number; distortV?: number };
+  /**
+   * S9 (ADR-023 OQ6) — a per-character reveal, caught MID-FLIGHT.
+   *
+   * Undefined everywhere else, so `textFixtureLayer` omits all three keys and every pre-S9 fixture
+   * stays byte-identical — the claim `render:baseline` is checking, not a happy side effect. And
+   * mid-flight rather than settled on purpose: a settled reveal renders through the ordinary unsliced
+   * draw, so a fixture capturing one would be a picture of plain text under an animation's name, and
+   * would pass on a build where the slice was broken.
+   */
+  textClusterAnimation?: { progress: number; riseEm: number; staggerFraction: number };
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
    *  effects array — over a background layer so the keyed-away area is a real composite. */
   flarex?: FlarexComp;
@@ -1924,6 +1936,28 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         textContent: "CURVED",
         textPathCurve: 55
       };
+    case "cluster-text":
+      /**
+       * S9 (ADR-023 OQ6, T-14) — a per-character reveal 45% of the way through a 0.6 stagger.
+       *
+       * `"WAVE"` rather than the default `"HI"`: with two clusters a stagger has one handoff and the
+       * picture would be nearly the same whether the distribution worked or not. Four clusters at a
+       * 0.6 stagger puts each one at a visibly different height and opacity, so the fixture is a
+       * picture of the DISTRIBUTION and not merely of "something moved".
+       *
+       * A rise of 0.8em at 200px carries the trailing cluster 160px below its line — well outside the
+       * text box, which is the point: the margin that makes room for it is the one thing here that
+       * has to be zero once the reveal settles (see `overlayInkMargin`), and a fixture whose motion
+       * stayed inside the box would never exercise it.
+       */
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 200,
+        textContent: "WAVE",
+        textClusterAnimation: { progress: 0.45, riseEm: 0.8, staggerFraction: 0.6 }
+      };
     case "media-opacity":
       return { effects: [], fit: "cover", mediaOpacity: 50 };
     case "graded-text":
@@ -2282,6 +2316,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
       variant.textShadowStack ||
       variant.textOuterStroke ||
       variant.textPathCurve !== undefined ||
+      variant.textClusterAnimation ||
       variant.textWarp
   );
   const textFixtureLayer: TimelineLayer = {
@@ -2334,6 +2369,16 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
         }
       : {}),
     ...(variant.textPathCurve === undefined ? {} : { textPathCurve: variant.textPathCurve }),
+    // S9 (ADR-023 OQ6) — spread conditionally, like every text field before them, so a variant that
+    // does not ask for a reveal carries no key at all rather than an explicit "off". Absent and
+    // settled render the same picture today, and only absent is guaranteed to keep doing so (D1a).
+    ...(variant.textClusterAnimation
+      ? {
+          clusterRevealProgress: variant.textClusterAnimation.progress,
+          clusterRiseEm: variant.textClusterAnimation.riseEm,
+          clusterStaggerFraction: variant.textClusterAnimation.staggerFraction
+        }
+      : {}),
     // S8 (ADR-023 D8) — the concentric outer ring, spread conditionally for the same reason.
     ...(variant.textOuterStroke
       ? { strokeOuterColor: variant.textOuterStroke.color, strokeOuterWidth: variant.textOuterStroke.width }

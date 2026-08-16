@@ -247,3 +247,56 @@ third fixture joins them, the cause is spreading and this entry re-opens with th
 settle it, and was not spent — the three lines of evidence above already exclude a code change, and a
 fresh worktree's first sweep is a documented throwaway (vite pre-bundle), so the run would have cost
 two sweeps rather than one.
+
+## render:baseline — the noise is NOT sweep-length-dependent; v1's discriminator does not hold (v2, 2026-08-16)
+
+**v1 is not withdrawn. Its conclusion — this is not a code change — survives intact. Its MODEL of when
+it fires does not.** v1 said "the discriminating variable is the SWEEP, not the fixture": identical
+inputs pass narrowed and flag inside a long run. Two readings taken during S9 contradict that, in both
+directions.
+
+**1. A FULL sweep came back completely clean.** `render:baseline` unbatched over the whole set at S9,
+on a preflighted machine (0 automation browsers, 242 GB free): **85 of 85 checked fixtures
+byte-identical, 0 irreproducible.** `text-warp` and `multi-stroke` — the two v1 is about — both report
+`unchanged` inside a ~85-fixture sweep, which is exactly the condition v1 predicts they flag in.
+
+**2. A NARROWED run flagged.** `cluster-text`, S9's new fixture, captured at `d46ed61b2753` and then
+run twice via `BASELINE_FIXTURES=cluster-text`:
+
+    verify run 1   CHANGED    3/2073600 pixels (0.000%)
+    verify run 2   unchanged
+
+Same code, same baseline, same narrowing, consecutive. v1 predicts a narrowed run is clean; this one
+was not, and its magnitude is the same 3/2073600 `text-warp` shows.
+
+**What this changes.** The instability is **run-to-run and independent of sweep length**. Nothing about
+process age or accumulated GPU state across ~85 prior renders is required to explain it, and v1's three
+candidate causes were offered as consistent-but-unmeasured — this reading removes the one they had in
+common. No cause is claimed here either. What is now established is narrower and more useful: **a
+single byte-clean run is not evidence a fixture is stable, at any scope.** Two consecutive runs are the
+minimum, which is the discipline that found this at all.
+
+**`cluster-text` is a third fixture with the signature, and that does NOT trip v1's re-registration
+trigger.** The trigger reads "if a third fixture joins them, the cause is spreading". This one is a
+fixture whose baseline was captured TODAY, so it is new coverage landing on an existing floor rather
+than the floor reaching into coverage that used to be clean. Stated explicitly because the trigger is
+written to be acted on by someone who was not here, and "three fixtures now" is the wrong reading.
+
+**The baseline entry was KEPT, not dropped, and not re-captured.** Re-capturing to launder run 1's
+reading is the forbidden action (v1) and was not taken. Dropping the entry to keep the gate quiet is
+the same laundering wearing the other hat: it would remove the stage's own fixture from the only
+zero-tolerance instrument in the repo. It stays, with this entry as the record of what it does.
+
+**The cost this imposes, said plainly.** The text programme has now put ~20 glyph-edge fixtures into a
+zero-tolerance gate, and glyph edges are where subpixel AA is least stable. Every one is a candidate
+for this floor. That is a real and growing drag on the gate's signal, and it is the reason S9's
+load-bearing evidence is deliberately NOT the picture gate: its tiling invariant is arithmetic
+(`cluster:model`, where a one-pixel gap is exactly representable and an AA wobble is not) and its
+at-rest equality is a hash comparison of a memcpy, which has no floor to sit on.
+
+**Correct statement of S9's sweep**, in the form the founder's noise-floor rule requires: **85 of 85
+checked byte-identical, 0 irreproducible** — and, separately, **7 fixtures were NOT CHECKED because
+they have no baseline** (`cluster-text` before this capture, plus `liquid-morph-transition`,
+`portal-transition`, `motion-smear-transition` and their three `linear-` twins). Those six transition
+fixtures are pre-existing unbaselined coverage, are not S9's, and were deliberately left alone: a
+blanket `--capture` would have registered six references nobody has looked at.

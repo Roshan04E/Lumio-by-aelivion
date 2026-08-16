@@ -31,7 +31,7 @@ S7  the text matte (tier 2) + matte ops + warp rework   half B (warp) SHIPPED 20
 S8  SVG: multi-stroke + path text          SHIPPED 2026-08-16; D8 amended — multi-stroke needed no SVG
 S9a STATIC variable axis                  SHIPPED 2026-08-16; OQ2's deferral REVERSED
 S9b ANIMATING the axis                    MEASURED 2026-08-16, not built; N unestablished at display sizes
-S9  per-character animation                not started; OQ6 ANSWERED, precedence gate written + red
+S9  per-character animation                BUILT 2026-08-16; the precedence gate is GREEN and load-bearing
 ```
 
 Ordering rationale, stated because two of these look reorderable and are not:
@@ -1064,13 +1064,111 @@ and the first nearest-neighbour radius was so tight that any displacement over 1
 
 ---
 
-### S9 — per-character animation. **Not started; OQ6 ANSWERED, precedence gate written and RED.**
+### S9 — per-character animation. **BUILT 2026-08-16.**
 
-`text:s9-precedence` (bbf1242) declares the four compositions — animation composes UNDER warp, the
+`text:s9-precedence` (bbf1242) declared the four compositions — animation composes UNDER warp, the
 curve WINS, a shaping-dependent script WINS, and at rest the animation contributes NOTHING — as
-equalities, written BEFORE the feature and failing by design. That is the `pending()` pattern: a gate
-that passed before the feature existed could not tell whether it arrived. **Do not re-tier it as
-broken and do not make it green until the animator lands.**
+equalities, written BEFORE the feature and failing by design. It is the acceptance for this stage and
+it is no longer red by design; it is green because the animator landed.
+
+**What shipped**
+
+- `text-cluster-animation.ts` — the model, and it is pure arithmetic: grapheme segmentation, the
+  stagger distribution, the refusals, the emitted string, and `tileSpans`. No fonts, no canvas.
+- Three fields — `clusterRevealProgress` / `clusterRiseEm` / `clusterStaggerFraction` — on
+  `TimelineLayer`, in the manifest style bag, and in the `text-style` schema. Three fields rather than
+  one composite, for the third time: the composite kinds are frozen out of ADR-003's taxonomy and
+  inventing an encoding over `number` fields to dodge that would be the taxonomy decision taken by
+  accident (`lut`, S8's two-fields-not-a-list, this).
+- The slice in `scene/text-shape.ts`: the run is drawn ONCE into a canvas with the destination's exact
+  geometry and transform, then each cluster is a device-pixel `drawImage` of that raster's own band.
+- Both surfaces, one engine. The DOM preview routes an animated layer through the same shared
+  `drawTextLayer` it already routes warp and arcs through. Per-span DOM transforms would have been the
+  obvious implementation and are the defect T-14 forbids.
+- `cluster-text` pixel fixture, caught MID-FLIGHT (see the fixture's own note on why settled would
+  have been a picture of nothing).
+
+**The three decisions worth carrying forward**
+
+1. **Absent is not rest, and rest is not absent.** A layer that declared nothing emits NO animation
+   key — so all 103 pre-S9 goldens are byte-identical and no existing project's raster cache key
+   moved. A layer at progress 1 emits a FINISHED animation. Same picture, different data, and only the
+   first is guaranteed to stay that way (D1a). This is why the emitted key is spread rather than
+   assigned, which is a deliberate break from the five non-CSS keys before it.
+2. **At rest the slice still RUNS.** Skipping it would have made P4 pass by construction — the
+   ordinary draw compared against the ordinary draw — and P4's whole job is to catch a slice that does
+   not reassemble exactly. A gate that can only pass is not a gate. The cost is one extra canvas and N
+   blits per settled animated layer, and it buys the only end-to-end evidence the technique has.
+3. **Whitespace gets no band of its own.** It has no ink, and giving it a stagger slot makes the pause
+   between two words as long as a letter, which reads as a stutter rather than as a cascade.
+
+**Where the cuts come from, and why that is survivable.** Band edges come from prefix `measureText`,
+the only per-cluster geometry canvas 2D exposes. It is imprecise on Latin and it does not matter: ANY
+tiling reassembles the source exactly, so a slightly wrong edge moves a slightly wrong set of pixels
+mid-flight and cannot break either the tiling or the at-rest equality. That is exactly why the same
+technique does NOT survive a cursive script, where the edges are not imprecise but NON-MONOTONIC — the
+ink of one letter lands in another letter's band and moves with it.
+
+**Multi-line seams sit in the gap between lines' INK, not on the CSS line-box boundary.** With this
+product's default `lineHeight` of 0.95 the ink box is taller than the line box, so a seam at the box
+boundary cuts through line one's descenders — and under a stagger those tails would arrive with line
+two. Measured from the same ascent/descent the baseline is computed from; monotonic, so the tiling
+survives it.
+
+**Evidence — `text:s9-precedence` is GREEN, on a preflighted machine (0 automation browsers alive):**
+
+```
+latin      none=d67266f5d819  mid-flight=6346361d2210  at-rest=d67266f5d819
+warp       alone=ab702a0beff2  +at-rest=ab702a0beff2   +mid=2fad52c83f24
+curve      alone=679a91396f00  +mid=679a91396f00
+arabic     alone=565f5353dc03  +mid=565f5353dc03
+```
+
+The SUBJECT moved (mid ≠ none), so none of the three equalities below it is vacuous; at-rest returned
+to the no-animation hash EXACTLY, through the slice, which is OQ6's equality end-to-end.
+
+`cluster:model` — the model gate, browser-free: clustering against a code-point control, the tiling
+with no gap or overlap including a deliberately NON-MONOTONIC input, rest contributing nothing, and
+both refusals. `textstyle:golden` 109 cases with **6 added and 0 changed**. `textstyle:schema` 35
+preset fields swept (was 33). `pnpm -r typecheck` clean across all six packages.
+
+**`render:compare:pixels` narrowed to `cluster-text`: 0.000% (0/2073600).** Both renderers agree
+exactly on a mid-flight reveal — which is the T-9 obligation and not a free result, because the two
+surfaces reach it by different routes (the DOM preview hands the layer to the shared raster; the
+export was already there).
+
+**Stills read, not just hashed.** The precedence stills show `HI` with the H arrived and the I not yet
+started at 0.45/0.6 — the stagger, not merely "something moved" — and the at-rest still is a clean
+`HI` with no seam between the glyphs and no darkened column, which is what a tiling failure would look
+like. The fixture shows `WAVE` with W and A in place, V mid-rise and semi-transparent, E not started.
+
+**`render:baseline`, full and unbatched, on a preflighted machine (0 automation browsers, 242 GB
+free): 85 of 85 checked fixtures byte-identical, 0 irreproducible.** Stated in that form rather than
+as "85/85 passed", per the founder's noise-floor rule. **7 fixtures were NOT CHECKED for want of a
+baseline** — `cluster-text` (captured after the sweep, see below) plus six pre-existing unbaselined
+transition fixtures, which are not this stage's and were deliberately left unregistered rather than
+swept up by a blanket `--capture`. Notably `text-warp` and `multi-stroke`, the two the last sweep
+found irreproducible, both came back `unchanged` here.
+
+**The noise floor, measured rather than predicted — and it caught this stage's own fixture.** `cluster-text`
+was captured at `d46ed61b2753` and then run twice, narrowed and consecutive, against that capture:
+
+```
+verify run 1   CHANGED    3/2073600 pixels (0.000%)
+verify run 2   unchanged
+```
+
+Same code, same baseline, same scope. So the earlier reading in this file — one parity run at 0.000%,
+which was explicitly not offered as a stability claim — was indeed not one. `cluster-text` sits on
+exactly the floor `text-warp` does, at the same 3/2073600 magnitude. **The baseline was NOT re-captured
+to make run 1 go away, and the entry was NOT dropped to keep the gate quiet**; both are laundering.
+Logged as `infrastructure.md` v2, which also records what these two readings falsify: the noise is
+run-to-run and NOT sweep-length-dependent, so a single byte-clean run is not evidence of stability at
+any scope. What keeps the stage's claims defensible
+independently of that floor is that its load-bearing checks are not the picture gate at all: the
+tiling is arithmetic (`cluster:model`, where a one-pixel gap is exactly representable and a subpixel
+AA wobble is not), and the at-rest equality is a hash comparison of a memcpy, which has no floor to
+sit on.
 
 **The paragraph below is now HISTORY for the axis half, kept for its S2.7 argument.** S9a shipped the
 axis and the argument here is what it was built on — that Google's index enumerates instances, so

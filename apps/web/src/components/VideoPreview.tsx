@@ -98,6 +98,8 @@ import {
   suppressMediaSources,
   type ProjectGraph,
   hasTextPathCurve,
+  parseTextClusterAnimation,
+  textClusterAnimationRefusal,
   normalizeProjectColorSettings,
   toOuterStrokeRunStyle,
   type SourceAsset,
@@ -6647,10 +6649,30 @@ function useWarpedTextImage(
    * the seam is the point — a curved-text image built somewhere else would be a second place that
    * has to remember the measure, the margin, the dpr and the font wait.
    */
-  const curveActive = isText && hasTextPathCurve(getCompositionTextStyle(layer, { currentTimeSeconds: currentTime }).textPathCurve as number | undefined);
-  const warpActive = isText && (hasTextWarp(layer.textWarp) || curveActive);
   const style = isText ? getCompositionTextStyle(layer, { currentTimeSeconds: currentTime }) : null;
   const runs = isText ? getVisibleTextRuns(layer, currentTime) : [];
+  const curveActive = isText && hasTextPathCurve(style?.textPathCurve as number | undefined);
+  /**
+   * ADR-023 S9 (OQ6) — a per-character reveal rides this hook too, for the third time and the same
+   * reason: the DOM cannot express it, and the version the DOM COULD express is the defect.
+   *
+   * Per-span transforms would look like the obvious implementation and would break the shaping run —
+   * each animated cluster becomes its own shaping context — which is precisely what T-14 forbids and
+   * what the spike measured. There is one per-character engine in the product (`drawTextLayer`), not
+   * a DOM one and a canvas one that agree by inspection (T-9).
+   *
+   * Only while it is RUNNING. A settled animation contributes nothing, so the layer stays ordinary
+   * DOM text — the same rule the raster path applies, read from the same resolved style, so the two
+   * cannot disagree about when a layer stops being a picture.
+   */
+  const clusterAnimation =
+    typeof style?.textClusterAnimation === "string" ? parseTextClusterAnimation(style.textClusterAnimation) : undefined;
+  const clusterActive = Boolean(
+    clusterAnimation &&
+      clusterAnimation.progress < 1 &&
+      !textClusterAnimationRefusal(runs.map((run) => run.text).join(""), { pathCurveActive: curveActive })
+  );
+  const warpActive = isText && (hasTextWarp(layer.textWarp) || curveActive || clusterActive);
   // Everything the DEFORMED picture depends on. The style object is keyed whole rather than by named
   // fields: warped text now carries every style plain text does (shadow stacks, gradient and image
   // fills, pills), and a hand-listed key would be the copy-list shape T-15 is about — the old key

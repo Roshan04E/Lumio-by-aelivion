@@ -27,6 +27,15 @@ import {
 } from "../composition-style";
 import { hasTextWarp } from "../text-warp";
 import type { FontRef } from "../fonts";
+import {
+  clusterPhase,
+  parseTextClusterAnimation,
+  segmentGraphemes,
+  textClusterAnimationOverhangEm,
+  textClusterAnimationRefusal,
+  tileSpans,
+  type TextClusterAnimation
+} from "../text-cluster-animation";
 import { isPinnedFontRef } from "../fonts";
 import { getCompositionFontAxesSource, getCompositionFontRef } from "../composition-style";
 import { fontAxisInstanceFamily, fontVariationSettingsCss, resolveFontVariationAxes } from "../font-variation";
@@ -683,6 +692,28 @@ function overlayInkMargin(layer: TimelineLayer, t: number, styleOptions: Overlay
     // first line's pill reaches above the element box. The comp-sized raster never clipped; the tight
     // box one would. `1.5×` bounds ascent+descent for the faces this ships with, and the term is
     // clamped at zero so a generous line-height adds nothing.
+    /**
+     * ADR-023 S9 — a cluster displaced out of the text box needs room to be displaced INTO, or the
+     * tight-box raster clips the very motion the stage exists for.
+     *
+     * It belongs to the INK margin rather than to `overlayOverhangMargin` because the displacement is
+     * part of the undeformed picture: warp sizes its source raster from this function, so a rising
+     * cluster under a warp gets its headroom here and nowhere else (P1 — the animation runs inside
+     * warp's inner draw).
+     *
+     * READ THROUGH THE SAME `activeClusterAnimation` THE DRAW USES, which is the whole point of that
+     * function existing. This margin decides the canvas SIZE, and a size is a picture: a layer whose
+     * animation is REFUSED (cursive script, curved run) but that still widened its raster would
+     * rasterize into a different canvas than the same layer without the fields — so P2 and P3 would
+     * fail on padding, having correctly refused to animate anything. The margin and the draw must
+     * answer "is this animation running" with one function, not with two conditions that agree today.
+     * Zero at rest, for the same reason one level down (P4).
+     */
+    const clusterAnimation = activeClusterAnimation(layer, t, style);
+    if (clusterAnimation) {
+      const overhang = textClusterAnimationOverhangEm(clusterAnimation) * num(style.fontSize, 72);
+      if (overhang > 0) m = Math.max(m, overhang + 2);
+    }
     if (style.textLinePill) {
       const fontSize = num(style.fontSize, 72);
       const padEm = String(style.padding ?? "0em 0em").split(" ");
@@ -719,6 +750,211 @@ function overlayInkMargin(layer: TimelineLayer, t: number, styleOptions: Overlay
   return m;
 }
 
+/**
+ * ADR-023 S9 — the layer's per-cluster animation IF it is going to run, else `undefined`.
+ *
+ * ONE function, called by the draw and by the margin, because the two must not answer the question
+ * separately. The margin decides the raster's canvas SIZE, and a size is a picture: if a layer whose
+ * animation is refused still widened its raster, it would rasterize into a different canvas than the
+ * same layer with no fields at all — so P2 and P3 would go red having correctly refused to animate.
+ * That is not a hypothetical; it is what this stage's first draft did.
+ *
+ * Warp is deliberately NOT consulted here. Warp is a composition, not a refusal (P1): under a warp
+ * this same function runs on the INNER draw, and the inner raster needs the headroom.
+ */
+function activeClusterAnimation(
+  layer: TimelineLayer,
+  t: number,
+  style: Record<string, unknown>
+): TextClusterAnimation | undefined {
+  if (typeof style.textClusterAnimation !== "string") return undefined;
+  const animation = parseTextClusterAnimation(style.textClusterAnimation);
+  if (!animation) return undefined;
+  const refusal = textClusterAnimationRefusal(
+    getVisibleTextRuns(layer, t)
+      .map((run) => run.text)
+      .join(""),
+    { pathCurveActive: hasTextPathCurve(num(style.textPathCurve, 0)) }
+  );
+  return refusal ? undefined : animation;
+}
+
+/**
+ * One cluster's slice of the finished raster, in DEVICE pixels of the canvas being drawn into, with
+ * where it goes and how solid it is.
+ */
+interface ClusterBand {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  /** Vertical displacement in device pixels. Fractional on purpose — see `buildClusterBands`. */
+  dy: number;
+  alpha: number;
+}
+
+/**
+ * ADR-023 S9 (OQ6, T-14) — the per-cluster bands of a finished text raster.
+ *
+ * The run is already shaped and painted by the time these are applied; this only decides where to CUT
+ * it. Two properties are load-bearing and both are asserted rather than described:
+ *
+ *  - **The bands TILE the canvas exactly** — every device pixel belongs to exactly one band, the first
+ *    span starts at 0 and the last ends at the canvas edge, horizontally and vertically. At zero
+ *    displacement the reassembly is therefore a memcpy of the source onto itself. `tileSpans` owns the
+ *    horizontal half and is unit-tested without a browser; the vertical half is the seam walk below.
+ *  - **Where the cuts fall is a QUALITY question, not a correctness one.** Band edges come from prefix
+ *    `measureText`, which is the only per-cluster geometry canvas 2D exposes. A slightly wrong edge
+ *    moves a slightly wrong set of pixels mid-flight; it cannot break the tiling, and it cannot break
+ *    the at-rest equality, because ANY tiling reassembles the source exactly. That is the whole reason
+ *    the technique survives a measurement source this weak — and it is exactly why it does NOT survive
+ *    a cursive script, where the edges are not merely imprecise but non-monotonic, so the ink of one
+ *    letter lands in another letter's band and moves with it. That case is refused upstream.
+ *
+ * VERTICAL SEAMS SIT IN THE GAP BETWEEN LINES' INK, not on the CSS line-box boundary. With this
+ * product's default `lineHeight` of 0.95 the ink box is TALLER than the line box, so a seam at the box
+ * boundary cuts through line one's descenders — and under a stagger those tails would then arrive with
+ * line two, which is a visible defect and not a subtle one. The midpoint of (upper line's ink bottom,
+ * lower line's ink top) is in the gap when there is one and splits the overlap evenly when there is
+ * not, and is monotonic either way, so the tiling survives it.
+ *
+ * `undefined` when the runtime cannot segment or the layer has no clusters to animate.
+ */
+function buildClusterBands(
+  ctx: Ctx,
+  layout: TextLayout,
+  animation: TextClusterAnimation,
+  matrix: { a: number; d: number; e: number; f: number },
+  canvasW: number,
+  canvasH: number
+): ClusterBand[] | undefined {
+  const { style, fontSize, padX, padY, textAlign, lines, lineHeights, boxW, boxH } = layout;
+  const baseDirection = style.direction === "rtl" ? "rtl" : style.direction === "ltr" ? "ltr" : undefined;
+  const contentLeft = -boxW / 2 + padX;
+  const contentRight = boxW / 2 - padX;
+  // The same rule the draw loop uses, and it must stay the same rule: a band computed from a different
+  // alignment than the glyphs were placed with slices the wrong columns.
+  const lineStartX = (lw: number): number => {
+    const physical =
+      textAlign === "start" ? (baseDirection === "rtl" ? "right" : "left")
+      : textAlign === "end" ? (baseDirection === "rtl" ? "left" : "right")
+      : textAlign;
+    return physical === "left" ? contentLeft : physical === "right" ? contentRight - lw : -lw / 2;
+  };
+  const toDeviceX = (x: number) => matrix.a * x + matrix.e;
+  const toDeviceY = (y: number) => matrix.d * y + matrix.f;
+
+  /** Per contributing line: its cluster start edges (device x) and its ink extent (device y). */
+  const rows: Array<{ starts: number[]; inkTop: number; inkBottom: number }> = [];
+  let lineOffsetY = 0;
+  for (const [lineIndex, line] of lines.entries()) {
+    const lineHeightPx = lineHeights[lineIndex] ?? fontSize * 1.2;
+    const lineBoxTop = -boxH / 2 + padY + lineOffsetY;
+    lineOffsetY += lineHeightPx;
+    if (!line.length) continue;
+
+    let lineAscent = 0;
+    let lineDescent = 0;
+    for (const word of line) {
+      ctx.font = word.font;
+      const m = ctx.measureText(word.text);
+      lineAscent = Math.max(lineAscent, m.fontBoundingBoxAscent ?? word.fontSize * 0.8);
+      lineDescent = Math.max(lineDescent, m.fontBoundingBoxDescent ?? word.fontSize * 0.2);
+    }
+    const baseline = lineBoxTop + (lineHeightPx - (lineAscent + lineDescent)) / 2 + lineAscent;
+
+    const pieces = collapseLine(line);
+    let x = lineStartX(lineWidth(ctx, line));
+    const starts: number[] = [];
+    // A whitespace cluster gets no band of its own: it is absorbed into the run of the cluster before
+    // it, because the span of band i is [start_i, start_{i+1}). Two reasons, and the second is the
+    // real one — a space has no ink to animate, and giving it a stagger slot would make the pause
+    // between two words as long as a letter, which reads as a stutter rather than as a cascade.
+    for (const [pieceIndex, word] of pieces.entries()) {
+      ctx.font = word.font;
+      if (pieceIndex > 0) x += ctx.measureText(" ").width;
+      const clusters = segmentGraphemes(word.text);
+      if (!clusters) return undefined;
+      let prefix = "";
+      for (const cluster of clusters) {
+        const at = x + ctx.measureText(prefix).width;
+        if (cluster.trim() || !starts.length) starts.push(Math.round(toDeviceX(at)));
+        prefix += cluster;
+      }
+      x += ctx.measureText(word.text).width;
+    }
+    if (!starts.length) continue;
+    rows.push({ starts, inkTop: toDeviceY(baseline - lineAscent), inkBottom: toDeviceY(baseline + lineDescent) });
+  }
+  if (!rows.length) return undefined;
+
+  // The seams, over the CONTRIBUTING lines only. A blank line contributes no band, so a seam drawn at
+  // its boundary would leave a horizontal strip belonging to nobody — and a strip belonging to nobody
+  // is a strip that is never drawn.
+  const seams: number[] = [0];
+  for (let i = 1; i < rows.length; i += 1) {
+    const seam = Math.round((rows[i - 1]!.inkBottom + rows[i]!.inkTop) / 2);
+    seams.push(Math.max(seams[i - 1]!, Math.min(canvasH, seam)));
+  }
+  seams.push(canvasH);
+
+  const total = rows.reduce((sum, row) => sum + row.starts.length, 0);
+  const bands: ClusterBand[] = [];
+  let index = 0;
+  for (const [rowIndex, row] of rows.entries()) {
+    const y0 = seams[rowIndex]!;
+    const y1 = Math.max(y0, seams[rowIndex + 1]!);
+    for (const span of tileSpans(row.starts, 0, canvasW)) {
+      const phase = clusterPhase(index, total, animation);
+      index += 1;
+      // Device-space displacement, deliberately NOT rounded: the bands themselves are integer rects so
+      // the SOURCE read is exact, but rounding the destination would quantize the motion to whole
+      // pixels and make a slow rise visibly step. At rest this path is never reached at all.
+      bands.push({ x0: span.x0, x1: span.x1, y0, y1, dy: phase.offsetEm * fontSize * matrix.d, alpha: phase.alpha });
+    }
+  }
+  return bands;
+}
+
+/**
+ * The layer warp's inner draw is given: the same layer with the warp and the curve stripped from BOTH
+ * homes.
+ *
+ * `getCompositionTextWarp` reads the top-level field and the style bag, because those are the two
+ * shapes a layer arrives in (editor vs manifest) — so clearing only the one this layer happens to use
+ * makes the recursion terminate for the editor and run forever for the export, which is exactly what
+ * it did for one render.
+ *
+ * ADR-023 S8: the CURVE is stripped here too, and it is not tidiness — the inner call is an ordinary
+ * draw, so a curve left on it would be applied and THEN deformed, composing two geometries in an order
+ * nobody decided. `TimelineLayer.textPathCurve` says warp wins; this is where that is true.
+ *
+ * ADR-023 S9: it is a FUNCTION rather than an inline literal because the margin has to be measured on
+ * it too. `overlayInkMargin` decides the source raster's size, and stripping the curve changes whether
+ * a per-cluster animation is refused — so measuring the outer layer and drawing the inner one budgets
+ * for one picture and paints another.
+ */
+function warpSourceLayer(layer: TimelineLayer): TimelineLayer {
+  const cleared = { textWarp: undefined, textPathCurve: undefined };
+  return {
+    ...layer,
+    ...cleared,
+    ...("style" in layer && layer.style ? { style: { ...(layer.style as Record<string, unknown>), ...cleared } } : {})
+  } as TimelineLayer;
+}
+
+/** Strip the animation from BOTH homes, for the recursive draw that produces the raster to slice. */
+function withoutClusterAnimation(layer: TimelineLayer): TimelineLayer {
+  const cleared = { clusterRevealProgress: undefined, clusterRiseEm: undefined, clusterStaggerFraction: undefined };
+  return {
+    ...layer,
+    ...cleared,
+    // Both homes, for the reason D9a's warp recursion records: clearing only the one THIS layer
+    // happens to use makes the recursion terminate in the editor and run forever in the export.
+    ...("style" in layer && layer.style ? { style: { ...(layer.style as Record<string, unknown>), ...cleared } } : {})
+  } as TimelineLayer;
+}
+
 export async function drawTextLayer(
   ctx: Ctx,
   layer: TimelineLayer,
@@ -733,6 +969,13 @@ export async function drawTextLayer(
   if (!layout) return { boxW: 0, boxH: 0 };
   const { runs, style, fontSize, letterSpacing, padX, padY, radius, background, textAlign, lines, lineHeights, boxW, boxH } = layout;
   const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
+  /**
+   * ADR-023 S9 — the transform this context arrived with, captured BEFORE the block below adds the
+   * layer's own. The per-cluster slice draws its source raster through a recursive call, and that call
+   * applies the layer transform itself; handing it a context that already had one would place the
+   * source twice as far out as the destination and the slice would read the wrong pixels.
+   */
+  const entryTransform = ctx.getTransform();
 
   if (letterSpacing) ctx.letterSpacing = letterSpacing;
 
@@ -764,8 +1007,56 @@ export async function drawTextLayer(
     ctx.translate((-((transform.anchorX ?? 50) - 50) / 100) * boxW, (-((transform.anchorY ?? 50) - 50) / 100) * boxH);
   }
 
-  // Background box.
-  if (background && background !== "transparent" && background !== "none") {
+  /**
+   * ADR-023 S9 (OQ6, T-14) — does a per-cluster slice run on THIS call?
+   *
+   * Resolved here, above the background box, because the two answers interact: when the slice owns the
+   * picture, the whole picture — background included — is drawn into the source raster, so painting
+   * the background here as well would lay it down twice (identical pixels for an opaque colour, a
+   * doubled composite for a translucent one).
+   *
+   * ## THE PRECEDENCE, AND WHERE EACH HALF OF IT IS ENFORCED (`text:s9-precedence`)
+   *
+   * **P1 — the animation composes UNDER warp, and control flow is what says so.** When a warp is
+   * active this call does NOT slice: it takes the warp branch below, whose inner draw is an ordinary
+   * draw of this same function with `textWarp` stripped and the animation LEFT ON. The slice therefore
+   * happens inside, on the flat picture, and the warp deforms the already-animated result. That is the
+   * useful composition and it costs nothing — but S8 shipped "warp wins over a curve" as a doc comment
+   * that the code did not implement, so the ordering here is written as one condition rather than as a
+   * rule two branches are each expected to remember.
+   *
+   * **P2 — the curve WINS, and it is a refusal, not a composition.** A curved run is one finished
+   * picture from the SVG surface with no per-glyph positions along the arc; there is nothing to slice
+   * and prefix-measured straight bands would displace ink that is not where they think it is.
+   *
+   * **P3 — a shaping-dependent script WINS.** Measured, not chosen: `detectTextScript` decides, and
+   * the reason is in `text-cluster-animation.ts`.
+   *
+   * **P4 — at rest the slice STILL RUNS, and produces the source back byte for byte.** This is the
+   * one place the obvious optimisation is refused on purpose. Skipping the slice once every cluster
+   * has arrived would make P4 pass by construction — the ordinary draw compared against the ordinary
+   * draw — and P4's whole job is to catch a slice that does NOT reassemble exactly, which is OQ6's
+   * equality and the acceptance bar for the technique. A gate that can only pass is not a gate. At
+   * rest every band is at zero displacement and full alpha, so the reassembly is a memcpy; if it ever
+   * stops being one, P4 goes red, which is the reading we want.
+   */
+  const activeWarpForClusters = getCompositionTextWarp(layer);
+  const clusterAnimation = activeClusterAnimation(layer, t, style);
+  const clusterMatrix = ctx.getTransform();
+  const sliceClusters =
+    clusterAnimation &&
+    !hasTextWarp(activeWarpForClusters) &&
+    // The slice reads and writes axis-aligned device rectangles, so a rotated or skewed destination
+    // has no such rectangle to read. No caller produces one for text — the two modes text is ever
+    // drawn in ("content", "box") are translate-and-uniform-scale — and the honest reading of a
+    // caller that someday does is unanimated text rather than ink sliced along the wrong axis.
+    Math.abs(clusterMatrix.b) < 1e-9 &&
+    Math.abs(clusterMatrix.c) < 1e-9
+      ? clusterAnimation
+      : undefined;
+
+  // Background box. Skipped when the slice owns the picture — see the note above.
+  if (!sliceClusters && background && background !== "transparent" && background !== "none") {
     ctx.fillStyle = background;
     roundRect(ctx, -boxW / 2, -boxH / 2, boxW, boxH, radius);
     ctx.fill();
@@ -800,7 +1091,12 @@ export async function drawTextLayer(
     // the undeformed picture. The DESTINATION carries the warp margin, added by
     // `overlayOverhangMargin`, which is what keeps a bend from being clipped by the box it bends out
     // of when the caller sized a tight raster.
-    const inkMargin = overlayInkMargin(layer, t, styleOptions);
+    // Measured on the layer the INNER draw is actually given, not on this one. ADR-023 S9: the inner
+    // layer has the curve stripped, and the curve is one of the two things that REFUSES a per-cluster
+    // animation — so a warped+curved layer would size its source raster for no animation and then
+    // hand the inner draw a layer whose animation runs, clipping the rise against a box budgeted
+    // without it. Everything else this reads (shadow, stroke, pill) is identical on both.
+    const inkMargin = overlayInkMargin(warpSourceLayer(layer), t, styleOptions);
     const srcW = boxW + 2 * inkMargin;
     const srcH = boxH + 2 * inkMargin;
     const srcScale = Math.min(rasterScale * superSample, Math.max(1, MAX_WARP_SOURCE_DIM / Math.max(srcW, srcH)));
@@ -822,15 +1118,7 @@ export async function drawTextLayer(
       // line is where that is true. Both homes, for the reason the note above gives about `textWarp`
       // itself: clearing only the one this layer happens to use makes the rule hold in the editor
       // and fail in the export, which is the shape that already cost this file one hang.
-      const plain = {
-        ...layer,
-        textWarp: undefined,
-        textPathCurve: undefined,
-        ...("style" in layer && layer.style
-          ? { style: { ...(layer.style as Record<string, unknown>), textWarp: undefined, textPathCurve: undefined } }
-          : {})
-      } as TimelineLayer;
-      await drawTextLayer(offCtx, plain, t, W, H, "box", srcScale, styleOptions);
+      await drawTextLayer(offCtx, warpSourceLayer(layer), t, W, H, "box", srcScale, styleOptions);
       drawWarpedRaster(ctx, {
         ...field,
         source: off as unknown as HTMLCanvasElement,
@@ -843,6 +1131,65 @@ export async function drawTextLayer(
       ctx.restore();
       ctx.letterSpacing = "";
       return { boxW, boxH };
+    }
+  }
+
+  /**
+   * ADR-023 S9 (OQ6, T-14) — per-character animation: SHAPE AND RASTERIZE ONCE, THEN SLICE.
+   *
+   * The same technique D9a chose for warp, one level down, and it is chosen for the same reason: the
+   * alternative re-opens shaping. Drawing one `fillText` per cluster at its prefix-measured x looks
+   * equivalent and is not — each call shapes its cluster in ISOLATION, which the spike measured moving
+   * 34.4% of the ink on Arabic (isolated forms instead of joined ones) and changing kerning on Latin.
+   * Here the whole run is shaped and painted ONCE, into a canvas with this one's exact geometry, and a
+   * cluster is a pixel-exact `drawImage` of that raster's own band. Shaping happens strictly before
+   * anything moves, so moving cannot re-open it.
+   *
+   * WHY THE SOURCE CANVAS IS THE DESTINATION'S TWIN, down to the transform. Any other size or scale
+   * would make every band a resample, and the at-rest equality — the acceptance bar for the slicing
+   * itself — would then be "close" rather than byte-identical. Same dimensions and the same entry
+   * transform means the bands are integer device rectangles copied 1:1 onto themselves, which is a
+   * memcpy. `text:s9-precedence`'s P4 asserts exactly that, through this path, at zero displacement,
+   * paired with a SUBJECT proving the comparison could have failed.
+   *
+   * A DRAFT THAT CLIPPED AND REDREW PER BAND was measured and rejected before this one (the spike's
+   * own record): it came within ~7 ink pixels of the reference and was never byte-identical, because
+   * canvas antialiases a CLIP edge, so abutting bands each contribute partial coverage at the seam.
+   * Slicing a finished raster has no seam to antialias. "Within 7 pixels" is exactly the reading a
+   * zero-tolerance gate cannot distinguish from its own noise floor, which is why the difference
+   * between the two drafts is the whole technique rather than an implementation detail.
+   *
+   * The recursion is one level deep and cannot go further: the animation is stripped from both homes,
+   * so the inner call takes the ordinary path.
+   */
+  if (sliceClusters) {
+    const off = makeCanvas2D(ctx.canvas.width, ctx.canvas.height);
+    const offCtx = off.getContext("2d") as Ctx | null;
+    if (offCtx) {
+      offCtx.setTransform(entryTransform.a, entryTransform.b, entryTransform.c, entryTransform.d, entryTransform.e, entryTransform.f);
+      await drawTextLayer(offCtx, withoutClusterAnimation(layer), t, W, H, mode, rasterScale, styleOptions);
+      const bands = buildClusterBands(ctx, layout, sliceClusters, clusterMatrix, ctx.canvas.width, ctx.canvas.height);
+      if (bands) {
+        const baseAlpha = ctx.globalAlpha;
+        ctx.save();
+        // Device space: the bands are already there, and the transform that produced them is the one
+        // baked into the source raster. Re-applying it would place each band twice.
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        for (const band of bands) {
+          const w = band.x1 - band.x0;
+          const h = band.y1 - band.y0;
+          if (w <= 0 || h <= 0 || band.alpha <= 0) continue;
+          ctx.globalAlpha = baseAlpha * band.alpha;
+          ctx.drawImage(off as unknown as CanvasImageSource, band.x0, band.y0, w, h, band.x0, band.y0 + band.dy, w, h);
+        }
+        ctx.restore();
+        ctx.restore();
+        ctx.letterSpacing = "";
+        return { boxW, boxH };
+      }
+      // `buildClusterBands` declined — no segmenter, or nothing to animate. Fall through to the
+      // ordinary draw rather than emitting the un-sliced source raster through a second blit, which
+      // would be the same picture arrived at by a resample.
     }
   }
 

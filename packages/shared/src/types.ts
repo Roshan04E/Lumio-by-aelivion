@@ -246,6 +246,16 @@ export interface TextStyleFields {
   strokeOuterWidth?: number | undefined;
   /** See {@link TimelineLayer.textPathCurve}. ADR-023 S8 — text on a path. */
   textPathCurve?: number | undefined;
+  /**
+   * See {@link TimelineLayer.clusterRiseEm} / {@link TimelineLayer.clusterStaggerFraction}. ADR-023
+   * S9 — the SHAPE of a per-character reveal is part of the look, so a saved style carries it.
+   *
+   * `clusterRevealProgress` is deliberately NOT here. It is a position in time, not a look: a preset
+   * carrying "40% revealed" would apply a frozen mid-flight state to a layer whose reveal the author
+   * has not keyframed yet. A style captured before S9 has no key, which keeps meaning "no animation".
+   */
+  clusterRiseEm?: number | undefined;
+  clusterStaggerFraction?: number | undefined;
   /** See {@link TimelineLayer.fillGradientFrom}. ADR-023 S5 — tier-1 gradient fill. */
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
@@ -988,6 +998,32 @@ export interface TimelineLayer {
    * **ABSENT MEANS STRAIGHT, permanently and without migration** (D1a).
    */
   textPathCurve?: number | undefined;
+  /**
+   * ADR-023 S9 (OQ6, T-14) — **per-character animation**: how far the reveal has got, 0 to 1.
+   *
+   * A "character" here is a GRAPHEME CLUSTER and nothing else — see `text-cluster-animation.ts` for
+   * why that is a correctness decision rather than a precision one, and why a runtime without
+   * `Intl.Segmenter` refuses the animation instead of falling back to code points.
+   *
+   * **Keyframable** (`style.clusterRevealProgress`), which is what makes this a reveal. The stage
+   * adds no animation system: the property rides the existing keyframe evaluator, and the only new
+   * arithmetic is how one property value is distributed across N clusters.
+   *
+   * **ABSENT MEANS NO ANIMATION, permanently** (D1a) — and absent is a different thing from a
+   * progress of 1. Absent emits no animation key at all, so an existing text layer's emitted style
+   * and its raster cache key are byte-identical to what they were before this stage. A layer at
+   * progress 1 has an animation that has FINISHED, and renders through the ordinary unsliced draw so
+   * that "settled" and "absent" are the same picture rather than two pictures that look alike.
+   *
+   * **Refused, visibly, on a shaping-dependent script and on a curved run** — `detectTextScript` and
+   * `textPathCurve` respectively (P2/P3 of `text:s9-precedence`). Warp is NOT a refusal: the
+   * animation composes UNDER a warp, which deforms the already-animated picture (P1).
+   */
+  clusterRevealProgress?: number | undefined;
+  /** ADR-023 S9 — how far below its resting place a cluster starts, in em. 0 is a pure fade. */
+  clusterRiseEm?: number | undefined;
+  /** ADR-023 S9 — share of the reveal spent handing off between clusters; 0 moves them together. */
+  clusterStaggerFraction?: number | undefined;
   /**
    * ADR-023 D7 (S5) — **tier-1 gradient fill for the glyphs**, the CSS `background-clip: text` look.
    *

@@ -6,6 +6,12 @@ import { applyTransitionEasing, getTransition, resolveTransitionParams, type Tra
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
 import { resolveFontVariationAxes } from "./font-variation";
 import { fontRefCss, fontRefKey, normalizeFontRef, type FontRef } from "./fonts";
+import {
+  hasTextClusterAnimationSource,
+  resolveTextClusterAnimation,
+  textClusterAnimationCss,
+  type TextClusterAnimation
+} from "./text-cluster-animation";
 import { detectTextScript } from "./text-script";
 import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, SourceTextKeyframe, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
 
@@ -68,6 +74,10 @@ export interface CompositionLayerStyleInput {
   strokeOuterColor?: string | undefined;
   strokeOuterWidth?: number | undefined;
   textPathCurve?: number | undefined;
+  /** ADR-023 S9 — per-character animation. See {@link TimelineLayer.clusterRevealProgress}. */
+  clusterRevealProgress?: number | undefined;
+  clusterRiseEm?: number | undefined;
+  clusterStaggerFraction?: number | undefined;
   fillGradientFrom?: string | undefined;
   fillGradientTo?: string | undefined;
   fillGradientAngle?: number | undefined;
@@ -790,6 +800,13 @@ export interface ResolvedTextStyle {
    */
   textPathCurve: number;
   /**
+   * ADR-023 S9 (OQ6). The per-character animation, or ABSENT — and absent is a different state from
+   * "settled", deliberately. Resolved here, once, because the raster and the DOM overlay must not
+   * each decide whether a layer has one; the DOM overlay's answer decides whether it hands the layer
+   * to the shared raster at all.
+   */
+  clusterAnimation: TextClusterAnimation | undefined;
+  /**
    * ADR-023 S5. The two-stop glyph gradient, or ABSENT — and absent is the state a half-authored
    * gradient collapses to, so "one stop set" can never emit a one-colour gradient that reads as a
    * broken fill. Resolution is where that rule lives, not emission, because the raster and the DOM
@@ -871,6 +888,17 @@ export function resolveTextStyle(
       const raw = animStyleNumber(layer, options, "style.textPathCurve", numberOr(layer.textPathCurve ?? style.textPathCurve, 0));
       return hasTextPathCurve(raw) ? Math.max(-100, Math.min(100, raw)) : 0;
     })(),
+    /**
+     * ADR-023 S9 (OQ6). Read from BOTH homes — the layer's own field and the manifest style bag —
+     * through `styleOf`, which is the treatment `getCompositionTextWarp` had to be given after warp
+     * shipped for months rendering in the editor and not at all in the export. A stage that reads
+     * only `layer.x` is that defect pre-written.
+     *
+     * `progress` goes through `animStyleNumber` and the other two do not, and that asymmetry is the
+     * feature: progress is the thing a keyframe drives (it is what makes this a reveal), while rise
+     * and stagger are the shape of the reveal and hold still while it runs.
+     */
+    clusterAnimation: resolveClusterAnimation(layer, style, options),
     // ADR-023 D7 (S5). BOTH stops or nothing — resolved here so the raster and the DOM cannot answer
     // "is there a gradient" differently, and so a half-authored one falls back to the solid fill
     // rather than emitting a one-colour gradient that reads as a bug.
@@ -905,6 +933,37 @@ export function resolveTextStyle(
     // single shadow every project emitted before this field existed.
     shadowLayers: resolveShadowLayers(layer.shadowLayers ?? style.shadowLayers)
   };
+}
+
+/**
+ * ADR-023 S9 (OQ6) — the per-character animation, or `undefined`.
+ *
+ * DECLARATION IS DECIDED FIRST, AND ONLY THEN IS PROGRESS EVALUATED. A keyframe track alone does not
+ * declare an animation: `animStyleNumber` returns its fallback for a layer with no keyframes, so
+ * running it unconditionally would give every text layer in the product a resolved animation sitting
+ * at progress 1. That is the same picture — and a new key in every emitted style object, which is a
+ * real change to what `scene-text-raster` caches on and to all 103 recorded goldens, for a layer
+ * nobody animated. Absent stays absent (D1a).
+ */
+function resolveClusterAnimation(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  style: Record<string, unknown>,
+  options: CompositionStyleOptions
+): TextClusterAnimation | undefined {
+  const declared = {
+    clusterRevealProgress: numberOrUndefined(layer.clusterRevealProgress ?? (style.clusterRevealProgress as number | undefined)),
+    clusterRiseEm: numberOrUndefined(layer.clusterRiseEm ?? (style.clusterRiseEm as number | undefined)),
+    clusterStaggerFraction: numberOrUndefined(
+      layer.clusterStaggerFraction ?? (style.clusterStaggerFraction as number | undefined)
+    )
+  };
+  if (!hasTextClusterAnimationSource(declared)) return undefined;
+  return resolveTextClusterAnimation({
+    ...declared,
+    // Progress is the one a keyframe drives — the reveal itself. Rise and stagger are the SHAPE of
+    // the reveal and hold still while it runs, which is also why only those two are presetable.
+    clusterRevealProgress: animStyleNumber(layer, options, "style.clusterRevealProgress", declared.clusterRevealProgress ?? 1)
+  });
 }
 
 /**
@@ -1024,6 +1083,7 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
   // VideoPreview.tsx / remotion/Root.tsx and font-outlines.ts.
   const filter = combineFilter(effectCss.filter, getCompositionColorFilter(layer, options));
   const linePill = textLinePillCss(resolved, paddingEmY, paddingEmX);
+  const clusterAnimation = textClusterAnimationCss(resolved.clusterAnimation);
 
   return {
     left: `${transform.x}%`,
@@ -1115,7 +1175,24 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
      * for the reason all four before it are: this is what `scene-text-raster` keys its cache on, and
      * a look outside it is a stale raster nothing can see.
      */
-    textPathCurve: resolved.textPathCurve || undefined
+    textPathCurve: resolved.textPathCurve || undefined,
+    /**
+     * ADR-023 S9 (OQ6) — the per-character animation, as the SIXTH non-CSS key and the first one
+     * SPREAD rather than assigned.
+     *
+     * In the style object for the reason the five before it are: this is what every renderer reads
+     * and what `scene-text-raster` keys its cache on, so a look outside it is a stale raster nothing
+     * can see — and this one changes every frame while it runs, which makes being keyed the
+     * difference between a reveal and a still.
+     *
+     * SPREAD, so the key is ABSENT rather than `undefined` for a layer that declared no animation.
+     * The five keys above are all assigned, and following them would have been the smaller diff — but
+     * `textstyle:golden` distinguishes an absent key from an undefined one ON PURPOSE, because the
+     * cache key is built from this object. Assigning would have moved all 103 goldens and every text
+     * layer's cache key in every existing project, to record that nothing was animating. Absence is
+     * the emission of "no animation" (D1a).
+     */
+    ...(clusterAnimation ? { textClusterAnimation: clusterAnimation } : {})
   };
 }
 
@@ -1687,6 +1764,12 @@ export const MANIFEST_LAYER_STYLE_KEYS = [
   "strokeOuterWidth",
   // ADR-023 D8 (S8) — text on a path.
   "textPathCurve",
+  // ADR-023 S9 (OQ6) — per-character animation. All three, because the manifest is where the export
+  // reads a layer from and a reveal missing its progress is a still frame of a feature that "works in
+  // the editor" — the exact shape D9a found warp in after months (see `getCompositionTextWarp`).
+  "clusterRevealProgress",
+  "clusterRiseEm",
+  "clusterStaggerFraction",
   // ADR-023 D7 (S5). Same story as `fontRef` above: the exhaustiveness constraint below refused to
   // compile until these five were listed, which is the constraint doing the job T-15 gave it.
   "fillGradientFrom",

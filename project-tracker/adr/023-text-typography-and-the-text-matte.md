@@ -811,6 +811,15 @@ must either resolve OQ6 or apply T-12's discipline: detect the shaping-dependent
 itself visibly. Shipping S9 over Arabic without one of the two reintroduces, in a new feature,
 exactly the defect S7's warp rework was written to remove.
 
+**SATISFIED 2026-08-16 (S9), by both routes at once — see OQ6's closure.** The non-cursive half
+RESOLVES it (rasterize once, then slice, so shaping happens before anything moves); the cursive half
+DISABLES visibly on `detectTextScript`'s reading, because there the band edges are provably wrong.
+
+**The tripwire stays live rather than retiring with the stage that satisfied it.** T-14 is about ANY
+operation that transforms text below the level of a shaping run, and S9 is the second such operation,
+not the last. A third one must not reach for per-cluster `fillText` on the grounds that "S9 already
+does per-character animation" — S9 does it by never drawing a cluster on its own.
+
 ---
 
 ## 6. Out of scope
@@ -1028,6 +1037,42 @@ wrong spacing, acceptable." For a cursive script it is not — breaking the shap
 old one was fixed. T-14 makes that non-optional: S9 either resolves this or disables per-character
 animation visibly on shaping-dependent scripts, the way T-12 does for warp. The open part is only
 which of the two; that S9 may not simply ship over it is now decided.
+
+**CLOSED 2026-08-16 (S9). BOTH — and the split between them is measured, not chosen.**
+
+**A character is a GRAPHEME CLUSTER, from `Intl.Segmenter`.** The spike measured what a code-point
+split does to the three cases the question named: 2 code points → 1 cluster (combining marks), 5 → 1
+(emoji ZWJ), and a Devanagari conjunct a code-point split reports as three "characters".
+`Intl.Segmenter` is present in both renderers; where it is not, the animation is REFUSED rather than
+falling back to code points, because a per-code-point reveal is not a slightly worse version of this
+feature — it is the defect the question was asked to avoid, shipped under the feature's name.
+
+**Shaping is RESOLVED for non-cursive scripts, by not re-opening it.** Shape and rasterize the run
+ONCE, then SLICE the finished raster into per-cluster bands. Shaping happens strictly before anything
+moves, so moving cannot re-open it — the same technique D9a chose for warp, one level down, and
+chosen for the same reason. The alternative that looks equivalent is one `fillText` per cluster at its
+prefix-measured x; it moves 34.4% of the ink on Arabic (isolated forms instead of joined ones) and
+changes kerning on Latin. **At zero displacement the slices tile the source back byte-identically**,
+which is the acceptance bar for the technique and is asserted through the shipped path
+(`text:s9-precedence` P4) rather than argued.
+
+A CLIP-and-redraw draft was measured and rejected first: within ~7 ink pixels of the reference and
+never byte-identical, because canvas antialiases a clip edge, so abutting bands each contribute
+partial coverage at the seam. "Within 7 pixels" is exactly the reading a zero-tolerance picture gate
+cannot separate from its own floor, which is why the difference between the two drafts is the whole
+technique rather than an implementation detail.
+
+**Shaping is NOT resolved for cursive scripts, and that half applies T-12's discipline.** The slice
+needs per-cluster bands; canvas 2D exposes no per-glyph positions, so prefix `measureText` is the only
+source there is — and it shapes each prefix in ISOLATION, so a prefix ending mid-word takes a FINAL
+form where the run gives a MEDIAL one. Measured: **2 of 13 Arabic prefix widths go BACKWARDS**. The
+band edges are wrong before a pixel is drawn. So `detectTextScript` decides, and a shaping-dependent
+script is disabled visibly — the third consumer the S0 amendment predicted, and the reason the
+detector survived S7 half B's retirement of its first one.
+
+**The line is drawn by `detectTextScript`, never by a measured sample.** The spike's Devanagari sample
+sliced exactly — it happens to have no cross-cluster shaping — and that is a fact about the sample.
+Reading it as a fact about the script would have shipped the animation over conjuncts.
 
 **OQ7 — Does a missing *user* font on a second machine hard-fail export, or relink first?** D3 says
 relink, then hard-fail on decline. But a collaborator who does not *own* the licensed font can never

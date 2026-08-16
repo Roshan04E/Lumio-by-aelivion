@@ -35,8 +35,18 @@ import {
 import type { TextStyleFields, TimelineLayer } from "./types";
 import type { PropertyValuesEnvelope } from "./property-schema";
 
-/** Every key this schema describes. Constrained to real layer keys, so a typo cannot compile. */
-export type TextStyleSchemaKey = keyof TimelineLayer & (keyof TextStyleFields | "textWidthPercent");
+/**
+ * Every key this schema describes. Constrained to real layer keys, so a typo cannot compile.
+ *
+ * The two keys named explicitly are the two the inspector must be able to DESCRIBE without a preset
+ * being allowed to CARRY them, and they are the same kind of exception for two different reasons:
+ * `textWidthPercent` is placement, and a look that reflowed its target would not be a look;
+ * `clusterRevealProgress` (S9) is a position in TIME, and a preset carrying "40% revealed" would
+ * paste a frozen mid-flight frame of an animation the author has not keyframed. Both are held out of
+ * `TextStyleFields` and therefore out of the presetable set, which the constraint below enforces.
+ */
+export type TextStyleSchemaKey = keyof TimelineLayer &
+  (keyof TextStyleFields | "textWidthPercent" | "clusterRevealProgress");
 
 /** A key a preset/clipboard envelope carries — the `presetable` subset, and exactly `TextStyleFields`. */
 export type TextStyleFieldKey = keyof TextStyleFields & keyof TimelineLayer;
@@ -324,6 +334,71 @@ const fields = [
     documentation: {
       aiSynonyms: ["arc text", "text on a path", "curved text", "circle text"],
       description: "Bends the run onto a circular arc. Positive arcs up, negative down; ±100 wraps a half circle."
+    }
+  },
+  /**
+   * ADR-023 S9 (OQ6) — per-character animation, as THREE fields for the reason S8's ring is two and
+   * S5's gradient is three: the composite kinds are frozen out of ADR-003's taxonomy until
+   * `PropertyFieldList` can build them, and inventing an encoding over `number` fields to dodge that
+   * would be the taxonomy decision taken by accident. Third time; the answer has been decomposition
+   * every time.
+   *
+   * `clusterRevealProgress` is the one a keyframe drives and is deliberately NOT presetable — a
+   * preset carrying "40% revealed" would apply a frozen mid-flight state. The other two are the SHAPE
+   * of the reveal, which is exactly what a look should carry.
+   */
+  {
+    key: "clusterRevealProgress",
+    kind: "number",
+    unit: "ratio",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    group: "typography",
+    label: "Reveal",
+    animatableAs: "style.clusterRevealProgress",
+    // Absent is "no per-character animation", permanently (D1a) — and a 1 written in on load would
+    // not be the same thing: it would put an animation key into every text layer's emitted style and
+    // move the raster cache key of every project, to record that nothing is animating.
+    absenceIsMeaningful: true,
+    presetable: false,
+    documentation: {
+      aiSynonyms: ["per-character reveal", "letter by letter", "character animation", "text reveal"],
+      description:
+        "How far a per-character reveal has got, 0 to 1. A character is a grapheme cluster. Keyframe this; the other two shape it. Refused on scripts that need shaping (Arabic, Devanagari, Thai) and on a curved run."
+    }
+  },
+  {
+    key: "clusterRiseEm",
+    kind: "number",
+    unit: "ratio",
+    min: -5,
+    max: 5,
+    step: 0.05,
+    group: "typography",
+    label: "Rise",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      aiSynonyms: ["letter rise", "pop up", "character offset"],
+      description: "How far below its resting place each character starts, in em. 0 is a pure fade."
+    }
+  },
+  {
+    key: "clusterStaggerFraction",
+    kind: "number",
+    unit: "ratio",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    group: "typography",
+    label: "Stagger",
+    absenceIsMeaningful: true,
+    presetable: true,
+    documentation: {
+      aiSynonyms: ["letter delay", "cascade", "sequential"],
+      description:
+        "Share of the reveal spent handing off between characters. 0 moves them together; higher runs them one after another. A fraction, not seconds, so a long title reveals in the same time as a short one."
     }
   },
   {

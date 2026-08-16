@@ -226,6 +226,36 @@ const cases: Array<{ name: string; layer: TimelineLayer; options?: Record<string
   { name: "text/path-curve-clamped", layer: textLayer({ textPathCurve: 400 }) },
   { name: "text/path-curve-in-style-bag", layer: textLayer({ style: { textPathCurve: 55 } }) },
 
+  /**
+   * --- S9: per-character animation ------------------------------------------------------------
+   *
+   * The first case is the one that matters most and it looks like a non-case: a layer with NO cluster
+   * field must emit no `textClusterAnimation` key AT ALL — absent, not `undefined`. This gate
+   * distinguishes the two on purpose (see its header), because `scene-text-raster` builds its content
+   * cache key from this object, so an added `undefined` would move the cache key of every text layer
+   * in every existing project to record that nothing is animating. That is why all 103 pre-S9 goldens
+   * are byte-identical rather than merely equivalent, and this case is what keeps them that way.
+   */
+  { name: "text/cluster-absent", layer: textLayer({ color: "#ff0000" }) },
+  { name: "text/cluster-mid-flight", layer: textLayer({ clusterRevealProgress: 0.45, clusterRiseEm: 0.8, clusterStaggerFraction: 0.6 }) },
+  // Declared and FINISHED. Emits an animation — it has one, it is just over — which is a different
+  // emitted style from the absent case above and the same PICTURE. Both halves are the D1a claim.
+  { name: "text/cluster-at-rest", layer: textLayer({ clusterRevealProgress: 1, clusterRiseEm: 0.8, clusterStaggerFraction: 0.6 }) },
+  // One field declares the animation; the other two take their resting values rather than staying
+  // absent, because a partly-authored animation is still an animation (unlike a partly-authored
+  // gradient, which is not a gradient — see `resolveFillGradient`).
+  { name: "text/cluster-rise-only", layer: textLayer({ clusterRiseEm: 0.8 }) },
+  { name: "text/cluster-in-style-bag", layer: textLayer({ style: { clusterRevealProgress: 0.3, clusterRiseEm: 1 } }) },
+  {
+    name: "text/cluster-keyframed",
+    layer: textLayer({
+      clusterRevealProgress: 0,
+      clusterRiseEm: 0.8,
+      animations: styleKeyframes("style.clusterRevealProgress", 0, 1)
+    }),
+    options: { currentTimeSeconds: 2 }
+  },
+
   // --- S5b: image fill — the id → URL resolution, and every way it can decline -------------------
   { name: "text/fill-texture-absent", layer: textLayer({ color: "#ff0000" }), options: fillTextureOptions },
   { name: "text/fill-texture-no-resolver", layer: textLayer({ fillTextureAssetId: GOLDEN_ASSET_ID }) },

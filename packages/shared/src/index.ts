@@ -75,6 +75,7 @@ export * from "./text-styles";
 // S6: the second adopter (shapes) and the preset library over both. One envelope, two schemas (T-10).
 export * from "./shape-style-schema";
 export * from "./style-presets";
+export * from "./text-cluster-animation";
 export * from "./text-script";
 export * from "./text-warp";
 export * from "./text-warp-mesh";

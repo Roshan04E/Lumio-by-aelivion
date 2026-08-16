@@ -1,6 +1,6 @@
 {
-  "commit": "dd74511b25a6b1942f5c129cff8a8994a305d56d",
-  "capturedAt": "2026-08-16T01:14:22.301Z",
+  "commit": "0f9832254a066bf911e617fe995155fdc4e15fcd",
+  "capturedAt": "2026-08-16T10:26:30.356Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -35,6 +35,11 @@
     },
     "clip-region-blur": {
       "sha256": "2258addb058dbc3ddd6b1583edc409c76cbc6062eaa4f530e8c12028f970b617",
+      "width": 1080,
+      "height": 1920
+    },
+    "cluster-text": {
+      "sha256": "d46ed61b27533a2232cc393ca7297e76f376ea0b59d71b7fefbd4294c2123fe6",
       "width": 1080,
       "height": 1920
     },

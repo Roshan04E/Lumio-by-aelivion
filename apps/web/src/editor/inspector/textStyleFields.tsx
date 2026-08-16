@@ -45,6 +45,7 @@ import {
   Rows3,
   Sparkles,
   Square,
+  Type,
   ZoomIn
 } from "lucide-react";
 import {
@@ -419,6 +420,57 @@ export function buildTextStyleFields(ctx: TextStyleAdapterContext): Partial<Reco
       ...boundsOf("textPathCurve", { min: -100, max: 100, step: 1 }),
       onReset: () => onChange((item) => ({ ...item, textPathCurve: undefined })),
       onWrite: (value) => onChange((item) => ({ ...item, textPathCurve: value }))
+    })
+  );
+
+  /**
+   * S9 / ADR-023 OQ6 — per-character animation, three rows.
+   *
+   * `clusterRevealProgress` is the only one with keyframe wiring, and that asymmetry IS the feature:
+   * the reveal is a keyframed ramp from 0 to 1, while rise and stagger shape it and hold still. It is
+   * also why only those two are presetable — a preset carrying "40% revealed" would paste a frozen
+   * mid-flight frame of an animation the recipient has not keyframed.
+   *
+   * Reset clears rather than writing a resting value, for the D1a reason the curve row above gives —
+   * and here it is stronger than usual: absent emits NO animation key at all, while a progress of 1
+   * emits a finished one. The two render the same picture and are not the same data, and only absent
+   * keeps every pre-S9 layer's raster cache key where it was.
+   *
+   * The rows appear even when the layer's script refuses them. The refusal is stated where the reveal
+   * is CONTROLLED (see the notice in EditorPage), not by hiding the control, because a control that
+   * vanishes reads as a broken inspector rather than as a feature declining to lie.
+   */
+  put(
+    styleNumberField(ctx, {
+      key: "clusterRevealProgress",
+      property: "style.clusterRevealProgress",
+      icon: <Type size={14} />,
+      base: layer.clusterRevealProgress ?? 1,
+      ...boundsOf("clusterRevealProgress", { min: 0, max: 1, step: 0.01 }),
+      onReset: () => onChange((item) => ({ ...item, clusterRevealProgress: undefined })),
+      onWrite: (value) => onChange((item) => ({ ...item, clusterRevealProgress: value }))
+    })
+  );
+  put(
+    styleNumberField(ctx, {
+      key: "clusterRiseEm",
+      property: "style.clusterRiseEm",
+      icon: <MoveVertical size={14} />,
+      base: layer.clusterRiseEm ?? 0,
+      ...boundsOf("clusterRiseEm", { min: -5, max: 5, step: 0.05 }),
+      onReset: () => onChange((item) => ({ ...item, clusterRiseEm: undefined })),
+      onWrite: (value) => onChange((item) => ({ ...item, clusterRiseEm: value }))
+    })
+  );
+  put(
+    styleNumberField(ctx, {
+      key: "clusterStaggerFraction",
+      property: "style.clusterStaggerFraction",
+      icon: <MoveHorizontal size={14} />,
+      base: layer.clusterStaggerFraction ?? 0,
+      ...boundsOf("clusterStaggerFraction", { min: 0, max: 1, step: 0.05 }),
+      onReset: () => onChange((item) => ({ ...item, clusterStaggerFraction: undefined })),
+      onWrite: (value) => onChange((item) => ({ ...item, clusterStaggerFraction: value }))
     })
   );
 
