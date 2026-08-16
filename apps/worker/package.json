@@ -78,7 +78,8 @@
     "rulerjump:wedgeconfirm": "tsx src/ruler-jump-wedge-confirm-probe.ts",
     "rulerjump:pausealone": "tsx src/ruler-jump-pause-alone-probe.ts",
     "rulerjump:recoveryaccept": "tsx src/ruler-jump-recovery-acceptance-probe.ts",
-    "preset:sheet": "tsx src/preset-sheet.ts"
+    "preset:sheet": "tsx src/preset-sheet.ts",
+    "text:s9-precedence": "tsx src/text-s9-precedence.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",
