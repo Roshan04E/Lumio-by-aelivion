@@ -643,7 +643,19 @@ const FIXTURE_SHAPES = ["Rectangle", "Ellipse", "Triangle", "Diamond", "Pentagon
  * in it carries a content token, so one plain clip anywhere in the frame makes the whole run measure a
  * switched-off cache and report a flawless pass.
  */
-export async function buildDeterministicFlarexFixture(page: Page, count = 6, spacingSeconds = 3): Promise<DeterministicFixture> {
+export async function buildDeterministicFlarexFixture(
+  page: Page,
+  count = 6,
+  spacingSeconds = 3,
+  /**
+   * Wrap each shape clip in a Flarex comp. FALSE is the ADR-021 step-4a fixture: the very same six
+   * clips with no comp on any of them, so the only thing that can make a frame eligible is the
+   * TIMELINE layer's own content token. It is the smallest possible difference between "the compiler
+   * stamps the identity" and "the timeline stamps it", which is what makes it an acceptance gate for
+   * 4a rather than a second test of 3b.
+   */
+  withComps = true,
+): Promise<DeterministicFixture> {
   const fail = (gate: DeterministicFixtureGate, detail?: string): DeterministicFixture => ({ ok: false, gate, detail, stopSeconds: [] });
 
   const remaining = await clearTimelineClips(page);
@@ -689,7 +701,7 @@ export async function buildDeterministicFlarexFixture(page: Page, count = 6, spa
 
   // One comp per clip. Every clip needs one: a stop over a comp-less shape is an INELIGIBLE frame, and
   // the probe's eligibility read would then depend on which stop happened to be last.
-  for (let i = 0; i < count; i += 1) {
+  for (let i = 0; withComps && i < count; i += 1) {
     await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
     await page.waitForTimeout(400);
     const clip = page.locator(".timeline-clip").nth(i);

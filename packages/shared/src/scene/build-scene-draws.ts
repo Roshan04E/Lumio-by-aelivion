@@ -865,6 +865,79 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   };
 
   /**
+   * ADR-021 STEP 4a — a NON-MEDIA timeline layer earns a content token, so a frame made of text and
+   * shapes becomes frame-cacheable instead of being disqualified by the first draw with no identity.
+   *
+   * WHY TEXT AND SHAPE FIRST, and why not "all layers": a token is a promise that the same token means
+   * the same picture, and for MEDIA that promise cannot be made today. A media draw's `sourceVersion`
+   * is `updatedAt: nowMs()` (`gl-context.ts:278`) — a wall clock stamped on every producer draw. That
+   * is exactly right for its purpose (skip a redundant upload when nothing redrew) and useless as an
+   * identity: two visits to the same `t` produce two different values, so a token folding it can never
+   * hit, and a token IGNORING it would serve whatever picture the decoder happened to be holding. The
+   * missing fact is WHICH SOURCE TIME the served frame is — the same fact DEBT-027's oracle needs — and
+   * step 4b is where it gets built. A text/shape raster has no such gap: `versionOf` bumps on every
+   * completed rasterization and a rasterization happens on every change of the raster's own key, so the
+   * picture cannot move without the version moving. Over-approximate (a re-raster of identical content
+   * bumps too) and therefore SAFE: it costs a miss, never a wrong frame.
+   *
+   * THE RESOLVED TEXT DIRECTION (ADR-023 D6a) IS ALREADY IN HERE, and it is worth stating why rather
+   * than adding a term for it. §6's step-4 obligation requires direction to be folded. It is:
+   * `resolveTextDirection(declared, textSource)` is a pure function of `layer.direction` and the
+   * layer's own text/runs, and `layerIdentityDigest` folds the layer WHOLE. A field-by-field key would
+   * have had to remember direction; folding the whole object means it could not have been forgotten —
+   * which is the argument 3b made for whole-layer folding, now paying for itself on a term specified
+   * two ADRs away.
+   *
+   * DECLINING IS THE DEFAULT AND COSTS ONLY A MISS. Everything below returns `undefined` rather than
+   * guessing, because the failure modes are not symmetric: a missing token loses a cache hit, a wrong
+   * token shows the user the wrong picture.
+   */
+  const stampNonMediaContentToken = <T extends SceneLayerDraw | SceneGroupDraw | null>(layer: TimelineLayer, draw: T): T => {
+    if (!draw) return draw;
+    // A comp already stamped one; a group draw is nesting, which folds children whose own tokens this
+    // function has not been asked to compose yet.
+    if ((draw as { flarexContentToken?: string }).flarexContentToken !== undefined) return draw;
+    if ((draw as { kind?: string }).kind === "group") return draw;
+    if (layer.type !== "text" && layer.type !== "shape") return draw;
+
+    const d = draw as SceneLayerDraw;
+    // No raster version → the graded-overlay path deliberately erased it ("a keyframed pipeline changes
+    // it every frame, it must always re-upload"). That is a declaration that the surface has no stable
+    // identity, and it is honoured rather than worked around.
+    if (d.sourceVersion === undefined) return draw;
+    // Region-pass clones are OTHER layers folded into this draw; until their identities are composed in
+    // (they are `TimelineLayer`s, so it is tractable — just not this slice) a base carrying them cannot
+    // speak for the picture.
+    if (d.regionPasses && d.regionPasses.length > 0) return draw;
+
+    // A track matte's source is built through this same function, so it either carries a token or is
+    // uncacheable — compose rather than refuse. `draw: null` is the compositor's EMPTY matte, a
+    // constant, and folds as itself.
+    let matte = "";
+    if (d.matteFrom) {
+      const source = d.matteFrom.draw;
+      if (source) {
+        const token = (source as { flarexContentToken?: string }).flarexContentToken;
+        if (token === undefined) return draw;
+        matte = `${token}/${d.matteFrom.mode}/${d.matteFrom.invert ? 1 : 0}`;
+      } else matte = `empty/${d.matteFrom.mode}/${d.matteFrom.invert ? 1 : 0}`;
+    }
+
+    // Mask rasters live in `matteCache`, keyed by layer and comp-local time and versioned there. Every
+    // pass that carries one contributes its version; a pass with a mask but NO version is a mask whose
+    // freshness the cache cannot describe, so the whole draw declines.
+    let masks = d.maskVersion === undefined ? "" : `m${d.maskVersion}`;
+    for (const pass of d.fragmentPasses ?? []) {
+      if (!pass.mask) continue;
+      if (pass.maskVersion === undefined) return draw;
+      masks += `/f${pass.maskVersion}`;
+    }
+
+    d.flarexContentToken = `tl1|${layer.type}|${layerIdentityDigest(layer)}|r${d.sourceVersion}|${masks}|${matte}`;
+    return draw;
+  };
+
+  /**
    * Flarex hook (FLAREX.md): the finished layer draw becomes the comp's MediaIn and the lowered graph
    * replaces it. Applied at the END of `buildLayerDrawWithPasses` so every consumer path (top-level,
    * transition sides, nested children, track-matte sources) gets comp output uniformly. A comp that
@@ -1097,7 +1170,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
   ): SceneLayerDraw | SceneGroupDraw | null {
-    return applyFlarex(layer, buildLayerPreFlarexDraw(layer, dims), dims);
+    const drawn = applyFlarex(layer, buildLayerPreFlarexDraw(layer, dims), dims);
+    return stampNonMediaContentToken(layer, drawn);
   }
 
   // ─── Nesting: fold __nest_ children into compound-clip GROUP draws (NESTING.md Phase C) ─────────────

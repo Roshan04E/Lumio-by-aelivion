@@ -576,6 +576,36 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > - **4b — media layers earn tokens**, once a provider can name the served source time.
 > - **(B) — timeline acquisition onto the seam**, with a decoder soak and one change per commit.
 
+> **4a SHIPPED 2026-08-16 — a TEXT or SHAPE layer now stamps its own content token, and the D6a
+> obligation turned out to be already discharged.**
+>
+> `stampNonMediaContentToken` (`build-scene-draws.ts`) runs at the same seam `applyFlarex` does — the
+> end of `buildLayerDrawWithPasses`, so every consumer path gets it uniformly — and folds
+> `layerIdentityDigest(layer)`, the raster's content version, every mask version present, and a track
+> matte's own token. **Scoped to `text` and `shape`**, because those are the two whose `sourceVersion`
+> is a real content version (`rasterizer.versionOf` bumps on every completed rasterization, and a
+> rasterization happens on every change of the raster's own key — so the picture cannot move without
+> the version moving). Over-approximate and therefore safe: it costs a miss, never a wrong frame.
+>
+> **DECLINING IS THE DEFAULT.** No raster version (the graded-overlay path erases it deliberately),
+> region-pass clones present, a group draw, a track matte whose source has no token, or a fragment
+> pass carrying a mask with no version — each returns no token. The failure modes are not symmetric: a
+> missing token loses a cache hit, a wrong token shows the user the wrong picture.
+>
+> **THE ADR-023 D6a OBLIGATION IS DISCHARGED, WITHOUT A TERM FOR IT, and the reason is the interesting
+> part.** `resolveTextDirection(declared, textSource)` is a pure function of `layer.direction` and the
+> layer's own text/runs, and `layerIdentityDigest` folds the layer WHOLE. So direction is in the key
+> because the fold is total, not because anyone remembered it — which is precisely the argument 3b
+> made for whole-object folding over an enumerated field list (the DEBT-016 shape), now paying for
+> itself on a term specified two ADRs away.
+>
+> **Accepted on `FIELD_FIXTURE=timeline`: the same six shape clips as 3b's fixture with NO COMP ON ANY
+> OF THEM**, so the only thing that can make a frame eligible is the timeline layer's own token. One
+> variable between the two arms and nothing else. Green 3/3 — `eligible`, 6 of 6 served, 0 misses,
+> 0 declined, all pixel-identical, noise floor 0 — and **falsified**: with only
+> `build-scene-draws.ts` stashed, the same arm reads `eligible=false` with `blockedBy` naming the
+> shape layer and 0 hits.
+
 **Not in the sequence, and newly ordered ahead of the all-intra proxy by §3.3:** reducing the cost
 and the frequency of decoder resets. Provider-local (§4.2), needs no seam change, and worth more
 than the transcode it was assumed to require.

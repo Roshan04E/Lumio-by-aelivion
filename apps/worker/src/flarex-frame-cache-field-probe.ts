@@ -35,19 +35,25 @@
  * so a `drawImage` readback after the present is not reliably the presented picture, and an
  * instrument that is sometimes blank cannot tell a stale serve from its own flakiness.
  *
- * TWO FIXTURES, BECAUSE THERE ARE TWO QUESTIONS AND ONLY ONE OF THEM IS THE CACHE'S.
+ * THREE FIXTURES, BECAUSE THERE ARE THREE QUESTIONS AND ONLY TWO OF THEM ARE THE CACHE'S.
  *
  *   FIELD_FIXTURE=deterministic  (default) — shape clips, each in its own Flarex comp, no decode
  *     anywhere in the frame. The oracle is genuinely reproducible here, so a difference between the
- *     served frame and a fresh one is ATTRIBUTABLE to the cache. **This is the arm that decides the
+ *     served frame and a fresh one is ATTRIBUTABLE to the cache. **This is the arm that decided 3b's
  *     default.**
+ *
+ *   FIELD_FIXTURE=timeline — the SAME six shape clips with NO COMP ON ANY OF THEM. One difference from
+ *     the arm above, and it is the whole of ADR-021 step 4a: the only thing that can make these frames
+ *     eligible is the TIMELINE layer's own content token. Eligible ⇒ 4a works; ineligible ⇒ it does
+ *     not, and `blockedBy` names the draw that refused. Sharing the fixture builder is deliberate —
+ *     the two arms differ in exactly the variable under test and in nothing else.
  *
  *   FIELD_FIXTURE=media — an asset-source MediaIn over real footage. This arm asks a DIFFERENT
  *     question: does the picture at a fixed `t` reproduce at all over the live media path. Measured
  *     answer, on a clean machine with the instrument's own defects fixed: 1–2 unstable positions of 6,
  *     and NOT converging with settle (900ms → 2500ms helps, 2500ms → 6000ms does not). That is a real
- *     finding about the media path — registered as its own question — and it is NOT a frame-cache
- *     defect. It must not gate one, which is exactly what running only this arm would do.
+ *     finding about the media path — DEBT-027 — and it is NOT a frame-cache defect. It must not gate
+ *     one, which is exactly what running only this arm would do.
  *
  * Run:
  *   PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker flarex:frame-cache-field
@@ -189,14 +195,21 @@ async function sweep(page: Page, rulerY: number): Promise<Sample[]> {
   return out;
 }
 
-type FixtureMode = "deterministic" | "media";
+type FixtureMode = "deterministic" | "media" | "timeline";
+
+const FIXTURE_BLURB: Record<FixtureMode, string> = {
+  deterministic: "shape clips in Flarex comps, no decode — the arm that decided 3b's default",
+  timeline: "the SAME shape clips with NO comp on any of them — ADR-021 step 4a's acceptance gate",
+  media: "live footage — the I-P8 question (DEBT-027), not the cache's",
+};
 
 async function main(): Promise<void> {
   assertQuietBrowserMachine({ label: "flarex:frame-cache-field" });
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
   if (!channel) console.log("⚠ PIXEL_BROWSER_CHANNEL unset — SwiftShader risk (see measurement-preconditions).");
-  const mode: FixtureMode = process.env.FIELD_FIXTURE === "media" ? "media" : "deterministic";
-  console.log(`  fixture               : ${mode}${mode === "deterministic" ? " (shape clips, no decode — the arm that decides the default)" : " (live footage — the I-P8 question, not the cache's)"}`);
+  const requested = process.env.FIELD_FIXTURE;
+  const mode: FixtureMode = requested === "media" || requested === "timeline" ? requested : "deterministic";
+  console.log(`  fixture               : ${mode} (${FIXTURE_BLURB[mode]})`);
 
   const browser = await chromium.launch(channel ? { channel } : {});
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
@@ -246,8 +259,11 @@ async function main(): Promise<void> {
     // No `awaitWebCodecsEngaged` here, and its absence is the point: this fixture has no decoder to
     // wait for. Waiting for one would either hang the run or (worse) pass on a timeout and leave the
     // reader thinking a decode was involved in what follows.
-    const fixture = await buildDeterministicFlarexFixture(page, 6);
-    console.log(`  flarex comps          : ${fixture.ok ? `6 shape clips, each in its own comp` : `FAILED at gate \`${fixture.gate}\` ${fixture.detail ?? ""}`}`);
+    const withComps = mode === "deterministic";
+    const fixture = await buildDeterministicFlarexFixture(page, 6, 3, withComps);
+    console.log(
+      `  fixture build         : ${fixture.ok ? `6 shape clips${withComps ? ", each in its own comp" : ", NO comps — timeline tokens only"}` : `FAILED at gate \`${fixture.gate}\` ${fixture.detail ?? ""}`}`,
+    );
     if (!fixture.ok) {
       console.log("\n⚠ VOID — the deterministic fixture did not build, so there is nothing eligible to measure.");
       await browser.close();
@@ -310,13 +326,13 @@ async function main(): Promise<void> {
     console.log(`   ${a.stop.padStart(6)}  | ${(a.time ?? -1).toFixed(3).padStart(8)} | ${a.hash} | ${b[i]!.hash} | ${c[i]!.hash}${flag}`);
   }
 
+  const identitySource = mode === "timeline" ? "a bare timeline layer (ADR-021 4a)" : "a Flarex comp frame";
   if (afterServe.eligible !== true) {
     fail(
-      `the host never declared a frame key on a Flarex comp — the 3b wiring is inert in the product ` +
+      `the host never declared a frame key for ${identitySource} — the wiring is inert in the product ` +
         `(${n(afterServe.draws)} draw(s) in the frame; first without a content token: ${String(afterServe.blockedBy ?? "unknown")})`,
     );
-  }
-  else ok("the shipped host declares a frame key for a Flarex comp frame");
+  } else ok(`the shipped host declares a frame key for ${identitySource}`);
 
   // THE STOPS MUST LAND ON DISTINCT TIMES, or this probe is comparing one frame against itself.
   // Not a soft warning: with fixed fractions the ruler ran past the end of the comp and FOUR of six
@@ -352,7 +368,7 @@ async function main(): Promise<void> {
   // one — a single unstable position there is not tolerable noise, it is an unexplained result, and
   // accepting one would re-create in miniature exactly the vacuous pass this precondition exists to
   // prevent. The media arm allows 1 because its instability is the QUESTION it is asking.
-  const noiseBudget = mode === "deterministic" ? 0 : 1;
+  const noiseBudget = mode === "media" ? 1 : 0;
   if (noise.length > noiseBudget) {
     console.error(
       `\n⚠ VOID — ${noise.length} of ${STOPS.length} positions differ between two BYPASSED sweeps in the same load ` +
@@ -393,11 +409,11 @@ async function main(): Promise<void> {
   // N distinct pictures means the stops did not land where the fixture put the clips — and a stop
   // that lands on the wrong clip is a stop whose "correct" answer this probe does not know.
   const distinct = new Set(b.map((s) => s.hash)).size;
-  const distinctFloor = mode === "deterministic" ? STOPS.length : 2;
+  const distinctFloor = mode === "media" ? 2 : STOPS.length;
   if (distinct < distinctFloor) {
     fail(
       `the uncached sweep produced ${distinct} distinct picture(s) across ${STOPS.length} positions, needing ${distinctFloor} — ` +
-        (mode === "deterministic"
+        (mode !== "media"
           ? "each stop is a different shape clip, so this means the stops missed their clips"
           : "the scrub did not move, so the comparison proves nothing"),
     );
