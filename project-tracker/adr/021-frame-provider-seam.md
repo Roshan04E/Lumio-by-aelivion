@@ -523,6 +523,15 @@ provider set at N=100 is a dead tab. Provisional status lifts when this ships.
 > **NOT a playback win, and §7 has not moved:** composite 20.9–855.2 ms against decode's 2.8–9.0 ms at
 > every N. A first pass over new ground is all misses. The claim is scrub-back and loop.
 >
+> **2026-08-17 — the MECHANISM behind this figure is under re-examination, see DEBT-030.** A readback
+> ablation on real WebCodecs sources found ~21–26 ms/layer/frame attributable to a synchronous
+> `getImageData`-class readback (of the kind `stageProbe` performs, matching the mechanism this ADR's
+> own `luma` column almost certainly used) — real, large, and not accounted for in §3.1's read of
+> "composite is O(N) full-frame RTT passes." Real per-frame WebCodecs video cost with NO readback is
+> also substantial and growing with N (not the near-zero a synthetic canvas proxy suggested). This
+> conclusion — the seam does not fix playback speed — is not overturned; the STATED REASON for it needs
+> updating, not the conclusion itself, and DEBT-030 has not yet done that update.
+>
 > **Registered, not built (founder instruction):** narrowing `mediaEpoch` from a global sum to
 > per-source epochs. It is the only change that would make the live steady-state reuse rate non-zero,
 > and it is a behaviour change to shipped ADR-012 code with its own risk.
@@ -675,6 +684,18 @@ across preview and export instead of two machines kept in agreement by gates.
 read as a performance fix for large comps: it fixes *acquisition*, and acquisition was not the
 thing that was slow — except at N≥100, where decoder thrash makes it so. Pass-count reduction is a
 separate programme against ADR-008/010, which this ADR leaves untouched.
+>
+> **2026-08-17 — "compositor pass count dominates" is the specific phrase DEBT-030 puts in question.**
+> A real-GPU pass-count attribution found draw/RTT submission itself linear and cheap (structural, off
+> the actual command stream); a readback ablation on real WebCodecs sources found a synchronous
+> readback (of the class this ADR's own `luma` diagnostic almost certainly used) costs ~21–26 ms/layer/
+> frame — real, large, unaccounted for above — AND that real per-frame video cost with no readback at
+> all is also substantial, contradicting a synthetic-canvas control that suggested it was near-zero.
+> "Pass count dominates" may be true for a different reason (real video upload cost) than the one implied
+> here (GPU draw submission), or the readback may be doing most of the work, or some mix — DEBT-030
+> evidences all three possibilities without settling which dominates on THIS ADR's own 1280×720 GOP-12
+> fixture, which was not re-built. The programme-against-ADR-008/010 framing this paragraph hands off to
+> should read DEBT-030 before being scoped, not this paragraph's "pass count" phrase on its own.
 
 ---
 

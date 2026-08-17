@@ -33,7 +33,13 @@ tedious; each is a precondition for the next, not merely ahead of it in a queue.
 1. **Flarex engine** — CURRENT. Stabilisation, then speed. The lever is composite
    pass-count reduction (20.9–855.2 ms measured), not caching; ADR-021 §7 says in as many
    words that the pull seam does not address it. See `project-tracker/` and the ADR-021
-   step-4 remainder.
+   step-4 remainder. **2026-08-17: read DEBT-030 (`architectural-debt.md`) before scoping
+   work against this line — "pass-count reduction" was this chapter's opening lever, and a
+   same-day measurement session found real GPU draw/pass submission linear and cheap, while
+   a readback stall and real per-frame video-upload cost (neither one "pass count") are both
+   real and substantial. Which mechanism actually dominates the original 855.2 ms figure is
+   not yet settled; do not re-derive a scoped programme from "pass count" alone without
+   reading that entry first.**
 2. **Flarex nodes** — each node worked properly, one at a time. The Phase 2 remainder
    (interpreter / RTT / Text / aiMatte / Tracker / auxInputs) plus whatever the engine work
    exposes. The engine is a precondition: a node built on an unstable evaluator gets built

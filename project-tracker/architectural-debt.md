@@ -4258,3 +4258,646 @@ exists so this item can wait for a proper session.
   step — not merely available — for any commit touching `packages/shared`'s scene/text draw path and
   claiming T-9; or `decideSceneReadiness`/the capture harness is extended to gate on text/shape
   settlement so a paused capture cannot land mid-raster.
+
+**UPDATE 2026-08-16 — the capture-readiness gap this entry names IS real and is now CLOSED, but it is
+NOT what causes `flarex-generators`' 0.691%. Tested directly rather than assumed; the mechanism this
+entry originally proposed is FALSIFIED for this fixture.**
+
+**The readiness fix, shipped.** `decideSceneReadiness`'s paused branch (`scene-readiness.ts:100`)
+exempts text/shape not-readiness from holding the frame at all — the R1 scrub-lag rationale
+(`ScenePreviewCanvas.tsx`: a pending raster mid-typing must not freeze the live editor), confirmed
+still live by reading its own inline doc and kept intact. A new `strictNotReadyHold` input, off by
+default everywhere, is now threaded in and set true only for `/editor/__preview-fixture`
+(`ScenePreviewCanvas.tsx`'s `isStrictCaptureReadinessRoute()`) — the one route that is never the
+interactive editor, only the automated `render:compare:pixels` capture harness. That closes the actual
+gap this entry describes: the harness can no longer screenshot a frame with a text/shape raster still
+resolving in the background. `apps/web` and `packages/shared` typecheck clean.
+
+**Verified via `PIXEL_READY_OBSERVE=1` that the fix engages and the frame IS settled at capture**
+(`settled@capture: yes`, `notReady: 0`, `firstSettled: 7067ms`, 8 composites) — and the diff is
+**UNCHANGED**: `14320/2073600` (0.691%), the identical pixel count measured before this fix, before the
+`fe4f77c` bisect, and across every prior run. A capture-timing fix that changes nothing about a stable,
+reproducible diff is proof the diff was never a timing race in the first place.
+
+**What it actually is, read directly off the two renderers' own output
+(`web-preview-flarex-generators.png` vs `remotion-flarex-generators.png`), which the v8 tracker entry
+flagged as the unfinished step and which this update finally does:** the two images show the SAME
+"FLAREX" string in **two different typefaces** — a bold geometric sans in the web preview, a serif
+face in Remotion. "New Drop" (below it, a different layer) matches pixel-for-pixel in both. This is not
+degraded/antialiased text; it is two renderers drawing the SAME string in genuinely different fonts.
+
+**The fixture requests `fontFamily: "Inter"`** (`render-comparison-fixture.ts:1111`, plain string, not
+a `renderSafeFonts` entry, not a pinned `fontRef`). "Inter" is not installed as a system font on this
+machine (checked `C:\Windows\Fonts` and the font-name registry key directly — absent from both), is
+never registered via `@font-face` in `apps/web/index.html` or `global.css` (which only ever reference
+`Inter` inside a CSS fallback STACK, `Inter, ui-sans-serif, system-ui, …`, never as a webfont source),
+and is not touched by `installCompositionFonts`/`installPinnedFont` (`font-install.ts`, pinned-fonts
+only) or the font catalogue (`font-catalogue.ts`, no "Inter" entry). Nothing in either renderer's
+reachable code registers a real "Inter" face. **Both renderers are drawing a fallback for a family that
+resolves to nothing — they simply pick DIFFERENT fallbacks**, despite launching the identical
+`chrome.exe` binary (`[worker] Using installed browser for renders: C:\Program Files\Google\Chrome\
+Application\chrome.exe`, confirmed the same binary the pixel-harness's own `PIXEL_BROWSER_CHANNEL=chrome`
+launches).
+
+**Not isolated to this fixture.** `flarex-text-stroke-shadow` (`render-comparison-fixture.ts:1144`)
+requests the identical raw `fontFamily: "Inter"` and diverges even MORE — `1.759%` (36469/2073600) —
+but PASSES the gate silently because it sits on the loose default tolerance rather than the 0.005 bar
+`flarex-generators` was tightened onto in infrastructure.md v6. **This defect class has been present
+across at least two fixtures, undetected, because the bar that would have caught it was only ever
+applied to one of them.** A third fixture checked for contrast, `cluster-text` (a different font, not
+raw "Inter"), reads a clean `0.000%` — consistent with the family, not the general text path, being
+the variable.
+
+**The bisect (v8, `infrastructure.md`) is VOID, not a clue — including its own "GOOD" parent. Stated
+firmly because a void reading left as "an open question" invites the next session to explain it with
+Chromium font-matching internals, which is chasing an artifact of the instrument, not a fact about the
+code.** A bisect assumes the quantity it measures is a function of the commit under test. DEBT-029
+(below) establishes directly — by pinning the SAME font and re-running the SAME fixture unchanged
+across 3 consecutive full sweeps — that this quantity is NOT that: `flarex-generators` read `0.000%,
+0.468%, 0.585%, 0.000%, 0.468%` across five same-code, same-machine runs, and `flarex-text-stroke-shadow`
+went `0.661%, 0.661%, 0.000%`. Font-fallback/font-install timing is sensitive to state the commit graph
+does not control — what the browser's font cache holds, scheduling jitter between an async install and
+the first raster — so EVERY arm of the `fe4f77c` bisect, including `512a085`'s "GOOD 0.000%", was one
+sample from a distribution that includes both outcomes at every commit. A single 0.000% reading is not
+evidence the parent was clean; it is the same kind of reading that also came up 0.000% three separate
+times on the CURRENT commit with the defect indisputably present. **The correct statement is: this
+bisect cannot testify about what changed between `512a085` and `fe4f77c`, in either direction, and no
+further reading of it — including "why did the parent pass" — should be treated as informative.** What
+IS established, independent of the bisect, is direct: `fe4f77c`'s own commit message cited
+`render:baseline` for a claim only `render:compare:pixels` can support (this entry's original finding,
+unaffected by the above), and the specific fallback-typeface divergence it exposed is fixed by pinning
+(DEBT-029). Whether `fe4f77c`'s `document.fonts.load()` call also changed the RATE at which this
+instability appears is a real question, but it is a DEBT-029 question (the install-timing race), not a
+`fe4f77c` one, and DEBT-029 is where it is tracked.
+
+- Detection (added): a text/shape fixture whose `fontFamily` is a bare, unpinned string not present in
+  `renderSafeFonts` and not backed by any `@font-face` — grep fixture definitions for `fontFamily:` values
+  that are not one of the five `renderSafeFonts` families and are not threaded through a `fontRef`.
+  **Superseded 2026-08-16 by DEBT-029's structural fix**: `render-comparison-fixture.ts`'s
+  `assertFixtureFontsArePinned` now refuses to build a fixture carrying an unpinned text layer at all,
+  so this detection note is no longer the only line of defense — see DEBT-029.
+
+### DEBT-029 — the fixture set spoke pre-ADR-023: raw font stacks, in the one place whose job is to
+catch renderer disagreement — fixed structurally; fixing it surfaced a second, still-open race
+
+- Status: **CLOSED 2026-08-17** — the install race itself is fixed; see the UPDATE at the end of this
+  entry. The SWEEP+PIN+REFUSE work (Parts 1-5) was already DONE and merged.
+- Registered: 2026-08-16, founder directive, following directly from DEBT-028's finding.
+- Reason DEBT-028 was incomplete: `fontFamily: "Inter"` in a fixture is a request that the render
+  machine happens to have Inter. ADR-023 D1 shipped exactly to eliminate that class — 1,942 pinned
+  families, hash-keyed, mirrored, an export that aborts by name rather than substituting — and the
+  fixture set never moved onto it. DEBT-028 found and fixed the two `fontFamily: "Inter"` fixtures;
+  this entry is the swept, structural version: find every fixture that names a font it does not pin,
+  convert it, and make the fixture LOADER refuse a raw stack outright so the convention cannot silently
+  lapse again the way it already had once.
+
+**Part 1 — the sweep. Two more raw stacks found beyond DEBT-028's two:**
+
+```
+render-comparison-fixture.ts:1112  Flarex "text" node   fontFamily: "Inter"   (flarex-generators)
+render-comparison-fixture.ts:1146  Flarex "text" node   fontFamily: "Inter"   (flarex-text-stroke-shadow)
+render-comparison-fixture.ts:2341  textFixtureLayer      fontFamily: "Arial"   (13 variant fixtures:
+                                    scaled-text/text-warp/text-warp-shaped/stroke-paint-order/bidi-
+                                    direction/graded-text/masked-text/region-text/tilted-text/per-line-
+                                    pill/shadow-stack/multi-stroke/path-text/cluster-text)
+captions.ts's captionStylePresets[0]  fontFamily: "Arial, Helvetica, sans-serif"  (default fixture,
+                                    via applyCaptionTrackToComposition — every fixture with captions)
+```
+
+`textFixtureLayer`'s "Arial" and the caption preset's "Arial, Helvetica, sans-serif" never diverged
+(Arial is a real, ubiquitous Windows system font, unlike "Inter"), which is exactly why DEBT-028 framed
+this as luck rather than safety: the SAME unpinned-name pattern, on a CI box or a Mac dev machine
+without Arial, is the identical failure DEBT-028 diagnosed, latent rather than absent.
+
+**Part 2 — pinning a Flarex generator "text" node required a new capability, not just a fixture edit.**
+`FlarexNode.params` is flat scalars only (`Record<string, string|number|boolean>` — "complex payloads
+are JSON.stringify'd strings", the `effectParams` convention); a `FontRef` is an object. Added:
+
+- `node-defs.ts`: the "text" node gains `fontRefJson: z.string().default("")` — a JSON-stringified
+  `FontRef`, empty = unset/legacy. Added to `fontParams` (D11/T-8: which bytes a family resolves to is
+  part of the node's identity, same as the family name itself).
+- `flarex-inspector-fields.tsx`: `text.fontRefJson` added to `STRUCTURAL_PARAMS` — a raw JSON blob is
+  not a property row, and no picker writes this yet (fixtures/tests set it directly).
+- `virtual-layers.ts`: `flarexTextNodeFontRef(params)` parses and validates the ref (must be PINNED —
+  `isPinnedFontRef`, D1a — a `{source:"system"}` ref here would mean nothing); `buildFlarexGeneratorLayer`
+  carries it onto the virtual `TimelineLayer` it synthesizes, so the raster draws with it.
+
+**Part 3 — pinning it was not enough BY ITSELF: nothing ever installed it. This is the part that took
+the session from "edit two fixtures" to "extend the install pipeline," and skipping it would have
+pinned the font without ever loading its bytes.** `installCompositionFonts` (web) and
+`resolveManifestFonts` (worker) — ADR-023 D3's font-install scan, the thing that actually calls
+`document.fonts.add(new FontFace(...))` / emits the `@font-face` a render page needs — both only ever
+walked `composition.tracks`. A Flarex generator node's virtual layer is synthesized ON DEMAND, deep
+inside scene-building (`buildFlarexGeneratorLayer`), never present in that flattened list. A node could
+pin a font and it would never be installed anywhere. Fixed symmetrically:
+
+- `virtual-layers.ts`: new export `collectFlarexGeneratorTextLayers(flarexComps)` — every "text" node
+  across every comp that pins a font, shaped just enough for `collectPinnedFontRefs`/
+  `collectPinnedFontInstances` to read (id/family/weight/fontRef).
+- `VideoPreview.tsx`: `installCompositionFonts` now scans `composition.tracks` layers CONCAT
+  `collectFlarexGeneratorTextLayers(graph.flarexComps)`.
+- `font-resolver.ts`: `resolveManifestFonts` now concats the same collector over `manifest.flarexComps`
+  (already carried verbatim from `ProjectGraph.flarexComps` — `RenderManifest`'s existing shape, no
+  manifest contract change needed).
+
+**Part 4 — the structural refusal, so the convention cannot lapse silently a second time.**
+`render-comparison-fixture.ts`'s `assertFixtureFontsArePinned(graph)` runs at the end of
+`createRenderComparisonFixture`, walks every text layer (composition tracks, nested compositions, and
+every Flarex comp's text nodes) and THROWS if any resolves to an absent or non-pinned `FontRef`. A
+`{source:"system"}` ref is still legal on a real PROJECT (D1a: a legacy project's font never moves
+automatically) — it is refused here because a fixture's entire job is the pixel claim a system ref
+cannot back. A fixture that cannot pin its font now fails to LOAD rather than silently producing a
+number.
+
+**Verification of parts 1–4: the ORIGINAL bug is gone.** `flarex-generators` — DEBT-028's own subject,
+stable 14320/2073600 (0.691%) on every prior reading — is now observed at 0.000% on some runs (see
+below for why "some" and not "all"). The two renderers draw the SAME typeface where before they drew
+two different ones; verified visually, not just numerically.
+
+**Part 4 CORRECTION, found by running the full sweep this entry's own Part 5 argues is the earned
+verification. The caption track pinning (Part 1's fourth raw stack) was TRIED, then REVERTED, and
+`assertFixtureFontsArePinned` carries one explicit, narrow exception for it.** A local, non-shared
+`captionStylePresets[0]` copy with `fontRef: catalogueFontRef("Arimo", 400)` satisfied the refusal —
+but the caption track rides almost every fixture in the suite (only `useTextFixture`/`soloMedia`/
+`transition`/nested variants skip it), so pinning it exposed the Part 5 race to fixtures that share
+nothing with text at all: a full sweep failed `flarex-radial-blur-max`/`flarex-glow-max`/
+`flarex-blur-max` — none of them remotely font-related — on a diff confirmed (by looking at the image)
+to be localised entirely to the "New Drop" caption text, none of it the blur/glow content those
+fixtures exist to test. Reverted to the caption's original unpinned `"Arial, Helvetica, sans-serif"`
+stack, which needs no install step (Arial is a real, ubiquitous system font) and read 0.000% on every
+sweep this session ran — genuinely stable, unlike the general "some font happens to be there" risk D1
+is against. `assertFixtureFontsArePinned` now explicitly skips layers on the caption track
+(`${composition.id}_track_captions`) with a comment naming this exact incident, rather than silently
+re-widening the rule. Every OTHER text layer in every fixture still refuses to load unpinned — this is
+one documented, scoped trade, not the convention lapsing again. Revisit alongside DEBT-029's own close.
+
+**Part 5 — pinning did NOT fully close it, and re-deriving tolerance bars from the first green run
+would have repeated DEBT-028's own mistake.** A single post-pin sweep read `flarex-generators` at
+0.000% and `flarex-text-stroke-shadow`'s siblings at small nonzero values; taking that at face value
+and tightening bars from it was the temptation. Three independent full sweeps of the 17 touched
+fixtures, same code, same machine, instead show a clean split:
+
+```
+STABLE ZERO (0.000% all 3 runs):        default, text-warp-shaped, per-line-pill, path-text
+STABLE NONZERO (identical px count ×3): text-warp 0.797%, graded-text 0.625%, masked-text 0.387%,
+                                         tilted-text 0.226%, cluster-text 0.290%
+UNSTABLE (different value per run):     scaled-text, stroke-paint-order, bidi-direction, region-text,
+                                         shadow-stack, multi-stroke, flarex-generators,
+                                         flarex-text-stroke-shadow — readings for these ranged from
+                                         0.000% to ~0.96% across otherwise-identical runs
+```
+
+The STABLE groups got real per-fixture bars in `render-pixel-comparison.ts` (`fixtureMaxDiffRatio`,
+"TEXT-PINNING FIXTURES" block). **The UNSTABLE group deliberately did NOT** — they stay on the loose
+3.5% global, with a comment explaining why, rather than either (a) a tight bar that would flap red/green
+by machine timing alone, training people to ignore the gate, or (b) silently absorbing them the way the
+ORIGINAL "Inter" divergence hid for who knows how long. This is the same call `render:baseline`'s v5
+entry made for `cluster-text` there (remove rather than pretend), applied to a bar instead of an entry.
+
+**The mechanism, to the extent established.** Remotion's render path fully `await`s
+`resolveFontsForLayers` before ANY frame renders — structurally immune to a first-paint race. The web
+preview's font install (`installCompositionFonts`) fires in a `useEffect` — asynchronous, after first
+paint — while `ensureOverlayFonts` (called inside the shared rasterizer, both renderers) checks
+readiness via `document.fonts.check()`, which by its OWN documented behavior "returns true both for a
+loaded face and for a family with no matching FontFace at all" — treating "not registered yet" and
+"nothing to wait for" identically. If the web preview's first raster runs before `installCompositionFonts`
+reaches `document.fonts.add()`, `ensureOverlayFonts` wrongly concludes there is nothing to wait for and
+draws with a browser fallback — and that raster can cache and persist. This is a HYPOTHESIS with real
+support (explains the web-only asymmetry, the bimodal shape, and survives a control: switching the
+pinned font from Arimo — a variable font — to Roboto — a static single-instance file — did NOT change
+the instability, ruling out S9a's variable-axis machinery as the cause) but is **not proven** to the
+level DEBT-028's fallback-typeface finding was (that one was confirmed by looking directly at the two
+renders; this one is inferred from timing behavior, not directly observed mid-race).
+
+**Deliberately NOT fixed here — founder decision, mid-session.** The concurrent "text" session was
+independently mid-edit on `scene-text-raster.ts`'s own font-readiness listener (the `onReady`/
+`fontsVersion` re-arm, DEBT-009 instance 4's neighbor) when this was found, and shipped it as part of
+ADR-023 S10 (commit `147a766`). Re-tested after that commit landed: `flarex-generators` is STILL
+unstable (`0.585%, 0.000%, 0.468%` across 3 runs post-S10) — S10 did not touch this mechanism, it
+addressed a different one (a font arriving LATE mid-session, not a font racing the FIRST raster). Given
+two sessions were concurrently touching the same file's font-readiness machinery, the founder call was
+to hold off rather than have a second session edit `scene-text-raster.ts`/`font-install.ts` underneath
+the first. Whoever picks this up next should re-read `installPinnedFont` (`font-install.ts`) and
+`ensureOverlayFonts` (`text-shape.ts`) fresh against whatever state S10 (or its successors) left them in
+— this entry's mechanism section describes the shape of the race, not a confirmed line-level cause.
+- Invariant affected: ADR-023 D3 in substance (a pinned font must be installed before it is drawn from);
+  no numbered invariant names this precisely today.
+- Owner: unassigned
+- Expiry condition: `ensureOverlayFonts`'s readiness check can distinguish "no such family, nothing to
+  wait for" from "a pinned ref is being installed, wait for it" — e.g. by consulting the web install
+  pipeline's own in-flight-promise map (`installs` in `font-install.ts`, not currently exported for this
+  purpose) rather than relying solely on `document.fonts.check()`'s ambiguous answer. Confirmed by: the
+  UNSTABLE fixture group above reading the SAME value (0.000%, ideally) across ≥3 consecutive full
+  sweeps, the same bar this entry used to classify the STABLE groups.
+- Planned slice: none accepted — see "deliberately NOT fixed here" above.
+- Tracking issue: —
+- Detection: any new pinned-font consumer (a new node type, a new draw surface) that reads readiness
+  from `ensureOverlayFonts`/`document.fonts.check()` alone without also confirming the pinning app's own
+  install pipeline has run — the same gap this entry found, in a new place.
+
+**UPDATE 2026-08-17 — CLOSED. Checked whether S10 (`147a766`) already covered this before designing
+anything: it did not, and the two are genuinely two different halves, not one subsuming the other.**
+`147a766` re-arms `SceneTextRasterizer`'s idle draw loop from the `document.fonts` `loadingdone`
+listener (`onReady` was previously called only when a NEW raster landed, never when the listener's own
+version bump fired) — that fixes "a font finishes loading and nothing redraws to notice." It does
+nothing about "a raster draws BEFORE the font finishes loading and calls itself done," which is this
+entry's mechanism, and it was already merged into the tree this entry's own 3-run instability data
+(`0.585%, 0.000%, 0.468%`, logged above) was measured against — so that data is post-S10, not pre-, and
+the race survived it exactly as the entry already said.
+
+The located answer to "does the raster report not-ready while a font is installing": **no.**
+`SceneTextRasterizer.get()`/`ensure()` return non-null the moment ANY raster exists for the current
+cache key — `buildSceneDraws.ts:662-666` only calls `onLayerNotReady` on a null raster, i.e. before the
+FIRST raster ever lands. `rasterize()` does await `ensureOverlayFonts` before drawing (that is DEBT-028's
+fix), but `ensureOverlayFonts`'s own readiness check — `document.fonts.check()`/`.load()` against a
+shorthand string — cannot distinguish "this family has no FontFace yet because nothing has been
+registered" from "this family will never have one, there is nothing to wait for": both read as
+`check() === true` (documented explicitly at `text-shape.ts`'s doc comment). If `installCompositionFonts`
+(the app-level fetch-and-`document.fonts.add()` pipeline) has not reached `add()` yet when the raster's
+own check runs, `ensureOverlayFonts` resolves having "waited" on nothing, the browser fallback paints,
+and that WRONG raster is cached as READY — permanently, until something else (an unrelated redraw)
+happens to invalidate the cache key. Readiness omitted the slowest thing it was supposed to wait for,
+exactly as hypothesized.
+
+**Fix — awaited, not held.** R1's constraint (the live editor must not freeze mid-typing on a raster)
+stays intact: `strictNotReadyHold` is untouched, and nothing here makes the not-ready hold stricter.
+Instead, `ensureOverlayFonts` (`text-shape.ts`) now takes an optional `awaitPinnedFontInstall(ref, axes)`
+hook on `OverlayStyleOptions` — the same injection shape as `resolveFontFaceCss` beside it (a resolver
+passed at the call site, not a module-level registry, per T-20's documented reason: a registry ships
+empty and fails silently). For every PINNED ref a layer's runs actually use (layer ref + any run-level
+override), `ensureOverlayFonts` now awaits that hook's promise BEFORE asking `document.fonts` anything —
+so the raster's own readiness check runs only once the face is genuinely registered, and `check()`'s
+ambiguity stops mattering because the ambiguous case (not-registered-yet) can no longer be reached.
+`ScenePreviewCanvas.tsx` and `scene-frame-compositor.ts` (the two browser-side raster consumers) wire it
+to `installPinnedFont` — memoized per ref key, so this call JOINS the same install
+`installCompositionFonts` already kicked off rather than starting a second one, and resolves immediately
+if it already finished. Remotion/export supply nothing (resolves undefined, no-op): every pinned font
+there is already resolved before the first `ensure()` call, so there is nothing in flight to join.
+
+**Verification, per this entry's own stated bar ("≥3 consecutive full sweeps reading 0.000%").** Four
+consecutive readings, not three: a full 92-fixture `render:compare:pixels` sweep (`flarex-generators`
+0.000%, `flarex-text-stroke-shadow` 0.000%, all 92 green), then three further narrowed
+(`PIXEL_FIXTURES=flarex-generators,flarex-text-stroke-shadow`) runs, all four 0.000%/0.000%. The bar is
+met. The other six UNSTABLE-group fixtures (`scaled-text`, `stroke-paint-order`, `bidi-direction`,
+`region-text`, `shadow-stack`, `multi-stroke`) were not part of this race — they carry no pinned Flarex
+node font — and were not re-tested; if they are still unstable the cause is something else and a new
+entry should name it rather than folding it in here.
+
+**Tolerance bars tightened**, moved from the loose 3.5% global to `render-pixel-comparison.ts`'s
+"TEXT-PINNING FIXTURES" table now that the reason for looseness is gone: `"flarex-generators": 0.001`,
+`"flarex-text-stroke-shadow": 0.001` (not 0, to leave headroom for the ordinary sub-pixel AA noise every
+other tight-bar entry in that table already carries).
+
+**The caption follow-up is CLOSED, same day — done while the fix was warm rather than filed for later.**
+`assertFixtureFontsArePinned` (`render-comparison-fixture.ts`) no longer carries the caption-track
+exception at all: the caption preset is now pinned via a LOCAL `CaptionStylePreset` object (built from
+`captionPresetLook(captionStylePresets[0])` with `fontFamily`/`fontRef` overridden to
+`catalogueFontRef("Arimo", 400)`), never touching the shared `captionStylePresets` array — its own doc
+still forbids that. Three consecutive full 92-fixture sweeps were run post-pin, and every one of the 92
+diff counts was BYTE-IDENTICAL across all three (`diff /tmp/run1.txt /tmp/run2.txt` and
+`run2.txt`/`run3.txt` both empty) — no fixture's value moved from removing the exception, and nothing
+newly flapped. No bar needed tightening as a result: the fixtures that ride the caption track were
+already either at 0.000% (covered by existing bars) or on the loose global bar for reasons unrelated to
+text (`advanced-transition`, `flarex-stabilize`, `stylize-subject`, etc. — pipeline noise this entry
+never touched). `assertFixtureFontsArePinned` now refuses EVERY unpinned text layer, no carve-outs — the
+claim "no fixture in this repo names a font it does not pin" now holds without qualification.
+- Owner: — (closed 2026-08-17, same session as the race fix; no remaining open action, no new DEBT
+  number needed).
+
+### DEBT-030 — two honest measurements of Flarex composite cost disagreed by two orders of magnitude,
+and the reason is where each one's clock started and stopped
+
+- Status: **open** — the mechanism is now evidenced (readback stall is real and large; real per-frame
+  video-frame cost is ALSO real and larger than a synthetic proxy suggested), but no measurement in
+  this entry reproduces ADR-021's exact original fixture closely enough to hand back a single corrected
+  number. The dependent conclusions this entry lists as needing re-examination are not yet re-examined.
+- Registered: 2026-08-17, founder directive, following a composite pass-count attribution session
+  (architecture.md's "pass-count reduction (20.9–855.2 ms measured), not caching" framing for the
+  Flarex-engine chapter).
+
+**What happened, in order.** A measurement session this same day drove four synthetic Flarex shapes
+through the real compositor with `FrameProfiler` attached and found: draw-call counts are exactly
+linear in N and fully structural (fanout-merge costs 2 draws/source, confirmed off the real GPU command
+stream), and `compositorMs` (CPU wall time around `compositor.renderFrame`) stayed under a few
+milliseconds even at N=100 — including a control where every source's `sourceVersion` was bumped every
+frame to force a real re-upload. Conclusion drafted: "ADR-021's 855ms figure almost certainly measured a
+CPU readback stall, not real compositor cost — the compositor itself is cheap."
+
+**Told to run it backwards before trusting that.** WebGL2 draw submission is asynchronous. A timing loop
+with no fence, no readback, and no sync measures how fast the CPU can ENQUEUE work, not how long the GPU
+takes to finish it — and the ONLY thing in the earlier draft's control that forced completion was the
+per-source texture upload's own implicit sync points, which is not the same as a real readback. So the
+first conclusion's `compositorMs<4ms` number was suspect for the identical reason ADR-021's `855.2ms`
+number was suspect: both may be the same underlying quantity read on opposite sides of an unstated sync
+point.
+
+**Round 2, three real measurements, on the machine's real GPU (AMD Radeon Vega 8, ANGLE/D3D11), not
+inferred:**
+
+1. **`EXT_disjoint_timer_query_webgl2` (a real GPU-timeline query) never resolved a single sample.**
+   Confirmed present on the device (detected on a throwaway context) but zero of ~200 profiled frames
+   across every scenario harvested a value. Root cause not fully chased — the working hypothesis is that
+   a canvas never attached to the DOM/never presented gives ANGLE's D3D11 backend nothing to retire the
+   query against — but this is reported as a fact about the instrument in THIS harness, not asserted as
+   proven for every offscreen-canvas case everywhere.
+2. **Fallback per this stop's own contingency instruction: `fenceSync(SYNC_GPU_COMMANDS_COMPLETE)` +
+   `flush()` + blocking `clientWaitSync`**, timed on the CPU wall clock from submission to GPU-signaled
+   completion. Resolved 8/8 on every frame of every scenario. Result: **flat at 0.10–0.21 ms regardless
+   of N**, including the live-reupload control at N=100 (0.15 ms). This DOES falsify "expensive GPU
+   execution" as an explanation, on the synthetic canvases used — real GPU completion is trivially fast
+   there, not merely fast-to-enqueue.
+3. **Separately, and this is the correction: `compositorMs` (CPU submission) on those same synthetic
+   scenarios was NOT reliably flat.** Re-running the identical fanout-merge scenario twice produced
+   N=100 CPU-submit times of 3.48 ms, 175.60 ms, and 34.57 ms across three separate process runs — a
+   real, unexplained, non-linear CPU-side cost that appears specifically around N≥80 and correlates with
+   neither the (flat) fence-completion time nor the (smoothly linear) draw/bind counts. **This alone
+   already means the first conclusion's "compositor stays under 4ms at N=100" claim does not hold
+   reliably** — it held on the first run measured and not on two subsequent ones. Not chased further
+   this entry; flagged as its own open question (a GC pause, a WebGL command-buffer/driver resource
+   limit around N=80-100, or Playwright/browser scheduling noise are the live candidates, undistinguished).
+
+**The readback ablation, on REAL WebCodecs sources (not synthetic canvases) — the decisive test asked
+for.** `flarex-readback-ablation.ts` drives the real `SceneFrameCompositor` (the export class ADR-021's
+own text names — `gradeMediaLayer` → `await source.getFrame()`) over real project-export MP4s
+(`apps/api/storage/finals`, real WebCodecs decode), N=1..30 stacked video layers, two arms differing in
+exactly one variable: `stageProbe` supplied (forces `scene-frame-compositor.ts`'s existing
+`meanLumaFromRgba`/`getImageData` readback on every layer, every frame — the SAME mechanism class that
+almost certainly produced ADR-021's own reported `luma` column) vs omitted (the default production
+export path, zero readback):
+
+```
+N=1   OFF 9.60ms   ON 51.33ms   delta +41.73ms (435%)
+N=5   OFF 32.75ms  ON 153.55ms  delta +120.80ms (369%)
+N=10  OFF 59.23ms  ON 288.78ms  delta +229.55ms (388%)
+N=20  OFF 181.18ms ON 700.08ms  delta +518.90ms (286%)
+N=30  OFF 327.33ms ON 966.32ms  delta +638.98ms (195%)
+```
+
+Two findings, and they cut in different directions:
+
+- **The readback is real and large.** ON costs 195–435% more than OFF at every N, and the ABSOLUTE
+  delta-per-layer is close to flat (~21–26 ms/layer/frame) — consistent with one synchronous
+  `getImageData` stall per layer, roughly independent of N, exactly the mechanism this stop's hypothesis
+  named. At N=30 the delta alone (639ms) is already in ADR-021's reported N=50 ballpark (855ms). This is
+  strong, real support for "a readback in the original harness would explain a large fraction of the
+  original number."
+- **But readback-OFF is NOT cheap either, and this corrects the first conclusion, not just refines it.**
+  Real WebCodecs video at 640×360 costs 9.6ms (N=1) to 327ms (N=30) with ZERO readback — 6–11 ms per
+  source, growing (mildly super-linear, not flat like the synthetic fence measurement). The bare
+  `SceneCompositor` fence test said real GPU completion of a re-uploaded texture is ~0.15ms flat; this
+  real-video test says the FULL per-frame cost (decode-adjacent + upload + grade + composite, NOT
+  separated into sub-phases here) is one to two orders of magnitude larger and growing with N. **A
+  synthetic canvas re-upload is not a working proxy for a real WebCodecs `VideoFrame`'s per-frame cost**
+  — likely reasons, none isolated in this pass: `VideoFrame`→texture upload may take a materially
+  different, more expensive GPU path than a plain 2D-canvas `texImage2D`; `SceneFrameCompositor`'s real
+  per-layer grading/pooling (`gradeMediaLayer`, `mediaRendererFor`) is heavier than the bare
+  `SceneCompositor.renderFrame` path the synthetic harness used; and this ablation's "OFF" number was
+  never split into decode-wall vs upload vs composite the way ADR-021's own table split it, so some of
+  what reads as "composite" here may still be real decode.
+
+**Scope note, stated rather than hidden.** This composition is N video layers stacked on N plain
+timeline tracks — not ADR-021's exact fixture (N `MediaIn` nodes through N-1 Flarex merges on
+1280×720 GOP-12 proxies). Both exercise the same cost centers (`gradeMediaLayer`, real WebCodecs decode,
+real per-frame upload, the same `stageProbe` readback class) but the resolution differs (640×360 here,
+1280×720 there — ~4× fewer pixels), the source files differ (real project exports vs a purpose-built
+proxy recipe), and the topology differs (stacked layers vs merge-chained nodes). The numbers above are
+not offered as a corrected replacement for ADR-021's table — they are offered as evidence that BOTH
+named mechanisms (readback stall, real per-frame video cost) are real and substantial, which is enough
+to say the original number cannot be trusted as "N-1 merge passes are expensive" without a re-measurement
+on the exact original fixture, which this entry does not provide.
+
+**Inventory of what rests on the 20.9–855.2 ms figure (the founder's explicit ask — done, not skipped):**
+
+1. `project-tracker/adr/021-frame-provider-seam.md` §7 (twice, lines ~523 and ~674): *"NOT a playback
+   win... composite 20.9–855.2 ms against decode's 2.8–9.0 ms... This ADR does not address it and must
+   not be read as a fix."* **Verdict: the CONCLUSION plausibly survives (composite cost — real video
+   upload plus, if present, a readback — is genuinely non-trivial per this entry's own ablation), but the
+   MECHANISM stated for it ("N-1 merge passes", implicitly a GPU pass-count story) does not survive
+   unqualified — this entry's own synthetic pass-count measurement showed merge/draw submission itself
+   is cheap and linear. The seam still does not fix playback speed; WHY needs updating, not whether.**
+2. `architecture.md:34` — *"the biggest lever is pass-count reduction (20.9–855.2 ms measured), not
+   caching."* **This is the framing that opened this session's Flarex-engine chapter and directed the
+   pass-count attribution work in the first place. It needs re-examination**: if a meaningful share of
+   the original number is readback-stall and real-video-upload cost rather than pass count, "pass-count
+   reduction" is not the biggest lever after all — video upload cost and (if the original harness had
+   one) readback elimination are live competing candidates, unweighted against each other by anything in
+   this entry.
+3. `architecture.md:141`, the ADR-021 progress log — cites the same split as the boundary of what the
+   3b frame cache's win does NOT claim ("scrub-back and loop... a first pass over new ground is all
+   misses"). **This one likely survives regardless of the exact number**: a cache miss pays first-pass
+   cost by definition whatever that cost turns out to be, so the boundary statement does not depend on
+   the figure being precisely 20.9–855.2 ms — flagged for completeness, not because it looks wrong.
+
+**What is solid, and what is not:**
+- SOLID: draw-call/RTT/bind counts are linear in N and fully structural (confirmed off the real GPU
+  command stream, not from any of the disputed timings).
+- SOLID: a readback of the kind `stageProbe` performs costs ~21–26ms/layer/frame, real, reproduced,
+  ablated against real video.
+- SOLID: real WebCodecs video per-frame cost (no readback) is substantial and growing with N — NOT the
+  ~0.15ms-flat picture the synthetic canvas test suggested.
+- NOT SOLID: whether ADR-021's ORIGINAL harness actually contained a readback in its timed region — the
+  script itself was scratch (`apps/worker/tmp/`) and no longer exists to inspect; this is inferred from
+  its own `luma` column and from `scene-frame-compositor.ts`'s existing `stageProbe` mechanism being the
+  only readback path this codebase has ever had for that purpose, not confirmed by reading the original
+  code.
+- NOT SOLID: an exact corrected number for N=50/100 on ADR-021's own fixture (1280×720, GOP-12 proxies,
+  Flarex node topology) — not attempted this entry.
+- Invariant affected: none directly; this is a measurement-provenance correction, not a code invariant.
+- Owner: unassigned.
+- Expiry condition: either (a) ADR-021's exact original fixture is rebuilt and re-measured with a
+  readback ablation, replacing the inferred numbers above with a direct one, or (b) the two flagged
+  dependents (ADR-021 §7's mechanism, `architecture.md:34`'s framing) are explicitly re-examined and
+  updated or reaffirmed with this entry's evidence weighed in.
+- Tracking issue: —
+- Detection: any future citation of "20.9–855.2 ms" or "composite is O(N) full-frame RTT passes" as a
+  settled mechanism (rather than a wall-clock symptom with an unresolved cause split) without pointing
+  here.
+
+**Addendum, 2026-08-17 — is the ~21–26 ms/layer/frame readback in the production budget at all?**
+Traced the real call path rather than reading the flag's name (the standing instruction after
+`kernelDiagnostics` — a diagnostic can be deliberately retained and load-bearing, so "probe" in the name
+proves nothing either way). Result: **no, it is not in production, and playback doesn't reach this code
+at all.**
+- `SceneFrameCompositor` (the only place `stageProbe`'s per-layer readback lives) is instantiated in
+  exactly 6 places. Two are real production export paths: `apps/web/src/export/export-core.ts:478` (the
+  local export core) and the same via `apps/worker/src/export-worker-scene.ts`. The other four are
+  gate/probe pages (`ExportWorkerScenePage.tsx`, `ExportWorkerSceneProbePage.tsx`, `ExportStressPage.tsx`)
+  and this session's own `flarex-readback-ablation.ts`.
+- `export-core.ts`'s `stageProbe` option is wired ONLY when `diagnostics?.stageProbes && sampleTimes.length`
+  (`export-core.ts:438`). Grepped every caller that sets `workerSceneDiagnostics`: the two REAL production
+  callers — `apps/web/src/export/local-export.ts:189` and `apps/web/src/editor/performance/proxyWorkerClient.ts:142`
+  — set `blackFrameGuard: true` but **never** `stageProbes: true`. The only caller that sets
+  `stageProbes: true` is `ExportWorkerScenePage.tsx:273`, a Stage-3-gate positive-control test page (its
+  own doc comment: "Phase 2 — Stage 3 gate... POSITIVE control"), not a route a user's export reaches.
+  **So the exact mechanism this entry ablated (21–26 ms/layer/frame) fires only under that gate page,
+  never in a real export.**
+- Playback preview is a separate question and the answer is simpler: `ScenePreviewCanvas.tsx` drives
+  `SceneCompositor` directly (`packages/shared/src/color/scene-compositor.ts`), which has no `stageProbe`
+  concept at all — `SceneFrameCompositor` (the export-only wrapper that owns `stageProbe`) is never
+  constructed on the playback path. The readback cannot fire during ordinary editor playback structurally,
+  not just by flag default.
+- There IS a real, separate, load-bearing readback in production: `blackFrameGuard` (`export-core.ts:541-557`)
+  does its OWN whole-canvas `sampleCanvasLuma` — but only on the FINAL composited frame (not per-layer),
+  and only at a handful of sampled times (≤4 in `local-export.ts`, ≤6 in `proxyWorkerClient.ts`), not
+  every frame. This is a genuine correctness control (catches a silent black-frame export/decode failure
+  before it ships) and is a different mechanism from the per-layer `stageProbe` readback ablated above —
+  smaller in scope and not something to touch, same category as `kernelDiagnostics`.
+- **Conclusion: the 21–26 ms/layer/frame readback cost does NOT belong in the production frame-time
+  budget.** It is real, it is large, and it was worth ablating to rule it in/out — but it is diagnostic-
+  only. This narrows what DEBT-030's dependents (`ADR-021` §7, `architecture.md:34`) should weigh: the
+  READBACK half of this entry's finding is not a production cost; the REAL-VIDEO-UPLOAD half (next
+  addendum) is.
+
+**Addendum, 2026-08-17 — splitting the real (no-readback) per-layer cost: decode-wait vs upload+composite.**
+The earlier ablation showed real WebCodecs per-frame cost (no readback) growing from 9.6→327 ms across
+N=1→30 (~11 ms/layer on average) and flagged the working hypothesis — not yet mine to believe — that this
+was `texSubImage2D`/`texImage2D` doing CPU-side format conversion on a `VideoFrame`
+(`packages/shared/src/color/media-renderer.ts:362-364`, confirmed as the exact upload call: `gl.texSubImage2D(...,
+gl.RGBA, gl.UNSIGNED_BYTE, source)` where `source` is the live `VideoFrame`). Measured directly (scratch
+harness, not committed — reuses the same real-clip/`SceneFrameCompositor` setup, wraps each
+`FrameProvider.getFrame()` with timing to split decode-wait from the remainder of `renderFrame`):
+
+```
+N=1   total=11.15ms   decode(getFrame await)=1.47ms  upload+composite(rest)=9.68ms   per-layer-rest=9.68ms  per-layer-decode=1.47ms
+N=10  total=61.58ms   decode(getFrame await)=13.23ms upload+composite(rest)=48.35ms  per-layer-rest=4.83ms  per-layer-decode=1.32ms
+N=20  total=220.67ms  decode(getFrame await)=103.83ms upload+composite(rest)=116.83ms per-layer-rest=5.84ms per-layer-decode=5.19ms
+```
+
+**This falsifies "upload/format-conversion is the dominant, worst-scaling term" as stated.** Per-layer
+upload+composite cost ("rest") is real (~5–10 ms/layer) but roughly FLAT or even improving with N (9.68 →
+4.83 → 5.84 ms/layer) — GL state and compositor overhead amortize across layers, as expected. What
+actually explodes is decode-wait: 1.47 → 1.32 → **5.19** ms/layer, i.e. total decode-wait goes
+13.23 ms → **103.83 ms** for a 2× increase in N (10→20), wildly super-linear where upload+composite stays
+close to linear. This is the exact shape of the codebase's own prior finding — [[decoder-contention-immunity-rule]]
+in memory, and matching post-mortems already on file — multiple concurrent `VideoDecoder` instances
+starving each other for hardware decode resources, not a fixed per-frame conversion tax.
+- **Re: STOP 3's ask, "does ADR-021's pull seam sit closer to the centre of this problem than its own
+  caveat claimed" — yes, but for a more specific reason than either framing on the table.** The dominant,
+  worst-scaling real cost at high N is decode CONTENTION under concurrent pull (all N sources asked for a
+  frame in the same tick), not composite pass count (DEBT-030 main entry) and not, primarily, per-frame
+  upload/format-conversion (this addendum). The frame-provider pull seam is exactly the mechanism that
+  decides WHEN and how sources are asked for frames — it is a plausible place to attack decode scheduling
+  (stagger/prioritize concurrent pulls) even though it was not built for that and ADR-021 §7 explicitly
+  disclaimed composite-cost fixes. Composite-cost and decode-contention are different problems that
+  happen to share a caveat paragraph in ADR-021 today; that paragraph should probably split them.
+  Unverified beyond this: whether staggering pulls actually helps hardware decode contention (OS/driver-
+  level, may not be schedulable from JS at all) — flagged as the open question a scoped item should answer
+  before designing anything, not assumed.
+- **The WebGPU `importExternalTexture` hypothesis (mine, flagged unverified by the founder) is not
+  supported as the primary lever by this data.** It targets upload cost, which is real (~5-10 ms/layer)
+  but flat, not the term that produces "3 fps at N=30." It may still be worth a narrow, separately-scoped
+  measurement at low N where upload genuinely is the larger of the two terms (N=1: 9.68 ms upload vs
+  1.47 ms decode) — but it is not the fix for the high-N collapse.
+- **Dedupe caution, addressed as asked.** This addendum's N synthetic layers are N DISTINCT real clips —
+  no re-upload of a byte-identical frame occurs in this measurement, so it says nothing about that case.
+  Separately, and worth naming because the founder explicitly asked not to let the "no caching" instruction
+  suppress it if the data showed it: a real Flarex composition CAN have multiple consumers of the SAME
+  source at the SAME timestamp (the `shared-subtree` scenario `flarex-pass-attribution.ts` already
+  measures structurally — materialization count stays flat at 1 regardless of consumer count C). Whether
+  `gradeMediaLayer`/`getSource` re-decodes or re-uploads the same frame once per CONSUMER rather than once
+  per SOURCE in that shape was not measured this stop. If it does, deduping that upload (not the composite
+  result) is legitimate per the founder's own distinction and is a candidate scoped item below — separate
+  from and not to be confused with composite-result caching, which stays off the table.
+
+### DEBT-031 — a chained fragment pass costs TWO draws, and the second one is unconditional even with
+no mask to apply
+
+- Status: **open, fix attempted 2026-08-17 and FALSIFIED by pixel test, reverted** — net code diff is
+  zero. See "Fix attempt" below before trying the same shape of fix again.
+- Registered: 2026-08-17, following directly from DEBT-030's pass-count attribution work.
+- Reason: `flarex-pass-attribution.ts`'s filter-chain scenario measured 2N+4 total draws for an N-deep
+  linear filter chain (N `pass:builtin.X` + (N+3) `group-precompose`) — exactly TWO draws per filter
+  node, not one, despite the chain having no fanout anywhere to justify a materialization boundary per
+  node (`shouldMaterialize` gates on `fanout > 1`; every node in a straight chain has fanout 1).
+
+**Traced to two different layers, and the compile layer is innocent — the finding is entirely at
+render time.**
+
+1. **Compile-time folding is CORRECT and already does what you'd expect.** `pushFragmentPass`
+   (`compile-flarex.ts:807`) calls `wrapFor(draw, STAGE_FRAGMENT)`, and `STAGE_FRAGMENT` is
+   unconditionally "slot free" in `wrapFor`'s stage-occupancy check (`compile-flarex.ts:687-711`) — so
+   a second filter node reading a first filter node's output (still the SAME `FlarexWrapGroup` object,
+   `imageInput` does not clone it) folds its pass into the SAME wrap's `shell.fragmentPasses` array
+   rather than opening a new group. Verified directly: `shouldMaterialize`'s fanout>1 gate never fires
+   for a linear chain, so nothing forces a seal between nodes either. **One wrap, N fragment passes** —
+   not N wraps. This rules out "a materialization boundary per node" as the mechanism, which is what
+   the question as posed assumed.
+
+2. **The real cost is in how ONE wrap's fragment-pass CHAIN renders.** `renderLayerWithRegionPasses`
+   (`scene-compositor.ts:3464-3510`) loops `for (const pass of fragmentPasses)` and, for each pass NOT
+   in the `rewritesAlpha` (keyer-class) branch, issues:
+   - `runFragmentPass(this.accumA.tex, pass, s2, light)` — the pass's own shader, into scratch target
+     `s2`. Scoped `pass:${effectId}` (line ~3478, confirmed by the profiler data: exactly one entry per
+     builtin effect type, counted correctly).
+   - `this.compositeTexture(s2.tex, maskTex, ...)` (line 3500) — a SECOND, **unconditional** draw that
+     blends `s2` back into the running accumulator `accumA`, UNSCOPED (falls to whatever the caller's
+     enclosing scope is — here, the default "group-precompose"), which is exactly the extra draw the
+     profiler counted per pass.
+
+   `compositeTexture` is the GENERAL masked/blended compositing shader — it has to exist because a
+   fragment pass CAN carry a mask (`pass.mask`, mask-aware defs excepted) and needs the general
+   blend/opacity machinery for that case. But it runs THIS WAY unconditionally, including the common
+   case where `maskTex` is null and the blend is a trivial full-opacity replace. The ONE place this
+   already gets the cheap treatment is the `rewritesAlpha && !maskTex` branch three lines above (line
+   3490-3498), which does a plain `gl.blitFramebuffer` instead — no draw call, no shader, no profiler
+   count. That branch is the existence proof that a cheaper path is already known-workable for at least
+   one case; it is just not the DEFAULT one.
+
+**Why this is worth tracking rather than acting on immediately.** `compositeTexture`'s generality
+(mask support, opacity, blend mode) is presumably load-bearing for the cases that DO need it, and this
+entry does not know whether a `maskTex == null` fast-path already exists elsewhere and was simply not
+reached here, whether one is safe to add without touching the blend/opacity semantics `compositeTexture`
+also carries, or what the actual GPU-time cost of the extra draw is (DEBT-030 found real GPU completion
+trivially fast on synthetic sources at up to 100 draws — this specific pass-chain case was not isolated
+under a fence measurement). A `maskTex == null` fast path mirroring the existing `blitFramebuffer`
+branch is the shape a fix would likely take, but sizing and safety are unverified.
+**Fix attempt, 2026-08-17 — falsified.** Authorized to fix (not just trace) this stop, with the guard
+"blit only where no mask, no blend-mode change, no alpha rewrite" and a requirement to verify with
+`render:compare:pixels` because the no-op claim is a pixel claim, not an inspection claim.
+
+The reasoning that looked sound: `registry.ts`'s own doc comment for `rewritesAlpha` says the default
+composite-back "is correct only for opaque outputs" — read as implying every OTHER (non-`rewritesAlpha`)
+def is documented to keep alpha at 1 across its footprint. If true, `compositeTexture`'s Porter-Duff
+`over(src, dst)` at opacity 1 / blend "normal" / no mask degenerates algebraically to a straight copy of
+`src` whenever `src.a==1` everywhere (worked the algebra by hand: `dst_new = src.rgb*src.a +
+dst.rgb*(1-src.a)`, `dst_new.a = src.a + dst.a*(1-src.a)`; both reduce to `src` exactly when `src.a≡1`),
+so a `blitFramebuffer` should produce identical pixels to the existing branch three lines above.
+
+Implemented as a second `if (!maskTex) { blit; continue; }` branch (kept separate from the existing
+`rewritesAlpha && !maskTex` branch, which has a different — correctness, not no-op — justification).
+Typechecked clean. `render:compare:pixels` narrowed to the 11 stylize/fragment-pass fixtures passed (it
+compares Remotion vs web preview, and BOTH sides run the same shared `scene-compositor.ts`, so it cannot
+distinguish "both sides changed identically" from "neither side changed" — not the right instrument
+here). `render:baseline` narrowed to the same 11 (compares against a stored golden reference, so it CAN
+tell) found the change was **not** a no-op: 7 of 11 fixtures changed, 0.78–1.25% of pixels each
+(`stylize` 0.856%, `stylize-subject` 0.851%, `flarex-generators` 1.248%, etc.) — the 4 unchanged
+`-plate` fixtures apparently don't exercise content with soft alpha. The "opaque by convention" reading
+of the doc comment was wrong: `stylize-subject`'s subject-aware masking (and evidently other content)
+produces soft, non-binary alpha at feathered edges even on defs that never declare `rewritesAlpha` — the
+doc comment describes why the `rewritesAlpha` branch is NECESSARY, not a universal claim about every
+other def's alpha. Reverted immediately; `git diff` on `scene-compositor.ts` confirmed the file returned
+byte-identical to HEAD before the attempt (verified with `render:baseline` again on the two worst
+fixtures — still shows drift, but confirmed via `git diff` to be **pre-existing** drift already present
+at HEAD `e1e53ec` against the stored baseline commit `0f98322`, predating and unrelated to this attempt;
+not chased further this stop, out of scope).
+
+**What this rules in and out for a future attempt.** The `maskTex == null` fast path is NOT safe as a
+blanket rule — it needs a real per-pass "is this content's alpha uniformly 1" fact, not an inference from
+the def's `rewritesAlpha` flag, and this codebase does not currently compute or carry that fact. Two
+shapes worth considering instead, neither attempted: (a) have each fragment-effect def *declare* whether
+it can introduce partial alpha (most builtins probably can't — the actual carrier of soft alpha here is
+upstream masks/mattes reaching the pass as input, e.g. `stylize-subject`'s subject cutout, not the
+filter's own math), which would need auditing every builtin, not inferring from one comment; (b) check at
+render time whether the INPUT (`accumA`) alpha is already non-uniform (an extra readback-free query isn't
+obviously available) before choosing blit vs composite. Both are real design work, not a three-line fix.
+- Invariant affected: none named; this is a candidate optimization site, not a violated invariant.
+- Owner: unassigned.
+- Expiry condition: a future session either fences the render-time cost of the extra draw (to establish
+  whether it is worth fixing at all — DEBT-030's own lesson is that draw COUNT and GPU TIME are not the
+  same question) and/or designs a fast path around a REAL per-pass alpha-uniformity fact (not the
+  falsified "non-rewritesAlpha implies opaque" inference above) and re-measures the filter-chain scenario
+  in `flarex-pass-attribution.ts` to confirm the draw count actually drops from 2N+4 toward N+4.
+- Tracking issue: —
+- Detection: any new fragment-pass-chain code path that assumes a non-`rewritesAlpha` def produces
+  uniformly opaque output without checking — `stylize-subject`'s falsification above is the counterexample
+  to cite.
