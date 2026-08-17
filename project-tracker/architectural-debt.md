@@ -4120,6 +4120,77 @@ not the editor's time-sliced preview provider DEBT-027's own field probe exercis
 `lastFrameLagSeconds` catch-up path) — worth flagging as a scope gap for whoever picks this up: a
 join test on the ACTUAL preview provider was not done, only on its export-mode sibling.
 
+**UPDATE 2026-08-17 — mechanism found on the ACTUAL preview provider `WebglMediaLayer.tsx` exercises;
+NOT fixed this session, and here is precisely why.**
+
+The founder scoped this correctly as correctness-only (see above) and asked for a fix, since it unblocks
+ADR-021 4b. Diagnosed to a specific, well-evidenced mechanism; did not implement a fix, for reasons
+explained at the end of this update — this is a "leave it clean and say what remains" outcome, not a
+silent stop.
+
+**Method.** Reproduced the media fixture directly (one asset-source Flarex MediaIn over real footage,
+same as the field probe) and read the diagnostics DEBT-027's own prior update already named as available
+without building anything: `__rfSourceMap`'s `why`/`wcBusy`/element fields, plus
+`window.__rfFramePresent` (`WebglMediaLayer.tsx:178`) — an existing, already-shipped tally of every
+decode's disposition (`presented` / `providerChanged` / `heldNotPresented` / `nullFrame` / `threw`), not
+previously read by this entry. `flarex-debt027-source-map-probe.ts` (committed): scrubs the field probe's
+own 6 calibrated stops as two full sweeps (mirroring its B-then-C oracle), dumping both after every
+settle.
+
+**Two candidates ruled out cheaply before the real one:**
+1. **Whole-comp Flarex proxy suspension** (`VideoPreview.tsx`'s `proxySuspendedSourceIds` /
+   `suspendedLoaderTimesRef` — a demoted loader is fed a FROZEN time instead of the live playhead).
+   Plausible: a suspended loader's `currentTime` prop stops changing, which would exactly explain a
+   frozen `served` value. Ruled out directly: `window.__rfFlarexProxy` (the proxy system's own telemetry)
+   was completely empty throughout — no comp proxy was ever attempted in this fixture's short life, so
+   `proxyServedCompIds` is always empty and `isSuspended` is always false. Dead, confirmed not assumed.
+2. **A `srcDur`/`holdEnd` tail clamp** (`VideoPreview.tsx:2346-2350` — clamps the loader's requested time
+   at the asset's OWN metadata duration, which could be wrong). Ruled out by the data itself: positions
+   well past the first failure (t=7.8, 13.3, 16.1) serve correctly in the same runs where t=2.2 and
+   t=10.6 fail — a tail clamp would fail every position past its threshold, not a scattered subset.
+
+**What the data actually shows.** `__rfFramePresent`'s `heldNotPresented` counter climbs enormously
+across one ~8-second, 6-position sweep — measured 62 → 115 → 182 → 185 → 253 → 323 → 324 → 390 → 457 —
+while `presented` (the only disposition that stamps `served`) crawls from 6 to 23 over the same window.
+The source spends nearly all its cycles in `requestWcFrame`'s paused catch-up-hold branch
+(`lag > WC_HOLD_LAG_S`, `WebglMediaLayer.tsx:2537-2563`), decoding frames it never presents because they
+never land close enough to the live target. `served` freezes at whatever value the LAST successful
+convergence produced, and stays there — sometimes for several stops in a row — until the hold streak
+happens to converge again.
+
+**Why it isn't caught by the existing stall/recovery mechanism.** The paused stall detector
+(`lag > WC_PAUSED_STALE_LAG_S && streakMs > WC_PAUSED_STALE_MAX_MS`, line 2466) exists specifically to
+hand a source that "can't converge" to the recovery ladder (`scheduleWcPausedRecovery`). But the streak
+clock (`wcHoldStartRef`) is RESET to null on every single presented frame (line 2565,
+`wcHoldStartRef.current = null; presentFrame();`), including a barely-converged one. A source that is
+mostly behind but briefly catches up every so often — exactly what rapid scrubbing produces — never
+accumulates a long enough UNBROKEN streak to trip the detector, even though it is behind for the large
+majority of real time. The detector is built to catch monotonic divergence; this fixture produces
+sawtooth divergence, which is invisible to a streak that resets on any dip below threshold.
+
+**Why this was not fixed this session, deliberately.** `WebglMediaLayer.tsx`'s hold/recovery state
+machine is the single most heavily-scarred piece of code this repo's own comments document — nearly
+every branch in the vicinity of this mechanism cites a specific, dated, previously-shipped regression
+(freeze storms, "page isn't responding" stalls from decoder-reset storms, staggered-update artifacts from
+presenting non-converged frames, a 3-4s self-recovering stall from an unbounded catch-up loop) that this
+EXACT logic was tuned to prevent. A structurally obvious fix — make the stall streak cumulative/windowed
+instead of resetting on any convergence — changes behavior in precisely the family this file has already
+been burned by more than once, and this session has no soak-testing capability (the kind of repeated,
+varied-scenario, extended-duration run those prior fixes were verified against) to confirm a change here
+does not reintroduce one of them. Landing an unverified change to this specific machinery is a worse
+outcome than leaving DEBT-027 diagnosed-but-open one more cycle.
+- **ADR-021 4b: still blocked.** Not reachable this session — it was gated on DEBT-027, and DEBT-027 is
+  diagnosed, not fixed.
+- Owner: unassigned.
+- Expiry condition (revised, replacing the "read the snapshot" clause the entry opened with — that step
+  is now done): a future session designs and soak-tests a fix to the paused-stall streak accounting in
+  `requestWcFrame` (cumulative-lag or windowed-average instead of reset-on-any-presentation), verifies it
+  against `flarex:frame-cache-field FIELD_FIXTURE=media` (3 clean sweeps, matching this repo's own
+  standard for a converged fix) AND a normal playback/scrub soak to confirm none of the prior regressions
+  this logic guards against (freeze storms, decoder-reset storms, staggered-picture artifacts) return.
+- Detection: any future citation of DEBT-027's cause as simply "decoder supply" without pointing to this
+  update's more precise mechanism (paused catch-up-hold streak resetting on every micro-convergence).
+
 ---
 
 ### DEBT-025 — every headless browser launch leaks a Chrome profile directory, and nothing reaps them
