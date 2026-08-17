@@ -5000,11 +5000,14 @@ obviously available) before choosing blit vs composite. Both are real design wor
   uniformly opaque output without checking — `stylize-subject`'s falsification above is the counterexample
   to cite.
 
-### DEBT-032 — the N=20 real-video decode-wait explosion (13ms → 104ms) has no identified mechanism;
-two hypotheses are now falsified
+### DEBT-032 — the N=20 real-video cost explosion has no identified mechanism; three hypotheses are
+now falsified, and the phenomenon's own reproducibility needed correcting
 
-- Status: open, unidentified. Reproduces reliably (measured twice, same machine, ~100ms both times); the
-  CAUSE does not.
+- Status: open, unidentified, **and the header claim below ("reproduces reliably... ~100ms both times")
+  is WRONG and superseded — see the 2026-08-17 addendum.** What reproduces is "N=20 costs more than
+  linear extrapolation from N=10 predicts, by a widely varying amount." WHICH SUB-STEP carries that cost
+  is not stable across runs, and in one run there was no elevation at all. Read the addendum before
+  trusting anything above it in this entry.
 - Registered: 2026-08-17, split out of DEBT-030 after this stop's join-test correction — DEBT-030's own
   addendum had named "decoder contention (multiple concurrent `VideoDecoder` instances starving each
   other)" as the mechanism; that language is now superseded and should not be treated as settled.
@@ -5046,3 +5049,73 @@ two hypotheses are now falsified
 - Detection: any future citation of "decoder contention" as the settled mechanism for the N=20
   decode-wait explosion without pointing here — that language was DEBT-030's, and this entry supersedes
   it. Also: any future citation of the 101–104ms figure without noting the mechanism is unidentified.
+
+**Addendum, 2026-08-17 — the founder's eviction/seek-thrash hypothesis, tested and falsified; and a
+bigger problem found underneath it.**
+
+The founder's leading hypothesis, explicitly flagged as theirs and unverified: eviction under a byte
+budget forcing a seek-to-keyframe-and-redecode instead of a cheap next-frame decode, worse as N rises.
+The specific constant named, `PINNED_FRAMES_PER_PROVIDER` (`apps/web/src/playback/
+flarex-source-providers.ts:67`), belongs to the EDITOR PREVIEW's multi-provider byte-budget system —
+checked directly, and it is a different module from the export-mode `FrameProvider`
+(`apps/web/src/export/source-decoder.ts` → `webcodecs-decoder.ts`) that this entry's measurements
+actually exercise; the export path never imports `flarex-source-providers.ts`. So the NAMED mechanism
+cannot literally be the cause of DEBT-032's number. But the STRUCTURAL idea — a forced seek where a cheap
+next-frame decode was expected — has a direct, already-shipped signal in the code this entry actually
+measures: `wcDecoderResetStats.hardReset` (`webcodecs-decoder.ts:140`, exposed as `window.__rfWcDecoder`),
+whose own doc comment says exactly what to look for: "backward seeks/shuttle, forward GOP crossings past
+the fed cursor... A high count during steady forward playback signals the session is thrashing." No new
+instrumentation needed — read the existing counter before/after the exact incremental-frame request
+pattern that produced the explosion, per N (`flarex-debt032-reset-probe.ts`, committed).
+
+**Result: zero hard resets, at every N from 1 to 30, in a run where total time was still somewhat
+elevated at N=20 relative to strict linearity.** The eviction/seek-thrash mechanism is dead for this code
+path — say so plainly, per the founder's own instruction. Confirmed, not assumed: the counter is real,
+shipped, and read directly rather than inferred.
+
+**But chasing this down surfaced something more important than a fourth falsified mechanism.** Re-running
+`upload-cost-split.ts` (the ORIGINAL script this entry's 101–104ms figure came from) two more times, same
+machine, same session, produced a DIFFERENT split each time:
+
+```
+run 1 (prior stop)   N=20  decode=103.83ms  rest(upload+composite)=116.83ms  total=220.67ms
+run 2 (prior stop)   N=20  decode=101.07ms  rest(upload+composite)=113.20ms  total=214.27ms
+run 3 (this stop)    N=20  decode= 17.02ms  rest(upload+composite)=143.48ms  total=160.50ms
+run 4 (this stop)    N=20  decode= 18.68ms  rest(upload+composite)=139.35ms  total=158.03ms
+run 5 (this stop, flarex-debt032-reset-probe.ts's own timing, different loop shape)
+                      N=20  total=17.7ms — NO elevation at all
+```
+
+Runs 1–2 (which this entry was originally written around) attributed the N=20 cost to DECODE exploding
+while upload+composite stayed roughly flat. Runs 3–4, taken minutes later in the same session, show the
+OPPOSITE split: decode stays cheap and roughly flat (0.6–0.9ms/layer) while upload+composite is now the
+term that grows disproportionately (50ms → 139–143ms from N=10 to N=20, a ~2.8× jump for 2× N). Run 5,
+using a differently-shaped measurement loop, found no elevation at N=20 at all. **The attribution this
+entry was built on — "decode-wait specifically explodes" — is not a stable signal.** What is more
+consistently true across runs 1–4 is only the weaker claim: total N=20 cost tends to run higher than a
+linear extrapolation from N=10 would predict, by an amount that varies roughly 2.6×–8× depending on the
+run, and WHICH PHASE carries that excess is not reproducible.
+
+**This is exactly the "noise floor is a precondition, not something to subtract" lesson this repo already
+has on file ([[noise-floor-is-a-precondition]]) — and this entry did not apply it rigorously enough when
+first written.** A single run's phase attribution was treated as a fact to explain, when it should have
+been treated as one sample of a noisy process first. A signal that changes WHICH SUB-STEP it lands in
+between runs, on the same machine, in the same session, with no code changes in between, is the signature
+of a shared, stochastic, machine-level resource (GC pauses, OS thread scheduling, thermal/power
+throttling, or contention with whatever else this session's browser instances and file I/O were doing at
+the time) rather than a single deterministic code-level branch that a fixed N reliably triggers. That
+would also explain why two direct, careful falsifiers (request ordering, GL interleaving) and now a third
+(hard-reset counting) all came back clean: they were each testing a DETERMINISTIC hypothesis against what
+may be a fundamentally STOCHASTIC phenomenon.
+- **Three mechanisms now falsified with real instruments**: decoder-side request-concurrency contention,
+  main-thread GL-work queueing, and eviction/seek-thrash. None explain the explosion. All three tested
+  directly, not argued from documentation or prior comments.
+- **Revised expiry condition, replacing the one above**: before hunting a fourth deterministic mechanism,
+  establish whether the N=20 elevation is even a stable phenomenon to explain — repeat
+  `upload-cost-split.ts` (or an equivalent) 5–10× back to back, same N, same machine, and report the
+  DISTRIBUTION (not a single run) of total time and of the decode/rest split. If the split is genuinely
+  bimodal or highly variable run-to-run, the next step is probably Chrome's own tracing/perf tools to see
+  what the browser process is doing during a slow run that it is not doing during a fast one — not another
+  isolated JS-level proxy test, which is what all three falsified attempts here were.
+- Detection (extended): any future citation of THIS entry's original 101–104ms decode-wait figure, or of
+  "decode-wait explodes with N" as a stable, located phenomenon, without reading this addendum first.
