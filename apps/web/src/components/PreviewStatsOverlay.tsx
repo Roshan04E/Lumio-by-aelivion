@@ -26,18 +26,33 @@ export function PreviewStatsOverlay() {
   const hasSamples = stats.sampleCount > 0;
   const droppedPct = Math.round(stats.droppedRatio * 100);
   const fpsClass = !stats.playing || !hasSamples ? "" : droppedPct > 20 ? "is-bad" : droppedPct > 5 ? "is-warn" : "is-good";
+  // The 2026-08-17 clean-room finding, quantified: FPS read 62 (compositor repaint — healthy) over a
+  // picture that was frozen ~95% of the time, because the old "Media" row SUMMED per-layer delivery —
+  // 6 layers averaging 12.5fps sums to the same headline number as one layer at 75fps. `minMediaFps`
+  // is the worst layer, which is what "is playback actually healthy" needs — a layer stalled at 0
+  // cannot hide behind five others still delivering. `mediaCollapsed` names the exact failure this
+  // was blind to: the compositor repaint rate reads fine while real motion delivery has stopped.
+  const hasMediaLayers = stats.playing && stats.activeMediaLayers > 0 && stats.minMediaFps != null;
+  const mediaCollapsed = hasMediaLayers && stats.minMediaFps! < 5 && hasSamples && stats.fps >= 24;
+  const mediaClass = !hasMediaLayers ? "" : mediaCollapsed ? "is-bad" : stats.minMediaFps! < 15 ? "is-warn" : "is-good";
   return (
     <div className="preview-stats-overlay" aria-hidden="true">
       <div className={`preview-stats-row ${fpsClass}`}>
         <span>FPS</span>
         <span>{stats.playing && hasSamples ? stats.fps.toFixed(0) : "—"}</span>
       </div>
-      {/* NEW video frames presented per second (rVFC) — the motion-delivery rate. FPS above is the
-          compositor repaint rate (display refresh); a 30fps proxy under a 75Hz screen reads
-          FPS 75 / Media 30. "—" when no video layer is playing. */}
-      <div className="preview-stats-row">
+      {/* The WORST per-layer motion-delivery rate (rVFC), not a sum — see the block comment above.
+          FPS above is the compositor repaint rate (display refresh) and happily redraws an unchanged
+          frame, so a stalled layer under a healthy FPS reading is exactly the case this row exists to
+          catch: mediaCollapsed drives `is-bad` and the "STALLED" label specifically for that gap,
+          distinct from a merely low rate (`is-warn`) or ordinary "nothing playing" ("—"). */}
+      <div className={`preview-stats-row ${mediaClass}`}>
         <span>Media</span>
-        <span>{stats.playing && stats.mediaFps > 0.5 ? stats.mediaFps.toFixed(0) : "—"}</span>
+        <span>
+          {hasMediaLayers
+            ? `${stats.minMediaFps!.toFixed(0)}${mediaCollapsed ? " STALLED" : ""} · ${stats.activeMediaLayers}x`
+            : "—"}
+        </span>
       </div>
       <div className="preview-stats-row">
         <span>Dropped</span>

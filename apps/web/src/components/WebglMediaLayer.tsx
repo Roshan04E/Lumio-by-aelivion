@@ -14,7 +14,7 @@ import type { VisibleContribution } from "@orreris/shared";
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
-import { recordMediaFrame } from "../editor/performance/frame-stats";
+import { recordMediaFrame, releaseMediaFrameKey } from "../editor/performance/frame-stats";
 import { acquirePreviewFrameProvider, isAdmissionEligible } from "../playback/preview-frame-pool";
 import { acquireFlarexSourceProvider } from "../playback/flarex-source-providers";
 import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
@@ -231,6 +231,11 @@ function wcModeKey(src: string): string {
  * row answers it wrongly.
  */
 const wcModeLive = new Map<string, number>();
+
+/** One key per `WebglMediaLayer` MOUNT, for `recordMediaFrame`'s per-layer minimum (frame-stats.ts) —
+ *  deliberately per-mount, not per-src: two layers sharing one URL are two independent delivery rates
+ *  (one can stall while the other doesn't), which is exactly the case a per-URL key would collapse. */
+let mediaLayerKeySeq = 0;
 
 function recordWcMode(src: string, mode: "wc-hw" | "wc-sw" | "element") {
   if (typeof window === "undefined") return;
@@ -779,6 +784,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const wcPausedRecoveryTimerRef = useRef<number | null>(null);
     const wcFallbackRef = useRef<() => void>(() => {});
     const requestWcFrameRef = useRef<() => void>(() => {});
+    // Lazily assigned on first use (the media-fps effect below), not at mount — a layer that never
+    // plays a video frame never needs one, and this keeps `mediaLayerKeySeq` from burning a value per
+    // MOUNT (text/shape/audio layers included) rather than per layer that actually reports fps.
+    const mediaFrameKeyRef = useRef<string | null>(null);
     // When drawVideoFrame last actually painted — the watchdog uses it to catch a layer whose draw
     // chain went quiet while the transport plays (rvfc waiting on a stalled element presents nothing;
     // the compositor keeps compositing the stale canvas at full fps, so ONLY this can see it).
@@ -1230,20 +1239,31 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // requestVideoFrameCallback while PLAYING. The compositor's FPS row runs at display refresh and
     // redraws unchanged frames — this is the number that exposes a low-cadence source/proxy
     // (30fps proxy under a 75Hz compositor: FPS 75, Media 30 — the 2026-07-19 report's gap).
+    //
+    // KNOWN SCOPE LIMIT: only fires for the `<video>` ELEMENT path (`sourceVideoRef.current` and
+    // `requestVideoFrameCallback` are both element-only APIs) — a WebCodecs-mode layer's own delivery
+    // is not counted here. That is exactly the population the 2026-08-17 admission-cliff finding
+    // (DEBT-033) needs watched, since it is layers DENIED a WC lease that fall to this path and
+    // collapse, so the gap does not blind `minMediaFps` to the failure mode it exists to catch — but a
+    // WC-mode stall specifically would still read as "not tracked" rather than "tracked healthy",
+    // worth closing in a future pass rather than claimed fixed here.
     useEffect(() => {
       const video = sourceVideoRef.current as VideoFrameCapableElement | null;
       const playing = "isPlaying" in props ? props.isPlaying === true : false;
       if (!video || mediaType !== "video" || !playing || !video.requestVideoFrameCallback) return;
+      if (mediaFrameKeyRef.current === null) mediaFrameKeyRef.current = `ml_${(mediaLayerKeySeq += 1)}`;
+      const key = mediaFrameKeyRef.current;
       let cancelled = false;
       let handle = 0;
       const tick = () => {
         if (cancelled) return;
-        recordMediaFrame();
+        recordMediaFrame(key);
         handle = video.requestVideoFrameCallback!(tick);
       };
       handle = video.requestVideoFrameCallback(tick);
       return () => {
         cancelled = true;
+        releaseMediaFrameKey(key);
         video.cancelVideoFrameCallback?.(handle);
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps

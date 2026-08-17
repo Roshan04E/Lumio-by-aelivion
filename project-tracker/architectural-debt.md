@@ -5253,3 +5253,119 @@ any of the three falsified mechanisms, is this entry's most important finding.
 - Detection (final): any future work that treats a SINGLE performance measurement in this codebase as
   a finding, rather than the first sample of a distribution that might be this noisy, without checking
   this entry first.
+
+---
+
+### DEBT-033 — real multi-clip playback freezes at an ADMISSION-DENIAL cliff (WebCodecs session cap),
+not a gradual load curve
+
+- Status: mechanism confirmed directly, not fixed (not yet scoped as a fix — this entry establishes
+  WHERE the cliff is, per the founder's STOP 1 ask; designing a remedy is future work).
+- Registered: 2026-08-17, from the founder's own clean-room hand measurement:
+
+  ```
+  clips  FPS  Media  Dropped  Frame    Composite  Res   Decoders   observed
+    1     73    -      1%     13.7ms     1.3ms    1/4     0+3      smooth
+    3     62    -      4%     16.1ms     2.8ms    1/4     0+4      smooth
+    6     62    75     6%     16.0ms     1.8ms    1/4     4+4      frozen ~95%
+   10     38    28    33%     26.7ms     2.7ms    1/4     4+4      frozen
+  ```
+  Composite stayed 1.3–2.8ms at every N (DEBT-032 stays closed — this is not a pass-count story).
+  `mediaFps` sums across layers (Media 75 at 6 clips ≈ 12.5fps/layer average, worse in practice per the
+  reproduction below); FPS is the compositor repaint rate and redraws an unchanged frame happily (the
+  founder had to say the picture was frozen — the number alone said fine); Res was 1/4 with no
+  "(auto)" suffix in every arm, so this is the OPTIMISTIC starting point before adaptive degrade even
+  engages.
+
+**STOP 1's question: why does the delivery path appear to change between 3 and 6 layers, given
+`video-element-pool.ts`'s `MAX_IDLE=4` caps only the IDLE set (its `active` counter is uncapped) and
+cannot explain a 4-active plateau on its own?** Founder's hypothesis, flagged unverified: below some
+threshold every layer runs on WebCodecs; above it, layers fall back to the pooled `<video>` element,
+and per-layer delivery collapses there — a PATH CHANGE, not a gradual load curve.
+
+**Reproduced as a real fixture** (`flarex-playback-collapse-probe.ts`, committed) — N real video layers
+on N tracks, all at t=0, read live via `__rfWcMode` (per-source decode path), `__rfWcPool` (WebCodecs
+session pool census, including `capMisses`/`admissionDenials` — direct evidence of denial, not
+inferred), `__rfVideoPoolStats`, and `__rfSourceMap` (per-LAYER served state — DEBT-027's own
+instrument, reused here because `__rfWcMode` is keyed by URL and undercounts when layers share a clip).
+
+**Three attempts; the first two were confounded, and are recorded so a future session does not repeat
+them:**
+1. N distinct FRESH imports, played immediately. `VideoPreview.tsx:4014`'s
+   `preferNativeDecode={!isIngestProxyUrl(mediaUrl, asset) && !hasMeasuredDenseGop(asset?.id)}` defaults
+   a freshly-imported asset (no ingest proxy built yet) to the native `<video>` path — EVERY arm,
+   including N=1, measured "fresh import defaults to element", not concurrency.
+2. The SAME already-warm clip restacked N times, to hold proxy-readiness constant. This surfaced a
+   DIFFERENT real mechanism instead: `__rfWcPool`'s `shared`/`sharedFramesServed` engaged for
+   identical-URL layers (one decode session serving several consumers of the same file) — not what N
+   distinct real clips playing together does, so still not the founder's scenario.
+3. **The one that worked**: N DISTINCT imports, placed on the timeline, then held (not yet playing)
+   while polling `window.__rfSourceProxy` (`{built, queued, active}`) until background proxy builds
+   finished (bounded 45s) — measuring concurrency against WARM assets the way the founder's own
+   clean-room session (which had time for its clips to proxy) actually did.
+
+**Result — the hypothesis holds, confirmed directly from `capMisses`/`admissionDenials`, not inferred
+from FPS:**
+```
+N=1   capMisses=0   admissionDenials=0    — every layer wc-hw. All WebCodecs.
+N=3   capMisses=0   admissionDenials=0    — every layer wc-hw. All WebCodecs.
+N=6   capMisses=4   admissionDenials=4   starvedSources=2  — 3 layers wc-hw, 3 forced to element.
+N=10  capMisses=12  admissionDenials=12  starvedSources=6  — 3 layers wc-hw, 7 forced to element.
+```
+Zero denials at N=1/3 (exactly the founder's "smooth" arms); real, nonzero, GROWING denials starting at
+N=6 (exactly the founder's "frozen" arms). This is `MAX_WC_TOTAL_SESSIONS = 4`
+(`preview-frame-pool.ts:113`, "TOTAL concurrent decoder sessions across BOTH modes — the real machine
+ceiling") being reached and starting to refuse admission, not `video-element-pool.ts`'s `MAX_IDLE`
+(which the founder had already correctly ruled out as insufficient to explain it). **The cliff is a
+path change, confirmed — not a gradual load curve, and the fix belongs at the threshold/admission
+layer, not at making the `<video>` element path faster.**
+
+**One honest imprecision, not smoothed over**: only 3 (not exactly 4) layers read `wc-hw` at the moment
+of census in both the N=6 and N=10 arms, not the full `MAX_WC_TOTAL_SESSIONS=4` the constant would
+predict. Plausibly a transient — the census was taken during a `PLAY_SETTLE_MS` window, and
+`admissionRecoverySweeps`/`admissionRecoveryWaits` were both nonzero in the same read, meaning the pool
+was still actively re-arbitrating at that instant — but this was not chased to ground and should not be
+read as "the cap is actually 3."
+- Invariant affected: none named; this is a mechanism confirmation, not a code invariant.
+- Owner: unassigned.
+- Expiry condition: a future session designs and scopes an actual fix at the admission-threshold layer
+  (options unexplored here: raise `MAX_WC_TOTAL_SESSIONS` if the machine ceiling it protects allows it;
+  degrade the RENDER SCALE or drop EXCESS layers gracefully once at cap instead of silently falling to a
+  much slower path; or make the element-path fallback itself not collapse per-layer delivery so badly) —
+  and confirms the 3-vs-4-active imprecision above either resolves or has its own explanation.
+- Tracking issue: —
+- Detection: any future citation of "gradual degradation" or "the slow path needs optimizing" for this
+  freeze without first checking `__rfWcPool.capMisses`/`admissionDenials` at the layer count in
+  question — the founder's own framing ("the fix is about the threshold rather than about making the
+  slow path faster") is the one to test against, not assume past.
+
+---
+
+### STOP 2 — HUD fix, `frame-stats.ts` / `PreviewStatsOverlay.tsx` (shipped, not a debt entry)
+
+Landed alongside DEBT-033 above, same session: the "Media" HUD row summed per-layer motion-delivery
+rate (`mediaFps`), which is exactly the instrument-cannot-tell-the-answers-apart defect this chapter
+keeps finding elsewhere — 6 layers averaging 12.5fps and 1 layer at 75fps both read "75". Fixed by
+adding a per-layer-keyed minimum (`minMediaFps`, `frame-stats.ts`): every `WebglMediaLayer` mount now
+registers a stable key (`mediaLayerKeySeq`, lazily assigned on first tick) via `recordMediaFrame(key)`
+and releases it on cleanup (`releaseMediaFrameKey`) so a paused/unmounted layer does not falsely decay
+the minimum toward a stall it never had. A layer that stops ticking without releasing (a genuine stall,
+not a clean stop) reads 0 after `MEDIA_STALL_MS` (1000ms) rather than holding its last-good rate
+forever. The HUD's Media row now shows the minimum with an active-layer count (`12 · 6x`) and flags
+`mediaCollapsed` — minimum near-zero while the compositor's own FPS reads healthy (≥24) — with an
+`is-bad` class and a "STALLED" label, the exact gap the founder's clean-room test exposed by hand. FPS
+itself is unchanged, per explicit instruction — it is correct for what it measures.
+
+**Verified visually**, not just by typecheck: built the same N=6 admission-cliff scenario, toggled the
+Playback Stats overlay on, played, and screenshotted (`tmp/hud-visual-check.png`, not committed — a
+scratch verification artifact). The row renders correctly, aligned with the others. It read "Media —"
+in that particular run rather than a flagged low number, which is itself informative and worth naming
+rather than hiding: `recordMediaFrame` only fires on the `<video>` ELEMENT path
+(`requestVideoFrameCallback` is element-only — a WebCodecs-mode layer's delivery is not counted, a
+pre-existing gap this fix inherits rather than closes), and several of the element-fallback layers in
+that run were `elPaused: true` at read time — stuck paused rather than ticking-but-slow, meaning they
+had never registered a key at all. **Scope limit, stated plainly**: `minMediaFps` catches "a registered
+layer's delivery collapsed" cleanly; it does not yet catch "a layer never started delivering in the
+first place" (paused/stuck-before-first-frame) or WC-mode stalls specifically. Both are real, both are
+visible in `__rfSourceMap` already (`elPaused`, `wcBusy`), and both would extend this same mechanism
+rather than replace it — left as follow-up, not claimed fixed here.

@@ -43,8 +43,24 @@ export interface FrameStatsSnapshot {
    * runs at display refresh and happily redraws an unchanged video frame). A 30fps proxy under a
    * 75Hz compositor reads fps≈75, mediaFps≈30 — exactly the gap the 2026-07-19 "½ quality feels
    * low-fps" report lived in. 0 when no video layer is playing (stills/text-only comps).
+   *
+   * SUMS across layers — kept for compatibility with existing readers, but this is NOT a health
+   * signal on its own: a 6-layer comp where 3 layers deliver 25fps and 3 are stalled at 0 sums to
+   * the same 75 as 6 layers evenly delivering 12.5fps, and the two are very different pictures. See
+   * `minMediaFps`.
    */
   mediaFps: number;
+  /**
+   * The WORST per-layer media delivery rate currently playing, in fps — 0 if any playing video
+   * layer has gone silent (its own `requestVideoFrameCallback` has not ticked within
+   * {@link MEDIA_STALL_MS}), regardless of how well the others are doing. This is the number that
+   * would have caught the 2026-08-17 clean-room finding: FPS 62 (compositor repaint, healthy) over a
+   * frozen picture, because `mediaFps` summed 75 across 6 layers while several sat stalled. Null when
+   * no video layer is currently playing (nothing to take a minimum of — distinct from a real 0).
+   */
+  minMediaFps: number | null;
+  /** How many distinct video layers are contributing to `minMediaFps` right now. */
+  activeMediaLayers: number;
 }
 
 const EMPTY_SNAPSHOT: FrameStatsSnapshot = {
@@ -58,6 +74,8 @@ const EMPTY_SNAPSHOT: FrameStatsSnapshot = {
   renderScale: 1,
   playing: false,
   mediaFps: 0,
+  minMediaFps: null,
+  activeMediaLayers: 0,
 };
 
 const intervals = new Float64Array(RING_SIZE);
@@ -75,6 +93,24 @@ let mediaFrameCount = 0;
 let mediaWindowStartAt = 0;
 let lastMediaFps = 0;
 
+/**
+ * Per-layer media delivery, keyed by the caller's own stable identity (one `WebglMediaLayer` mount =
+ * one key, for its whole life — see that file's `useId()`-based key). A `Map`, not a ring buffer: the
+ * set of playing layers changes shape constantly (mount/unmount/pause), unlike the fixed-size
+ * playback-frame window above.
+ */
+interface MediaLayerEntry {
+  count: number;
+  windowStart: number;
+  rate: number;
+  lastFrameAt: number;
+}
+const mediaLayerStats = new Map<string, MediaLayerEntry>();
+/** A layer that stops ticking without releasing its key (a real stall, not an unmount) reports 0
+ *  once this long has passed since its last frame — matching the ~1s window this file already uses
+ *  for the aggregate rate, so "stalled" and "just between window refreshes" are not conflated. */
+const MEDIA_STALL_MS = 1000;
+
 const listeners = new Set<() => void>();
 
 function currentMediaFps(now: number): number {
@@ -89,10 +125,30 @@ function currentMediaFps(now: number): number {
   return lastMediaFps;
 }
 
+/** Refreshes every tracked layer's own rate on the same ~900ms cadence as the aggregate, applies the
+ *  stall rule, and returns the worst one — the number `minMediaFps` publishes. */
+function currentMinMediaFps(now: number): { min: number | null; activeLayers: number } {
+  if (mediaLayerStats.size === 0) return { min: null, activeLayers: 0 };
+  let min = Infinity;
+  for (const entry of mediaLayerStats.values()) {
+    const elapsed = now - entry.windowStart;
+    if (elapsed >= 900) {
+      entry.rate = entry.windowStart === 0 ? 0 : (entry.count * 1000) / elapsed;
+      entry.count = 0;
+      entry.windowStart = now;
+    }
+    const stalled = now - entry.lastFrameAt > MEDIA_STALL_MS;
+    const rate = stalled ? 0 : entry.rate;
+    if (rate < min) min = rate;
+  }
+  return { min, activeLayers: mediaLayerStats.size };
+}
+
 function computeSnapshot(): FrameStatsSnapshot {
   const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const { min: minMediaFps, activeLayers: activeMediaLayers } = currentMinMediaFps(now);
   if (count === 0) {
-    return { ...EMPTY_SNAPSHOT, renderScale, playing, mediaFps: currentMediaFps(now) };
+    return { ...EMPTY_SNAPSHOT, renderScale, playing, mediaFps: currentMediaFps(now), minMediaFps, activeMediaLayers };
   }
   let sumInterval = 0;
   let sumDraw = 0;
@@ -119,20 +175,36 @@ function computeSnapshot(): FrameStatsSnapshot {
     renderScale,
     playing,
     mediaFps: currentMediaFps(now),
+    minMediaFps,
+    activeMediaLayers,
   };
 }
 
 /**
  * Record one NEW video frame presented by a playing video layer (requestVideoFrameCallback tick).
- * Allocation-free. With several simultaneously-playing video layers the counts sum — read the
- * number as "media frames delivered", which for the common one-clip-under-the-playhead case IS the
- * clip's effective fps.
+ * `key` is the caller's own stable per-mount identity (one `WebglMediaLayer` instance = one key for
+ * its whole life) — it is what makes `minMediaFps` possible; the aggregate `mediaFps` this also
+ * feeds is a plain sum and does not need it, but every call site now has a key anyway so there is no
+ * reason to keep a keyless path. Allocation-free on the hot (already-registered) branch.
  */
-export function recordMediaFrame(): void {
-  if (mediaWindowStartAt === 0) {
-    mediaWindowStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-  }
+export function recordMediaFrame(key: string): void {
+  const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+  if (mediaWindowStartAt === 0) mediaWindowStartAt = now;
   mediaFrameCount += 1;
+
+  let entry = mediaLayerStats.get(key);
+  if (!entry) {
+    entry = { count: 0, windowStart: now, rate: 0, lastFrameAt: now };
+    mediaLayerStats.set(key, entry);
+  }
+  entry.count += 1;
+  entry.lastFrameAt = now;
+}
+
+/** A layer stopped playing (paused, unmounted, source changed) — remove it from the minimum rather
+ *  than letting it decay to a false "stalled" 0 it never earned. Idempotent. */
+export function releaseMediaFrameKey(key: string): void {
+  mediaLayerStats.delete(key);
 }
 
 function notifyThrottled(now: number) {
