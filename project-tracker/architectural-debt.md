@@ -5339,6 +5339,77 @@ read as "the cap is actually 3."
   question — the founder's own framing ("the fix is about the threshold rather than about making the
   slow path faster") is the one to test against, not assume past.
 
+**UPDATE 2026-08-17 — STOP 1's warm-vs-cold re-check: the confirmed cliff above is conditional on warm
+proxies, and it DISAPPEARS in the cold case.** The founder's own redirect named the exact confound: the
+"one that worked" reproduction above deliberately waited (bounded 45s) for `__rfSourceProxy` to go idle
+before playing, to hold proxy-readiness constant. But the founder's actual hand test uploaded and
+started playing quickly — plausibly the COLD case, not the warm one. `preferNativeDecode` in
+`VideoPreview.tsx:4014` already keys directly off `isIngestProxyUrl`, so this is not a hypothetical.
+
+`flarex-proxy-cliff-compare-probe.ts` (new, committed) runs WARM and COLD (play ~2s after import, no
+proxy wait) back-to-back at the same N=3/6/10, reading `__rfWcPool` in both:
+
+```
+N=3   warm: capMisses=0  admissionDenials=0   modes={wc-hw:1}
+      cold: capMisses=0  admissionDenials=0   modes={wc-hw:1}
+N=6   warm: capMisses=4  admissionDenials=4   modes={wc-hw:2}
+      cold: capMisses=0  admissionDenials=0   modes={wc-hw:1, element:1}   proxy: queued=3, active=building
+N=10  warm: capMisses=12 admissionDenials=12  modes={wc-hw:1, element:2}
+      cold: capMisses=0  admissionDenials=0   modes={wc-hw:1, element:2}  proxy: queued=7, active=building
+```
+
+Cold shows **zero** admission denials at every N, including 6 and 10. The mechanism is visible in the
+proxy snapshot at play time: with proxies still building (`queued:3..7`), most sources have no ingest
+proxy yet, so `preferNativeDecode` sends them straight to the native `<video>` element path — they never
+request a WebCodecs session at all, so they never reach the admission gate that produced the warm-case
+denials. The WC-admission-cliff confirmed above is real, but it is the WARM-proxy scenario's mechanism,
+not necessarily the one a fresh-upload user hits first.
+
+**This does not mean the freeze isn't real in the cold case — it means the cold case has not been
+explained yet.** `__rfWcMode` under-registers in the cold arms (only 2 of 6 sources had a mode logged
+at N=6, 3 of 10 at N=10, within the same play-settle window that fully registered in the warm arms) —
+consistent with several sources still mid-transition to a decode path when the census was taken, not
+evidence they were healthy. This probe did not capture `frame-stats.ts`'s FPS/`minMediaFps` in the cold
+arms, so **whether the cold case actually freezes, and by what mechanism if so, is unmeasured** — named
+here rather than assumed either way. The honest split per the founder's framing: "the editor freezes at
+N clips" (WC-admission story, confirmed only for warm) vs "the editor freezes at N clips until proxies
+finish, and nothing tells the user that" (communication defect, unconfirmed) vs a third, still-unnamed
+cold-path mechanism are three DIFFERENT claims and only the first has direct evidence behind it.
+
+**STOP 2 — is `MAX_WC_TOTAL_SESSIONS = 4` measured or assumed?** Traced via `preview-frame-pool.ts`'s own
+comments and `project-tracker/playback-preview.md` v30 (2026-07-27): the constant is **not** a measured
+decode-throughput ceiling. It replaced an earlier scheme with two independently-capped pools that
+"merely summed" to 3 (hardware) + 4 (software) = 7 concurrent sessions. Under rigorous scrubbing, all
+seven decoders reset and re-buffered simultaneously, the renderer died (white page / lost GPU process),
+and once the GPU process is gone loaders can never re-acquire a provider. `MAX_WC_TOTAL_SESSIONS = 4`
+(plus `HARDWARE_RESERVED_SLOTS = 1`) is the value that stopped that crash — a **stability floor found by
+hitting a crash at 7 and backing off**, not a value derived from measuring per-session decode throughput
+degradation as concurrency rises. No throughput-vs-concurrency curve exists in this repo's history or
+this session's data. Per the explicit instruction, that curve was NOT measured this round either — it
+would need a dedicated soak harness independent of the app's own admission logic (raw concurrent
+`VideoDecoder` sessions against real hardware, watching per-session decode latency), which was not built.
+**Do not raise the constant on the strength of anything on file** — its provenance is "the last known-bad
+value was 7", not "4 is the measured ceiling", so the true safe ceiling could be anywhere from 4 up to
+just under 7, and moving it requires the measurement this entry states was not done, not a guess from
+either direction.
+
+**STOP 3 — scope only, not built: what does a denied/cold-defaulted layer actually fall back to, and why
+is it an order of magnitude worse?** `video-element-pool.ts`'s own header names the reason the file
+exists: "Integrated GPUs only expose ~2–3 concurrent hardware decode sessions." Its `acquireVideo()`
+creates a real `<video>` element and hands it out; `active` (line 76) is a **plain uncapped counter** —
+only the IDLE (parked) set is LRU-bounded at `MAX_IDLE=4`. There is no admission queue, no starvation
+accounting, no recovery sweep, and no telemetry that would show contention on this path — contrast the
+WC pool's `__rfWcPool`, which tracks `admissionDenials`/`starvedSources`/`admissionRecoverySweeps`/
+`admissionRecoveryWaits` and actively retries. A 6-or-10-layer cold-path timeline simply creates 6-or-10
+real `<video>` elements against a hardware budget the file's own comment states is 2-3, with **zero
+app-level backpressure or graceful degrade** — whatever happens next (Chrome's internal decoder
+scheduling, a silent fall-back to software decode, or the browser saturating and just falling behind) is
+invisible to every counter this app maintains. That is the structural reason a "somewhat worse" outcome
+is not what this path can produce: the WC path degrades against a KNOWN, INSTRUMENTED budget with a
+retry mechanism; the native fallback degrades against an UNKNOWN, UNINSTRUMENTED one with none. Building
+a fix (a cap on `active`, admission accounting, or a scale-down trigger for this path) is explicitly out
+of scope for this entry per the founder's "scope only — do not build" instruction.
+
 ---
 
 ### STOP 2 — HUD fix, `frame-stats.ts` / `PreviewStatsOverlay.tsx` (shipped, not a debt entry)
