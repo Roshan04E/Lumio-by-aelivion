@@ -4100,6 +4100,26 @@ time) rather than an error. `awaitReason` / `elementTime` / `wcBusy` are already
 already published to `__rfSourceMap`; the next session on this can read them at the failing stop
 without building anything. **Still not the frame cache's, and still not to be chased from that side.**
 
+**UPDATE 2026-08-17 — tested against DEBT-030's N-explosion, does NOT join.** The founder pattern-matched
+this entry's "decoder that stops supplying" against DEBT-030's "decode-wait explodes super-linearly with
+N" as possibly the same underlying behaviour seen two ways (correctness failure vs performance ceiling),
+and asked for it to be tested rather than assumed, naming this repo's own bad track record joining two
+symptoms on a plausible story. Tested directly: `flarex-decode-scheduling-probe.ts`'s STOP 1b mirrors
+this entry's own B-vs-C oracle shape (two sweeps, same stops, compare served vs requested) but at the
+`FrameProvider` layer, across a rising N of CONCURRENT sources instead of DEBT-027's original N=1. Result:
+mismatches stayed low and did NOT rise with N — N=1: 0/0, N=5: 0/12, N=10: 1/20-21, N=20: 0-1/42-48
+(two runs). **No rising trend — if anything N=20 was cleaner than N=10 in one run.** This is evidence
+AGAINST the join: DEBT-027's failure looks like a low-incidence, roughly N-independent supply glitch, not
+something that gets systematically worse under concurrent load the way DEBT-030's N-explosion does. See
+DEBT-030's addendum for the full test (which also falsified the two mechanisms floated for the N-explosion
+itself, leaving that separately open as DEBT-032). **Scoping conclusion: DEBT-027 stays scoped as a
+correctness fix that unblocks ADR-021 4b. Fixing it is not expected to move DEBT-030/DEBT-032's
+performance ceiling — the two are being tracked as separate problems until direct evidence says
+otherwise, which this test did not provide.** This test used the export-mode (blocking) `FrameProvider`,
+not the editor's time-sliced preview provider DEBT-027's own field probe exercises (`frameBudgetMs`,
+`lastFrameLagSeconds` catch-up path) — worth flagging as a scope gap for whoever picks this up: a
+join test on the ACTUAL preview provider was not done, only on its export-mode sibling.
+
 ---
 
 ### DEBT-025 — every headless browser launch leaks a Chrome profile directory, and nothing reaps them
@@ -4799,6 +4819,84 @@ starving each other for hardware decode resources, not a fixed per-frame convers
   result) is legitimate per the founder's own distinction and is a candidate scoped item below — separate
   from and not to be confused with composite-result caching, which stays off the table.
 
+**Addendum, 2026-08-17 — CORRECTION: the "decoder contention" story above is tested and does NOT hold
+up cleanly either.** The founder pattern-matched the N-explosion above against DEBT-027's already-named
+"decoder supply" cause and asked for a direct falsifier before believing either story: with N sources
+contending, does the ORDER or CONCURRENCY of `getFrame()` requests change total decode-wait at all? Built
+`apps/worker/src/flarex-decode-scheduling-probe.ts` (committed) against real WebCodecs sources, real
+`FrameProvider`, N=20 (the N where the explosion was clearest).
+
+**First attempt was contaminated and is named as such, not hidden.** A cold single `getFrame(2.0)` per
+provider measured serial=13.5s vs concurrent=6.2s — a real difference, but of the wrong THING: it mostly
+timed demux/decoder-init/keyframe-seek cost, not the steady-state per-frame decode-wait the original
+explosion was about. Fixed: warm every provider first (3 discarded incremental `getFrame` calls), then
+measure 6 further INCREMENTAL frame-to-frame requests (t += 1/30s) under each arm — the actual shape of
+the original measurement. Also: a first "staggered, 5ms between kickoffs" arm measured ~600ms and looked
+like a huge effect — it was an artifact of the `setTimeout` stagger itself (20 timers × 5ms × 6 steps ≈
+the observed number almost exactly) and was discarded, replaced with a GL-interleaved arm instead.
+
+**Re-measured, warmed, steady-state, N=20:**
+```
+serial                       avg=14.5ms   (12.9, 11.2, 19.3)
+concurrent                   avg=7.6ms    (9.7, 1.1, 12.1)
+gl-interleaved (total)       avg=33.1ms   (33.0, 36.6, 29.6)   -- real texSubImage2D between each getFrame
+gl-interleaved (decode-only) avg=12.7ms   (14.2, 12.9, 11.0)   -- just the getFrame await, same shape
+```
+**Neither falsifier reproduces the 101ms/20-layer explosion `upload-cost-split.ts` measured** (re-run
+immediately before this test, same machine, to rule out drift — it reproduced cleanly at 101.07ms,
+essentially identical to the original 103.83ms). Pure serial vs concurrent getFrame, warmed, are both
+cheap (~8–15ms for 20 layers × 6 steps) — a 90% relative spread but at an absolute scale irrelevant to the
+101ms question. Interleaving a REAL GL upload between each decode call (the actual shape of
+`gradeMediaLayer`'s per-layer loop, tested specifically to check whether main-thread JS/GL work was
+queueing behind decode-promise continuations) raised total time to 33.1ms but left the DECODE-ONLY portion
+at 12.7ms — barely different from bare serial. **This falsifies both candidate mechanisms**: it is not
+simple decoder-side contention responding to request concurrency (spread is real but tiny), and it is not
+main-thread GL-work delaying promise continuations (decode-only stays flat even with real GL work
+interleaved). The true cause of the 101ms/20-layer figure is narrower than either story and **remains
+unidentified** — registered separately as **DEBT-032** rather than left folded into this entry's
+"decoder contention" language, which should be read as superseded by this correction, not authoritative.
+
+**STOP 1b (does DEBT-027 reproduce harder as N rises) — tested, does not join.** See the update added
+directly to DEBT-027 above for the full result and reasoning; summary: mismatch rate stayed low and flat
+(0–1 out of 12–48 checks) across N=1,5,10,20 with no rising trend, arguing against DEBT-027 and this
+entry's N-explosion being the same mechanism. Both entries now cross-reference this test rather than
+assuming the join.
+
+**Addendum, 2026-08-17 — STOP 2: measuring the dedupe case's actual prevalence before anyone builds for
+it.** The founder's own framing: "it is the one case where the answer is obviously 'ask once'... measure
+how often it actually happens in a realistic comp before anyone builds for it — a lever nobody pulls is
+not a lever."
+
+No usage telemetry or real-project corpus exists in this repo to answer "how often" with a number —
+stated plainly rather than guessed. What IS available and decisive: the STRUCTURAL fact, read directly
+from the code rather than measured empirically (`apps/web/src/export/export-core.ts:181-217`,
+`mediaSourceKey`/`buildProviderUrlMap`). Video layers key their `FrameProvider` by
+`clipSourceKey(layer.id, layer.assetId)` — LAYER id included — so two video layers sharing one `assetId`
+get two INDEPENDENT providers (two decoders, two decode+upload passes for the identical file at the
+identical timestamp) regardless of whether their time ranges even overlap. (Image layers are already
+deduped: keyed by `assetId` alone, no layer id — this only affects video, the more expensive case anyway.)
+So the dedupe opportunity is real today, structurally, whenever it is triggered.
+
+**Whether it IS triggered in realistic use is a different, and much weaker, story.** Checked the one
+shipped feature that duplicates a clip (`duplicateLayer`, `packages/shared/src/timeline-ops.ts:185-208`,
+the editor's Ctrl+D): the copy is placed SEQUENTIALLY after the original on the same track
+(`copy.startSeconds = layer.startSeconds + layer.durationSeconds`) — it does NOT create a same-timestamp
+overlap, so the ordinary single-clip duplicate action never triggers this case. Triggering it requires a
+DELIBERATE multi-track composition — the same asset dragged onto a second track at an overlapping time
+(picture-in-picture, split-screen, before/after comparison). Searched the repo for a first-class feature
+that would manufacture this automatically (split-screen/PiP template, comparison tool) and found none —
+`templates.ts` carries no asset-reuse structure (templates are populated with user assets at
+instantiation, not authored with fixed duplicated assets). Person extraction — the other plausible source
+of "same underlying footage, two consumers" — is still MOCKED per this repo's own architecture notes, so
+it does not exercise this live decode path today either.
+
+**Conclusion: real, structurally confirmed, currently LOW-TO-UNKNOWN frequency** — it requires a
+deliberate multi-track compositing choice the product has no dedicated one-click path for today, not the
+common single-clip edit flow. This matches the founder's own caution: a lever nobody pulls yet is not a
+lever to build for now. Recommend NOT building a dedupe fast path speculatively; re-measure if/when a
+split-screen/PiP feature ships, or if/when person extraction's mocked pipeline becomes a real live
+consumer of the same visible-timeline asset.
+
 ### DEBT-031 — a chained fragment pass costs TWO draws, and the second one is unconditional even with
 no mask to apply
 
@@ -4901,3 +4999,50 @@ obviously available) before choosing blit vs composite. Both are real design wor
 - Detection: any new fragment-pass-chain code path that assumes a non-`rewritesAlpha` def produces
   uniformly opaque output without checking — `stylize-subject`'s falsification above is the counterexample
   to cite.
+
+### DEBT-032 — the N=20 real-video decode-wait explosion (13ms → 104ms) has no identified mechanism;
+two hypotheses are now falsified
+
+- Status: open, unidentified. Reproduces reliably (measured twice, same machine, ~100ms both times); the
+  CAUSE does not.
+- Registered: 2026-08-17, split out of DEBT-030 after this stop's join-test correction — DEBT-030's own
+  addendum had named "decoder contention (multiple concurrent `VideoDecoder` instances starving each
+  other)" as the mechanism; that language is now superseded and should not be treated as settled.
+- Reason: `upload-cost-split.ts` (scratch, reproduced twice) measured real per-frame decode-wait inside
+  `SceneFrameCompositor.renderFrame()` going from ~1.3ms/layer at N=10 to ~5.2ms/layer at N=20 — total
+  decode-wait 13.23ms → 103.83ms (first run) / 101.07ms (re-run) for a 2× increase in N. Super-linear,
+  real, reproducible.
+- **Two candidate mechanisms tested this stop and both falsified** (`flarex-decode-scheduling-probe.ts`,
+  committed, N=20, warmed/steady-state, real WebCodecs sources):
+  1. **Pure decoder-side contention from concurrent requests.** Serial vs concurrent `getFrame()` calls
+     with NOTHING between them: 14.5ms vs 7.6ms — a real spread but at a scale (single-digit to low-teens
+     ms) that cannot explain a 101ms figure. If concurrent-request contention alone were the mechanism,
+     serial should have been dramatically cheaper than the real explosion, matching the explosion's scale;
+     it was not.
+  2. **Main-thread JS/GL work queueing behind decode-promise continuations** (the hypothesis that a
+     synchronous `texSubImage2D` between each layer's `getFrame` delays when the NEXT layer's decode can
+     even be observed as resolved, from the outside looking like decode-wait). Tested directly: serial
+     `getFrame` + a REAL `texSubImage2D` upload after each one. Decode-only time (isolated inside that
+     loop) stayed at 12.7ms — barely different from bare serial's 14.5ms — while total time (including the
+     GL work itself) rose only to 33.1ms. Nowhere near 101ms.
+- **What is left unexplained.** The real `SceneFrameCompositor.renderFrame()` path does more per layer
+  than "decode + one texture upload" — `gradeMediaLayer` also computes `getCompositionColorPipeline`/
+  `getCompositionMediaEffects` per layer, manages `mediaSharedFor` (a per-layer `RenderTarget` + renderer
+  pair), computes `colorPipelineCacheKey` and conditionally calls `renderer.setPipeline`, and (in
+  single-context mode) does a `readPixelsInto` when `stageProbe` is active (ruled out as a factor here —
+  `upload-cost-split.ts` never sets `stageProbe`). Neither this entry's synthetic probe nor its GL-
+  interleaved variant reproduces the FULL per-layer pipeline, so the explosion may live in one of these
+  untested pieces, or in something about running 20 of them back-to-back that neither isolated test
+  captured (e.g. GC pressure from 20 live `RenderTarget`/pipeline-state objects, a resource limit specific
+  to `mediaSharedFor`'s per-layer WebGL objects, or something else not yet named).
+- Invariant affected: none named; this is an open performance-attribution gap, not a violated invariant.
+- Owner: unassigned.
+- Expiry condition: a future session isolates the REST of `gradeMediaLayer`'s per-layer work (color
+  pipeline computation, `mediaSharedFor` RenderTarget management, `setPipeline`) the same way this entry
+  isolated decode and GL upload, to find which piece actually explodes with N — or instruments
+  `gradeMediaLayer` directly with `performance.mark`/`measure` around each sub-step inside a real
+  `renderFrame()` call instead of building another isolated proxy.
+- Tracking issue: —
+- Detection: any future citation of "decoder contention" as the settled mechanism for the N=20
+  decode-wait explosion without pointing here — that language was DEBT-030's, and this entry supersedes
+  it. Also: any future citation of the 101–104ms figure without noting the mechanism is unidentified.
