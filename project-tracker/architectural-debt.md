@@ -5000,14 +5000,15 @@ obviously available) before choosing blit vs composite. Both are real design wor
   uniformly opaque output without checking — `stylize-subject`'s falsification above is the counterexample
   to cite.
 
-### DEBT-032 — the N=20 real-video cost explosion has no identified mechanism; three hypotheses are
-now falsified, and the phenomenon's own reproducibility needed correcting
+### DEBT-032 — real-video cost at N≥20 grows super-linearly with N; CONFIRMED as a real, noisy
+phenomenon by a 10-run distribution check; mechanism deliberately NOT hunted further (founder-bounded)
 
-- Status: open, unidentified, **and the header claim below ("reproduces reliably... ~100ms both times")
-  is WRONG and superseded — see the 2026-08-17 addendum.** What reproduces is "N=20 costs more than
-  linear extrapolation from N=10 predicts, by a widely varying amount." WHICH SUB-STEP carries that cost
-  is not stable across runs, and in one run there was no elevation at all. Read the addendum before
-  trusting anything above it in this entry.
+- Status: **CLOSED as "mechanism unknown, magnitude recorded" — this is the terminal state for this
+  entry this chapter.** Founder-bounded 2026-08-17: after three falsified deterministic mechanisms and
+  one reproducibility scare, a 10-run distribution check settled "is there a phenomenon at all" in favor
+  of YES (majority of runs show elevation — see the final addendum). Per explicit instruction, DO NOT
+  hunt a fourth mechanism this chapter. The number is written down, not chased. Re-open only with a
+  founder go-ahead or when the seam/ADR-021 4b work independently needs this answered.
 - Registered: 2026-08-17, split out of DEBT-030 after this stop's join-test correction — DEBT-030's own
   addendum had named "decoder contention (multiple concurrent `VideoDecoder` instances starving each
   other)" as the mechanism; that language is now superseded and should not be treated as settled.
@@ -5119,3 +5120,65 @@ may be a fundamentally STOCHASTIC phenomenon.
   isolated JS-level proxy test, which is what all three falsified attempts here were.
 - Detection (extended): any future citation of THIS entry's original 101–104ms decode-wait figure, or of
   "decode-wait explodes with N" as a stable, located phenomenon, without reading this addendum first.
+
+**FINAL addendum, 2026-08-17 — the bounded distribution check: is there a phenomenon at all?**
+
+Founder-bounded stop: ≤10 repeats of the same N=1/10/20/30 topology, same machine, one browser session,
+recording the decode/upload split every time — settle "is there a phenomenon" before anything else, then
+stop regardless of the answer. `flarex-debt032-distribution-probe.ts` (committed), 10 repeats, 4
+measured frames/N (trimmed from 6 to keep total runtime bounded), N=1/10/20/30 in sequence within each
+repeat:
+
+```
+repeat | N=1 tot/dec/rest | N=10 tot/dec/rest | N=20 tot/dec/rest | N=30 tot/dec/rest   | N20/N10 | N30/N10
+   0   |   53/  5/ 48     |  223/138/ 85       |  740/384/355       | 1423/ 229/1194       |  3.32   |  6.39
+   1   |   36/  1/ 35     |  229/ 42/187       |  598/ 92/506       | 1266/ 652/ 614       |  2.61   |  5.53
+   2   |   39/  0/ 39     |  234/149/ 84       |  602/ 10/592       | 1451/ 241/1209       |  2.58   |  6.21
+   3   |   42/  4/ 38     |  228/  3/225       |  618/ 92/526       | 1399/ 780/ 620       |  2.71   |  6.13
+   4   |   35/  0/ 35     |  239/ 44/195       |  580/  9/570       | 1410/ 711/ 698       |  2.42   |  5.89
+   5   |   43/  4/ 39     |  239/ 37/202       |  633/  6/626       | 1453/  12/1441       |  2.65   |  6.08
+   6   |   37/  0/ 36     |  239/  0/239       |  614/  7/607       | 1302/ 648/ 654       |  2.57   |  5.44
+   7   |   37/  0/ 37     |  234/145/ 89       |  571/  9/561       | 5422/4006/1416       |  2.44   | 23.20
+   8   |   39/  0/ 39     |  235/ 39/196       |  593/ 11/582       | 1310/ 227/1083       |  2.52   |  5.57
+   9   |   34/  0/ 34     |  236/157/ 79       |  569/316/253       | 1301/  18/1283       |  2.41   |  5.52
+
+N=20/N=10 ratio: mean=2.62 median=2.57 min=2.41 max=3.32 — elevated (>2.5) in 7/10 runs
+N=30/N=10 ratio: mean=7.60 median=5.99 min=5.44 max=23.20 — elevated (>3.5) in 10/10 runs
+```
+
+**ANSWER: yes, there is a phenomenon.** N=30 is elevated in 10/10 runs (a comp with 3× the video layers
+of N=10 costs 5.4–6.4× as much in 9 of 10 runs, and 23.2× in one outlier). N=20 is elevated in 7/10 runs,
+median ratio 2.57 for a 2× layer-count increase. This is the majority-of-runs bar the founder set for
+"real but noisy" rather than "artefact of unrepeated measurement" — DEBT-032 stays open as a real cost,
+closed only as a MECHANISM HUNT.
+
+**The decode/rest split instability from the prior addendum is confirmed here too, in the SAME 10-run
+batch** — repeat 2's N=20 is nearly all "rest" (10/592), repeat 9's N=20 is roughly half decode (316/253),
+repeat 7's N=30 is almost all decode (4006/1416) and is also the batch's one extreme outlier. Whatever
+drives the elevation does not consistently land in one phase, which continues to argue for a shared,
+stochastic resource rather than a single deterministic branch — but per the founder's explicit bound,
+that is now recorded as a fact about the phenomenon, not a lead to chase this chapter.
+
+**Recorded for whoever picks this up next**: N=20 costs ~2.4–3.3× (median 2.6×) and N=30 costs ~5.4–6.4×
+(median 6.0×, with at least one 23× outlier observed) what N=10 costs, per real-video layer in a plain
+stacked-timeline composition, no readback, on this measurement machine. The WHICH-PHASE question stays
+open and unattributed. Next diagnostic step, if and when this reopens, is Chrome's own tracing around a
+slow repeat vs a fast one (this entry's own suggestion, unactioned) — not another isolated JS-level probe,
+three of which came back clean against what turned out to be a real phenomenon.
+
+**Why three clean falsifiers didn't mean "not real" — written down because the lesson very nearly did
+not make it into this entry.** Request-ordering, GL-interleaving, and eviction/hard-reset were each a
+DETERMINISTIC hypothesis, tested once (or, for the reset check, against total-time context that was
+itself a single unrepeated run). A deterministic falsifier tested once against what is actually a
+STOCHASTIC phenomenon comes back clean whether or not the phenomenon is real — that is a falsifier
+FAILING OPEN, and it is the most dangerous failure mode this repo has on file
+([[noise-floor-is-a-precondition]]: "a noise floor must VOID a run, not be subtracted"). This chapter's
+entire performance premise — three sessions of it — rested on unrepeated single runs until this stop,
+and none of the three falsified-mechanism tests caught that, including the one that found the reset
+counter. The rule was written down already. It did not fire at the moment it was needed. That gap, not
+any of the three falsified mechanisms, is this entry's most important finding.
+- Owner: unassigned. Re-open only on founder go-ahead or when work depending on this number needs it
+  resolved further.
+- Detection (final): any future work that treats a SINGLE performance measurement in this codebase as
+  a finding, rather than the first sample of a distribution that might be this noisy, without checking
+  this entry first.
