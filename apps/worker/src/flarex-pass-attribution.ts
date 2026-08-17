@@ -27,6 +27,17 @@
  * unchanging graph) — the number this stop actually needs, since the product question is "what does a
  * playing frame cost", not "what does the first frame cost".
  *
+ * GPU TIMING (round 2). `compositorMs` below times CPU-side submission only — WebGL2 draw calls are
+ * ASYNCHRONOUS, so a loop with no fence/readback/sync measures how fast the CPU can ENQUEUE work, not
+ * how long the GPU takes to execute it. `FrameProfiler` already carries `EXT_disjoint_timer_query_webgl2`
+ * support (`gpuBegin`/`gpuEnd` in frame-profiler.ts) — a real GPU-timeline query, one-frame-latency,
+ * non-blocking — wired automatically the moment `SceneCompositor`'s constructor calls
+ * `frameProfiler.instrumentGl(gl)`. This script reads it (`gpuMs`, from `__flarexProfile.gpuMs`) rather
+ * than adding a second timing mechanism. No manual fence/flush fallback was needed: the extension is
+ * available on this machine (confirmed by non-null `gpuMs` readings below) — if it had NOT been
+ * available, this comment would say so and a `gl.fenceSync`+`clientWaitSync` fallback would be required
+ * instead, since without either one, "compositorMs" alone cannot support ANY claim about GPU cost.
+ *
  * Run (dev server must be up, PIXEL_BROWSER_CHANNEL=chrome or you measure SwiftShader — see below):
  *   PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker tsx src/flarex-pass-attribution.ts
  */
@@ -57,6 +68,12 @@ interface ScenarioFrame {
   uploadTotal: number;
   texCacheHit: number;
   texCacheMiss: number;
+  /** GPU-timeline execution time (EXT_disjoint_timer_query_webgl2), one-frame-latency; null on the
+   *  first profiled frame (no prior query to harvest) or if the extension is unavailable. */
+  gpuMs: number | null;
+  /** Fallback GPU-completion measurement (fenceSync + flush + clientWaitSync), CPU wall time from
+   *  submission to GPU-signaled completion; null if the fence never signaled within the poll budget. */
+  fenceCompletionMs: number | null;
 }
 
 async function main(): Promise<void> {
@@ -95,6 +112,19 @@ async function main(): Promise<void> {
     await browser.close();
     process.exit(1);
   }
+
+  const gpuTimerAvailable = await page.evaluate(() => {
+    try {
+      const c = document.createElement("canvas");
+      const gl = c.getContext("webgl2");
+      return Boolean(gl?.getExtension("EXT_disjoint_timer_query_webgl2"));
+    } catch {
+      return false;
+    }
+  });
+  process.stdout.write(
+    `GPU timing instrument: ${gpuTimerAvailable ? "EXT_disjoint_timer_query_webgl2 (real GPU-timeline query)" : "UNAVAILABLE — gpuMs will read n/a; no fence/flush fallback is implemented in this script"}\n`,
+  );
 
   const results: Record<string, ScenarioFrame[]> = await page.evaluate(
     async (mods: Record<string, string>) => {
@@ -224,7 +254,10 @@ async function main(): Promise<void> {
       };
 
       const WARMUP = 6;
-      const PROFILED = 4;
+      // 8, not 4: the GPU timer query harvests with ONE FRAME of latency (gpuEnd reads the PREVIOUS
+      // frame's query), so the first profiled frame's gpuMs is always null — more frames means more
+      // valid GPU samples to average, not just more CPU-timing samples.
+      const PROFILED = 8;
 
       // `frameRef` is handed to `build` so a LIVE-source variant can read the current frame number
       // inside its own `resolveSourceDraw` closure and bump `sourceVersion` accordingly — simulating a
@@ -263,6 +296,31 @@ async function main(): Promise<void> {
           const spec = { width: dims.width, height: dims.height, backgroundColor: "#000000", layers: draw ? [draw] : [] };
           if (profiling) {
             frameProfiler.measure("compositor.render", () => compositor.renderFrame(spec));
+            // FALLBACK (2026-08-17): EXT_disjoint_timer_query_webgl2 is present on this GPU/driver but
+            // its query NEVER resolved (`gpuMs` read null on every single frame of every scenario in the
+            // first pass) — the canvas here is never attached to the DOM/presented, and this ANGLE/D3D11
+            // backend appears to need an actual present to retire the query. Per the fallback this stop
+            // asked for: a `fenceSync` + `flush` + blocking `clientWaitSync`, timed on the CPU wall clock
+            // from immediately after submission to the moment the GPU signals completion. This is coarser
+            // than a real GPU-timeline timestamp (it can't separate "GPU busy" from "driver/queue
+            // latency"), but it converts `compositorMs` from "time to ENQUEUE" into "time until the work
+            // is actually DONE" — which is the question in dispute.
+            const gl = compositor.sharedGl as WebGL2RenderingContext;
+            const fenceStart = performance.now();
+            let fenceCompletionMs: number | null = null;
+            const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if (sync) {
+              gl.flush();
+              const TIMEOUT_NS = 250_000_000; // 250ms per poll; looped, not a single unbounded block
+              let status = gl.clientWaitSync(sync, gl.SYNC_FLUSH_COMMANDS_BIT, TIMEOUT_NS);
+              let polls = 1;
+              while (status === gl.TIMEOUT_EXPIRED && polls < 8) {
+                status = gl.clientWaitSync(sync, 0, TIMEOUT_NS);
+                polls += 1;
+              }
+              gl.deleteSync(sync);
+              fenceCompletionMs = status === gl.TIMEOUT_EXPIRED ? null : performance.now() - fenceStart;
+            }
             frameProfiler.endFrame(compositor.profilerSnapshot?.() ?? null);
             const snap = (globalThis as unknown as { __flarexProfile?: Record<string, unknown> }).__flarexProfile;
             const counters = (snap?.counters ?? {}) as Record<string, number>;
@@ -284,6 +342,8 @@ async function main(): Promise<void> {
               uploadTotal: counters["upload.total"] ?? 0,
               texCacheHit: counters["texCache.hit"] ?? 0,
               texCacheMiss: counters["texCache.miss"] ?? 0,
+              gpuMs: typeof snap?.gpuMs === "number" ? (snap.gpuMs as number) : null,
+              fenceCompletionMs,
             });
           } else {
             compositor.renderFrame(spec);
@@ -375,6 +435,10 @@ async function main(): Promise<void> {
     const vals = frames.map((f) => f[key] as number);
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   };
+  const avgNullable = (frames: ScenarioFrame[], key: "gpuMs" | "fenceCompletionMs"): string => {
+    const vals = frames.map((f) => f[key]).filter((v): v is number => v != null);
+    return vals.length ? `${(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2)} (n=${vals.length}/${frames.length})` : "n/a (never resolved)";
+  };
   const mergeCounters = (frames: ScenarioFrame[], key: "drawByScope" | "rttByLabel"): Record<string, number> => {
     const out: Record<string, number> = {};
     for (const f of frames) for (const [k, v] of Object.entries(f[key])) out[k] = (out[k] ?? 0) + v / frames.length;
@@ -398,7 +462,8 @@ async function main(): Promise<void> {
           `fbBinds=${avg(frames, "framebufferBinds").toFixed(1)} progSwitches=${avg(frames, "programSwitches").toFixed(1)} texBinds=${avg(frames, "textureBinds").toFixed(1)}  ` +
           `rtt.alloc(steady)=${avg(frames, "rttAllocThisFrame").toFixed(2)} [${rttStr}]  ` +
           `materializations=${avg(frames, "materializations").toFixed(1)} evaluated=${avg(frames, "nodesEvaluated").toFixed(1)} skipped=${avg(frames, "nodesSkipped").toFixed(1)}  ` +
-          `compileMs=${avg(frames, "compileMs").toFixed(2)} compositorMs=${avg(frames, "compositorMs").toFixed(2)}  ` +
+          `compileMs=${avg(frames, "compileMs").toFixed(2)} compositorMs(CPU submit)=${avg(frames, "compositorMs").toFixed(2)} ` +
+          `gpuMs(timer-query)=${avgNullable(frames, "gpuMs")} fenceMs(submit->GPU-done)=${avgNullable(frames, "fenceCompletionMs")}  ` +
           `uploads=${avg(frames, "uploadTotal").toFixed(1)} texCache=${avg(frames, "texCacheHit").toFixed(1)}h/${avg(frames, "texCacheMiss").toFixed(1)}m`,
       );
     }
