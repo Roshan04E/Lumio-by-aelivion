@@ -5424,6 +5424,12 @@ N   fps(med)  minMediaFps(med)  minMediaFps(min)  mediaSum(med)  elemLayers  dro
 10  25.7      0.0               0.0               18.2           8           65%           0
 ```
 
+> **RESOLUTION CAVEAT, added 2026-08-17 after update (c) — THESE NUMBERS ARE 1080p-ONLY AND MUST NOT BE
+> READ AS GENERAL.** Every arm above used ~1080p media. On 4K the same ladder freezes at N=3 (update (c)),
+> so "the cliff is at N=10" is a statement about 1080p and nothing else. Resolution is a first-class
+> variable in every cliff claim in this file; a layer count without a resolution beside it is not a
+> finding. The same caveat applies to update (a)'s warm/cold capMisses ladder above, also 1080p.
+
 `capMisses = 0` in every arm — all four genuinely cold, no WebCodecs admission gate anywhere in this
 picture. `videoPool.active` tracked N almost exactly (1 → 4 → 8), the uncapped native path taking on
 eight concurrent `<video>` elements at N=10 against the ~2-3 hardware sessions its own header names.
@@ -5534,6 +5540,55 @@ was read as reporting that the user could see something.** The rule this chapter
 that measures a stage of the pipeline can only ever falsify claims about that stage. A claim about what
 the user SEES requires a measurement taken where the user looks. When those two disagree, the pipeline
 instrument is the one that is wrong, no matter how many of them agree with each other.
+
+**UPDATE 2026-08-17 (d) — WARM 4K: proxies already solve the common case, and the run exposed two
+product defects plus one attribution gap. Three findings, none of them the one we went looking for.**
+
+Same canvas ground-truth instrument, same 4K media, `PROBE_WARM=1` — ingest proxies built and verified
+queue-drained-and-idle (stable across consecutive polls) before playback:
+
+```
+N    canvasChanged  fps(med)  minMediaFps  dropped  capMisses    (cold, update (c))
+1    23/23          74.9      n/a          0%       0             23/23
+3    23/23          72.7      29.6         1%       0              0/23  ← frozen cold, PLAYS warm
+6    21/23          52.3      28.1         17%      4              1/23  ← frozen cold, PLAYS warm
+11    1/23          24.0       0.0         57%      4              5/23  ← still frozen (but see below)
+```
+
+**FINDING 1 — the product already has the mechanism; the defect is that it plays 4K originals in silence
+while the mechanism is still building.** N=3 goes from frozen solid (0/23 cold) to clean playback
+(23/23, 29.6fps per layer) warm. N=6 goes from frozen (1/23) to working-but-degraded (21/23, 28.1fps per
+layer, 17% dropped). This is not an architectural hole — proxies are exactly the mechanism for it, and
+they work. What the product does wrong is let playback proceed on the originals during the build window
+while telling the user nothing.
+
+**And that window is minutes, not a blip**: measured 4K proxy builds of 15-89s EACH, built SERIALLY —
+32s for one clip, over five minutes for eleven. A user importing a batch of 4K clips lives inside it.
+
+**FINDING 2 — the proxy pipeline is unreliable at 11x4K, and this is the headline of the N=11 arm, not a
+footnote. Five of eleven built.** Three distinct failure modes, all silent to the user:
+- `failed: "Video encoder wedged and was reset — re-render from frame 0"` (84.3s in) — a wedge that
+  recovers by reset is a wedge that recurs.
+- `failed: "proxy persist failed"` (15.1s in) — a proxy that BUILT and was then lost.
+- `skipped: "no local bytes"` x3 — assets with nothing to read. Terminal: no wait makes them ready.
+An asset permanently stuck un-proxyable is a permanent 4K freeze for that clip, and nothing says so.
+
+**FINDING 3 — the N=11 warm freeze CANNOT be attributed to a proxy-path ceiling, because that arm never
+had eleven proxies.** It was a MIXED arm: 5 proxied + 6 raw 4K originals (2 failed, 3 skipped, 1 never
+reached). Six raw 4K originals are a sufficient explanation on their own, per update (c). Any claim about
+where the warm path breaks needs an arm with all eleven proxies verified — which requires Finding 2
+fixed first. Stated rather than papered over.
+
+**A consequence that inverts the obvious fix, and is the reason the work is ordered reliability-first:**
+the natural remedy for Finding 1 is to gate playback on proxy readiness. Given Finding 2 that fix is
+ACTIVELY HARMFUL — gating on a readiness signal that can silently never arrive replaces a freeze with a
+PERMANENT BLOCK, on an asset the user can neither diagnose nor retry. Gating is only safe once "not
+ready" reliably becomes either "ready" or a stated failure.
+
+**Also**: `capMisses` returns at warm N=6 and N=11 (4 each) — proxied sources route to WebCodecs and hit
+`MAX_WC_TOTAL_SESSIONS = 4`. Yet delivery HELD at N=6 (28.1fps per layer). Four admission denials did not
+prevent working playback, which means denial count is not by itself a health signal on the warm path
+either.
 
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3

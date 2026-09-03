@@ -40,7 +40,9 @@
  *     problem.
  *
  * CONDITIONS — the founder's, reproduced: real Pexels 4K footage, N = 1/3/5/6/11 (their cliff is at
- * FIVE, so the ladder brackets it), COLD (no proxy wait).
+ * FIVE, so the ladder brackets it), COLD (no proxy wait) by default. `PROBE_WARM=1` waits for the ingest
+ * proxies instead — the "does the product already solve this?" arm, since proxies exist precisely so
+ * that many layers do not each decode full-resolution media. `PROBE_N_LADDER` overrides the ladder.
  *
  * MEDIA. `PROBE_4K_DIR` must hold >= max(N) distinct clips. The committed run used 11 distinct 20s
  * segments cut (stream-copy, no re-encode) from the one true-4K Pexels asset in local storage,
@@ -60,8 +62,18 @@ import { chromium, type Page } from "playwright";
 import { assertQuietBrowserMachine } from "./browser/browser-preflight";
 import { importAssets, reachEditor } from "./browser/editor-session.js";
 
-const N_LADDER = [1, 3, 5, 6, 11];
+const N_LADDER = (process.env.PROBE_N_LADDER ?? "1,3,5,6,11").split(",").map((s) => Number(s.trim()));
 const COLD_WAIT_MS = 2_000;
+/**
+ * WARM mode (`PROBE_WARM=1`): every ingest proxy BUILT AND VERIFIED before playback, not merely waited
+ * on. Proxies exist so that many layers do not each decode full-resolution media, and a 4K source is
+ * exactly what they are for — so "does the product already solve this?" is a one-run question, and it
+ * decides how large the rest of the problem is. Verification is `queued === 0 && active === null` AND
+ * every asset accounted for as built-or-skipped, not a bare idle reading (an engine that has not yet
+ * NOTICED the new assets also reads idle — the trap an earlier probe hit and had to guard against).
+ */
+const WARM = process.env.PROBE_WARM === "1";
+const PROXY_WAIT_TIMEOUT_MS = Number(process.env.PROBE_PROXY_TIMEOUT_MS ?? 300_000);
 const SAMPLE_COUNT = 24;
 const SAMPLE_INTERVAL_MS = 500; // 2Hz
 const CANVAS_SELECTOR = "canvas.preview-scene-canvas";
@@ -126,12 +138,51 @@ async function runArm(channel: string | undefined, n: number, allClips: string[]
     return null;
   }
 
-  // COLD: no proxy wait. Record what the proxy engine was still doing, to prove the arm really was cold.
-  await page.waitForTimeout(COLD_WAIT_MS);
-  const proxyAtPlay = await page.evaluate(() => {
-    const w = window as unknown as { __rfSourceProxy?: unknown };
-    return w.__rfSourceProxy ?? null;
-  });
+  let proxyAtPlay: unknown = null;
+  let proxyVerified = false;
+  let idleStreak = 0;
+  if (WARM) {
+    const start = Date.now();
+    let poll = 0;
+    while (Date.now() - start < PROXY_WAIT_TIMEOUT_MS) {
+      const snap = await page.evaluate(() => {
+        const w = window as unknown as {
+          __rfSourceProxy?: { built: number; failed: number; skipped: number; queued: number; active: unknown };
+        };
+        return w.__rfSourceProxy ?? null;
+      });
+      proxyAtPlay = snap;
+      poll += 1;
+      // Idle = queue drained AND nothing building. Require it STABLE across consecutive polls: a single
+      // idle reading also describes an engine that has not yet noticed the new assets.
+      //
+      // Deliberately NOT "built >= n". The first warm run demanded that and voided every arm above N=1,
+      // which was the CRITERION failing, not the app: the engine had genuinely finished, and some assets
+      // are legitimately never proxied — the N=11 arm reported 4 of 11 `skipped: "no local bytes"`, a
+      // terminal outcome no amount of waiting changes. `built`/`skipped` are reported per arm instead,
+      // so "warm" is qualified by evidence rather than asserted by a threshold.
+      const idle = snap != null && snap.queued === 0 && snap.active === null;
+      idleStreak = idle ? idleStreak + 1 : 0;
+      if (poll >= 3 && idleStreak >= 3) {
+        proxyVerified = true;
+        break;
+      }
+      await page.waitForTimeout(2_000);
+    }
+    console.log(`  [warm] proxies verified: ${proxyVerified} — ${JSON.stringify(proxyAtPlay)}`);
+    if (!proxyVerified) {
+      console.log(`  ⚠ VOID for N=${n} — proxies never reached built-and-idle for all ${n} assets within ${PROXY_WAIT_TIMEOUT_MS}ms.`);
+      await browser.close();
+      return null;
+    }
+  } else {
+    // COLD: no proxy wait. Record what the engine was still doing, to prove the arm really was cold.
+    await page.waitForTimeout(COLD_WAIT_MS);
+    proxyAtPlay = await page.evaluate(() => {
+      const w = window as unknown as { __rfSourceProxy?: unknown };
+      return w.__rfSourceProxy ?? null;
+    });
+  }
 
   const canvas = page.locator(CANVAS_SELECTOR).first();
   if (!(await canvas.count().catch(() => 0))) {
@@ -184,7 +235,7 @@ async function runArm(channel: string | undefined, n: number, allClips: string[]
 
   await page.keyboard.press("Space").catch(() => undefined);
   await browser.close();
-  return { samples, wcPool, proxyAtPlay };
+  return { samples, wcPool, proxyAtPlay, proxyVerified };
 }
 
 function median(values: number[]): number {
@@ -204,7 +255,7 @@ async function main(): Promise<void> {
 
   const results: Record<number, Awaited<ReturnType<typeof runArm>>> = {};
   for (const n of N_LADDER) {
-    console.log(`\n########## COLD 4K N=${n} ##########`);
+    console.log(`\n########## ${WARM ? "WARM" : "COLD"} 4K N=${n} ##########`);
     const r = await runArm(channel, n, allClips);
     results[n] = r;
     if (!r) continue;
