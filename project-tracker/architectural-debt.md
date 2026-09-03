@@ -5699,3 +5699,107 @@ layer's delivery collapsed" cleanly; it does not yet catch "a layer never starte
 first place" (paused/stuck-before-first-frame) or WC-mode stalls specifically. Both are real, both are
 visible in `__rfSourceMap` already (`elPaused`, `wcBusy`), and both would extend this same mechanism
 rather than replace it — left as follow-up, not claimed fixed here.
+
+---
+
+### DEBT-033 update (2026-09-03) — the two recoverable losses are FIXED; the notice no longer lies
+
+Built, not measured-only. Two commits, both narrow, both against mechanisms named in the previous
+session's report rather than against a hypothesis.
+
+**Commit 1 — the build stops abandoning work it can recover.**
+- `EncoderStallRecoveredError` is now caught on the proxy path. It exists to be resumed from, it
+  carries `resumeFrameIndex`, its own doc says the recovery is gapless, and `export-core.ts:566`
+  already performs exactly this recovery — so the main-thread transcode MIRRORS that handler rather
+  than inventing a second recovery shape. `resumeFrameIndex` is honoured; a resume from zero would
+  silently convert a recoverable stall into a repeat of 15-89s of 4K work.
+- The WORKER path deliberately does NOT resume in place, and the asymmetry is the interesting part:
+  `resumeFrameIndex` is the encoder's MUXED CHUNK COUNT, which equals the next frame index only on an
+  in-order submitter. The worker builds runs OUT OF ORDER (playhead-first, Slice 2), so that count
+  does not identify a source frame there and rewinding to it could land outside the current run. It
+  flags the error `retryable` on the protocol and hands the decision to the queue; the segment cache
+  makes the rebuild cheap. Copying the export handler verbatim into the worker would have been a
+  plausible-looking defect.
+- `saveSourceProxy`'s `catch { return null }` is gone. It erased the cause of losing an ALREADY
+  COMPLETED transcode, which is precisely why the 11x4K measurement could say only "proxy persist
+  failed" and could not distinguish a quota from a write from an index failure. The cause is now
+  surfaced (`lastSourceProxySaveError`) and the failure is retryable — the expensive part is already
+  paid for, so discarding it is the worst available outcome.
+- **The bound, stated**: 3 re-queues per asset per session (2s/4s/6s backoff) via the widened
+  `RetryableProxyBuildError` base, then a settled `failed`; and at most 2 in-place encoder resumes
+  within one transcode, matching the encoder's own internal reset budget. Unbounded retry over a
+  genuinely broken asset would be a new defect, not a fix.
+
+**Commit 2 — the notice stops lying and starts saying what helps.**
+- "Media optimization finished — proxies rebuilt at full quality" fired at drain end regardless of
+  outcome, including over 6 of 11 assets that never got a proxy. It now speaks only from counts
+  (`getSourceProxyDrainSummary`, computed before the drain-end signal), names failures and skips
+  separately, and states the consequence: those clips keep playing their originals. Worse than
+  silence is the right framing — silence leaves a user uncertain, a false success CLOSES the question.
+- "Playback may be softer until it finishes" was a 1080p description. The copy is now derived from the
+  source's own probed height (`SourceProxyProgress.sourceHeight`, published as soon as the metadata
+  probe answers): >=1440 says the preview will FREEZE, below says softer, and unknown covers both
+  rather than picking the flattering branch.
+- Per-asset proxy state is now where the symptom is. `getSourceProxyState` had a `failed` member and a
+  comment saying it exists so a frozen preview reads as "proxy not ready" rather than "the app is
+  broken" — and it was consumed in exactly one place, the Flarex source viewer. It is now on the
+  timeline clip (`ClipProxyBadge`) and on the preview (`.preview-proxy-state`), driven by a real
+  change notification (`subscribeSourceProxyState`) rather than a poll. Per-asset outcomes moved off
+  `stats().recent` — a 20-entry ring that would have made the badge report "built" for the 21st asset.
+- **The trap is named in the copy.** Playing 4K originals freezes the preview, and playing also
+  SUSPENDS the builds that would end the freeze, so the user's instinct — press play again, scrub
+  around — extends the exact window causing the problem. Every variant of the notice, and both
+  badge/overlay texts, now say that playing pauses optimizing and that leaving the transport parked
+  finishes soonest. This is the difference between a slow feature and a trap.
+
+**Verification, stated honestly.**
+- Cheap gate, run and passing: `pnpm --filter @orreris/web proxynotice:test` — 22 assertions over the
+  pure copy functions (`sourceProxyNotice.ts`), covering all four claims including that no variant
+  omits the playing-pauses-builds instruction. Plus `typecheck` on web (the pre-existing
+  `render-worker.ts:198` Prisma error on this branch is untouched and unrelated).
+- **The canvas-instrument verification did NOT run, and nothing here is claimed to have been measured
+  at the canvas.** `apps/worker/src/debt033-notice-truth-probe.ts` is written and typechecks: it
+  samples the preview canvas hash, the toast, the overlay, the clip badges and the engine counters at
+  the SAME instants, and asserts the notice against the canvas — because a notice asserting readiness
+  over a frozen canvas is the same defect one layer up from a delivery counter reading 67fps over a
+  frozen canvas. It could not be run on this machine: Docker's image store is empty and every pull
+  fails at the TLS layer, so there is no Postgres, no API, and no editor to drive. Run on the new
+  machine with:
+  `PROBE_4K_DIR=<dir of >=3 distinct 4K clips> PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker tsx src/debt033-notice-truth-probe.ts`
+- **STOP 3 is therefore still open**, for the same reason. The rescoped ceiling question — with all
+  eleven proxies verified built, is the proxied ceiling CONSTANT IN STREAMS or does it still move with
+  source resolution? — needs the warm N=11 arm of `flarex-canvas-truth-probe.ts` and a matched
+  1080p-source arm. If it still moves with resolution, the unit is wrong and I-P6's argument applies
+  here too. Nothing in this session's work answers it; commit 1 only makes the arm runnable by making
+  the eleven proxies reachable.
+- Expiry condition: STOP 3 answered on hardware where the app can run, with the notice probe passing
+  alongside it.
+
+---
+
+### DEBT-034 — a local import can report success with NO BYTES ON DEVICE (data integrity, not proxies)
+
+- Registered: 2026-09-03, split out of DEBT-033's 11x4K measurement on founder instruction — NOT fixed
+  here, and deliberately not investigated here.
+- What was observed: of eleven ~120MB local imports, THREE had no bytes on device. The proxy engine
+  surfaced it as `skipped: "no local bytes"`, a terminal outcome no amount of waiting changes, which is
+  why the warm arm could never reach eleven built proxies.
+- Why quota is not the obvious explanation: the machine had 226 GB free at the time.
+- Why this outranks the proxy work it was found inside: proxies are merely where it SURFACED. An import
+  the product accepted, listed and placed on a timeline, whose bytes are not actually on the device, is
+  a data-integrity failure on its own terms — every consumer of those bytes (export, relink, the
+  viewer, the render path) is equally affected, and the user has no signal that anything is missing
+  until something downstream fails for an unrelated-looking reason. It may be the most serious thing in
+  the DEBT-033 report.
+- What it needs, and does not have: its own reproduction. The observation is a by-product of a probe
+  built to measure something else, so the population (11 files, one 4K source, one import route, one
+  session) is not a controlled sample. Open questions a real investigation must answer before any fix:
+  is it the import path or the blob store; is it size-dependent (~120MB each), count-dependent, or
+  concurrency-dependent (eleven imports in one burst); does the write fail or does the RECORD outlive
+  its bytes; is it OPFS eviction after the fact rather than a failed write; and does a reload change
+  the answer (stale-vs-wrong is the cheapest split available and costs one keystroke).
+- Explicitly NOT to be inferred from DEBT-033: nothing in the proxy engine causes this, and the proxy
+  engine's handling of it (`skipped`, terminal, now badged on the clip) is correct behaviour for a
+  source whose bytes are absent — it is a symptom reporter, not the defect.
+- Expiry condition: a controlled reproduction exists that can make an import lose its bytes on demand,
+  and the failing layer is named.

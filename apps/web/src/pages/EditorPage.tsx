@@ -304,8 +304,10 @@ import {
   setSourceProxyDenseGopListener,
   setSourceProxyPartialListener,
   setSourceProxyPlayheadResolver,
-  setSourceProxyProgressListener
+  setSourceProxyProgressListener,
+  getSourceProxyDrainSummary
 } from "../editor/performance/sourceProxyEngine";
+import { describeProxyDrainOutcome, describeProxyPlaybackCost } from "../editor/performance/sourceProxyNotice";
 import { setWorldAssetProvider } from "../ai/world";
 import { isBackgroundWorkAllowed, setBackgroundGate, subscribeBackgroundGate } from "../editor/performance/backgroundScheduler";
 import { ensureDegradationControllerStarted } from "../editor/performance/degradation";
@@ -1493,13 +1495,15 @@ export function EditorPage() {
     setSourceProxyProgressListener((progress) => {
       if (!progress) {
         if (sawBuild) {
-          setNotice("Media optimization finished — proxies rebuilt at full quality");
+          setNotice(describeProxyDrainOutcome(getSourceProxyDrainSummary()));
         }
         return;
       }
       sawBuild = true;
       const queueSuffix = progress.queued > 0 ? ` (+${progress.queued} more queued)` : "";
-      setNotice(`Optimizing media in the background — ${progress.percent}%${queueSuffix}. Playback may be softer until it finishes`);
+      setNotice(
+        `Optimizing media in the background — ${progress.percent}%${queueSuffix}. ${describeProxyPlaybackCost(progress.sourceHeight)}`
+      );
     });
     return () => setSourceProxyProgressListener(null);
   }, []);

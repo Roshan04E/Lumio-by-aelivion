@@ -32,6 +32,7 @@ import { favouriteTransitionSpecs } from "../editor/effects/catalog";
 import { loadFavourites } from "../editor/effects/favourites";
 import { ThemedSelect, type ThemedSelectOption } from "../editor/inspector/controls/ThemedSelect";
 import type { PreviewCacheRulerSegment, ProxyCacheStatus } from "../editor/performance/renderCache";
+import { useSourceProxyState } from "../editor/performance/useSourceProxyState";
 import { resolveSelectMode, type LayerSelectMode } from "../editor/selectionMode";
 import { getFlarexProxyServing, subscribeFlarexProxyServing } from "../editor/flarex/flarex-proxy-status";
 
@@ -5100,6 +5101,36 @@ const FlarexClipBadge = memo(function FlarexClipBadge({ compId, onOpen }: { comp
   );
 });
 
+/**
+ * PROXY STATE ON THE CLIP (DEBT-033, 2026-08-17). `getSourceProxyState` has always had a `failed`
+ * member whose stated purpose is that a frozen preview reads as "proxy not ready" rather than "the
+ * app is broken" — and until now it was rendered in exactly one place, the Flarex Source Viewer,
+ * which is not where anyone looks when the preview freezes. Same idiom as the fx/notes badges: a
+ * DIRECT child of the clip, never inside `.clip-label` (display:none at S/XS row heights).
+ *
+ * `built`/`skipped`/`none` render nothing — the badge exists to explain a struggling preview, and a
+ * badge on every healthy clip would be noise.
+ */
+const ClipProxyBadge = memo(function ClipProxyBadge({ assetId }: { assetId: string }) {
+  const state = useSourceProxyState(assetId);
+  if (state !== "building" && state !== "queued" && state !== "failed") return null;
+  const failed = state === "failed";
+  return (
+    <span
+      className={`clip-proxy-badge is-${state}`}
+      title={
+        failed
+          ? "Proxy build failed — this clip plays its full-resolution original, which can freeze the preview at 4K. Rebuild it from the source viewer."
+          : state === "building"
+            ? "Building an optimized proxy for this clip. Until it lands the preview plays the original — and PLAYING PAUSES THE BUILD, so leaving the transport parked finishes it soonest."
+            : "Queued for proxy optimization. The preview plays the original until it lands, and playing pauses the queue."
+      }
+    >
+      {failed ? <Zap size={9} /> : <RefreshCw size={9} className="clip-proxy-badge-spin" />}
+    </span>
+  );
+});
+
 const Filmstrip = memo(function Filmstrip({ url }: { url?: string | undefined }) {
   const thumbs = useVideoThumbnails(url);
   const hostRef = useRef<HTMLSpanElement | null>(null);
@@ -5587,6 +5618,8 @@ const TimelineClip = memo(function TimelineClip({
           <StickyNote size={9} />
         </span>
       ) : null}
+      {/* Proxy state (DEBT-033): only renders while a proxy is pending or has failed — see ClipProxyBadge. */}
+      {layer.type === "video" && layer.assetId ? <ClipProxyBadge assetId={layer.assetId} /> : null}
       <span className="clip-label">
         <span className="clip-icon" aria-hidden="true">{clipTypeIcon(layer.type)}</span>
         {layer.linkedGroupId ? <span className="clip-kind">linked</span> : null}

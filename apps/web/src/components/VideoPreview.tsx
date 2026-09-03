@@ -149,6 +149,7 @@ import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
 import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../playback/audio-fx-worklet";
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
+import { useWorstSourceProxyState } from "../editor/performance/useSourceProxyState";
 import { useFlarexCompProxies } from "../editor/flarex/useFlarexCompProxies";
 import { notePlaybackActive, noteRenderScale } from "../editor/performance/frame-stats";
 import { hasMeasuredDenseGop } from "../editor/performance/sourceProxyEngine";
@@ -1095,6 +1096,17 @@ function VideoPreviewImpl({
     for (const [assetId, count] of counts) if (count >= 2) stacked.add(assetId);
     return stacked;
   }, [renderVisualLayerEntries]);
+  // Proxy readiness of the sources ON SCREEN RIGHT NOW — the only ones that can explain what the user
+  // is looking at. Worst-first (failed > building > queued); healthy sources report "none" and the
+  // overlay stays away.
+  const activeProxyAssetIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const { layer } of renderVisualLayerEntries) {
+      if (layer.type === "video" && layer.assetId && !ids.includes(layer.assetId)) ids.push(layer.assetId);
+    }
+    return ids;
+  }, [renderVisualLayerEntries]);
+  const activeProxyState = useWorstSourceProxyState(activeProxyAssetIds);
   // Mount the next video clip's <video> a moment before its cut so it has time
   // to seek to the right source frame in the background - avoids the visible
   // black/stale frame flash that a fresh seek-on-mount causes right at a cut.
@@ -1933,6 +1945,19 @@ function VideoPreviewImpl({
       {colorPreviewDegraded ? (
         <div className="preview-color-degraded" role="status">
           {colorWarningsLabel([{ code: "advanced-stage-fallback", severity: "warning", message: "" }])}
+        </div>
+      ) : null}
+      {/* PROXY STATE AT THE PREVIEW (DEBT-033, 2026-08-17). The preview is where the symptom appears —
+          a 4K original that does not advance — so it is where the explanation belongs. Without it the
+          only reading available to the user is "the app is broken", and their instinct (press play
+          again, scrub) makes it worse: playback SUSPENDS the builds that would end the freeze. */}
+      {activeProxyState !== "none" ? (
+        <div className={`preview-proxy-state is-${activeProxyState}`} role="status">
+          {activeProxyState === "failed"
+            ? "Proxy unavailable for this clip — playing the full-resolution original. Rebuild it from the source viewer."
+            : activeProxyState === "building"
+              ? "Optimizing this clip — the preview plays the original until it lands. Playing pauses the build; parking the playhead finishes it soonest."
+              : "Queued for optimization — the preview plays the original until it lands. Playing pauses the queue."}
         </div>
       ) : null}
       <div className={`preview-tools ${toolsCollapsed ? "is-collapsed" : ""}`} aria-label="Preview tools">

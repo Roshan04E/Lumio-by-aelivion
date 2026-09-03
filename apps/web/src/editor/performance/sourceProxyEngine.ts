@@ -113,12 +113,98 @@ function stats(): SourceProxyStats {
   return (w.__rfSourceProxy ??= { built: 0, failed: 0, skipped: 0, queued: 0, active: null, lastBuildMs: 0, recent: [] });
 }
 
+/**
+ * Per-asset state changed (queued → building → built/failed/skipped). UI that shows a proxy badge
+ * subscribes here instead of polling: a frozen preview must read as "proxy not ready" the moment the
+ * engine knows it, and an 800ms poll (the Source Viewer's, the only consumer before 2026-08-17) is
+ * both late and wasteful once the badge is on every clip in the timeline.
+ */
+const stateListeners = new Set<() => void>();
+/**
+ * Settled outcome per asset for THIS SESSION, uncapped. Distinct from `stats().recent`, which is a
+ * 20-entry diagnostic ring: past 20 settled assets the ring drops the oldest, and the per-asset badge
+ * would then have silently reported "built" for an asset that failed. A badge that guesses is worse
+ * than no badge, so the badge reads this and the ring stays a debug tail.
+ */
+const sessionOutcomes = new Map<string, { outcome: "built" | "failed" | "skipped"; note?: string }>();
+
+/** Assets that joined the CURRENT drain — the population the completion notice is allowed to speak for. */
+const drainAssetIds = new Set<string>();
+
+export interface SourceProxyDrainSummary {
+  /** Assets that joined this drain, whatever happened to them. */
+  total: number;
+  built: number;
+  /** Tried and could not finish, retries exhausted. These clips still play their originals. */
+  failed: number;
+  /** Never attempted (small enough, not a video, metadata probe failed, too long). NOT a success. */
+  skipped: number;
+  /** Per-asset causes for the failures, for the notice/diagnostics. */
+  failures: Array<{ assetId: string; note?: string }>;
+}
+
+let lastDrainSummary: SourceProxyDrainSummary | null = null;
+
+/**
+ * What the drain that just finished actually did. Read when the progress listener reports null.
+ *
+ * EXISTS BECAUSE THE COMPLETION NOTICE WAS LYING (2026-08-17): "Media optimization finished — proxies
+ * rebuilt at full quality" fired unconditionally at drain end, including the 11x4K run where 6 of 11
+ * assets never got a proxy. Silence leaves a user uncertain; a false success CLOSES the question, so
+ * they stop looking for the cause of a preview that is still frozen. The notice now speaks only from
+ * these counts.
+ */
+export function getSourceProxyDrainSummary(): SourceProxyDrainSummary | null {
+  return lastDrainSummary;
+}
+
+function summarizeDrain(): void {
+  const failures: Array<{ assetId: string; note?: string }> = [];
+  let built = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const assetId of drainAssetIds) {
+    const outcome = sessionOutcomes.get(assetId)?.outcome;
+    if (outcome === "built") built += 1;
+    else if (outcome === "skipped") skipped += 1;
+    else {
+      // Includes assets with no recorded outcome at all — counted as failed rather than quietly
+      // dropped, because "we cannot say what happened to it" is not evidence that it succeeded.
+      failed += 1;
+      const note = sessionOutcomes.get(assetId)?.note;
+      failures.push({ assetId, ...(note ? { note } : {}) });
+    }
+  }
+  lastDrainSummary = { total: drainAssetIds.size, built, failed, skipped, failures };
+  // Published alongside `__rfSourceProxy` so an out-of-page instrument can compare what the notice
+  // SAYS against what the engine COUNTED — the whole point of the notice-truth probe.
+  (window as unknown as { __rfProxyDrainSummary?: SourceProxyDrainSummary }).__rfProxyDrainSummary = lastDrainSummary;
+  drainAssetIds.clear();
+}
+let stateRevision = 0;
+export function subscribeSourceProxyState(listener: () => void): () => void {
+  stateListeners.add(listener);
+  return () => {
+    stateListeners.delete(listener);
+  };
+}
+/** Monotonic counter for `useSyncExternalStore` snapshots — a number, so the snapshot is stable. */
+export function sourceProxyStateRevision(): number {
+  return stateRevision;
+}
+function notifyStateChanged(): void {
+  stateRevision += 1;
+  for (const listener of stateListeners) listener();
+}
+
 function record(assetId: string, outcome: "built" | "failed" | "skipped", ms: number, note?: string): void {
   const s = stats();
   s[outcome === "built" ? "built" : outcome === "failed" ? "failed" : "skipped"] += 1;
   s.lastBuildMs = Math.round(ms);
   s.recent.push({ assetId, outcome, ms: Math.round(ms), ...(note ? { note } : {}) });
   if (s.recent.length > 20) s.recent.shift();
+  sessionOutcomes.set(assetId, { outcome, ...(note ? { note } : {}) });
+  notifyStateChanged();
   try {
     if (localStorage.getItem("orreris.perfLog") === "1") {
       console.info(`[source-proxy] ${assetId}: ${outcome}${note ? ` (${note})` : ""} in ${Math.round(ms)}ms`);
@@ -165,9 +251,18 @@ export interface SourceProxyProgress {
   /** 0..100, stepped to 5s. */
   percent: number;
   queued: number;
+  /**
+   * The ACTIVE source's own pixel height (1080, 2160, …), or null before the metadata probe answers.
+   * Carried because the honest description of "playing while this builds" DIFFERS BY RESOLUTION: at
+   * 1080p the original plays softer; at 4K the measured truth (2026-08-17) is a preview that does not
+   * advance at all. A notice that says "softer" over a frozen 4K preview is the same defect one layer
+   * up from the freeze itself, so the copy is derived from this rather than assumed.
+   */
+  sourceHeight: number | null;
 }
 let progressListener: ((progress: SourceProxyProgress | null) => void) | null = null;
 let progressAssetId: string | null = null;
+let progressSourceHeight: number | null = null;
 let progressLastStep = -1;
 export function setSourceProxyProgressListener(listener: ((progress: SourceProxyProgress | null) => void) | null): void {
   progressListener = listener;
@@ -178,7 +273,7 @@ function reportProgress(encodedFrames: number, totalFrames: number): void {
   const step = Math.floor(percent / 5);
   if (step === progressLastStep) return;
   progressLastStep = step;
-  progressListener({ assetId: progressAssetId, percent, queued: queue.length });
+  progressListener({ assetId: progressAssetId, percent, queued: queue.length, sourceHeight: progressSourceHeight });
 }
 
 // SUSPEND (2026-07-06, supersedes the full-quality-only rule): builds park during ANY playback —
@@ -327,12 +422,7 @@ export function getSourceProxyState(assetId: string): SourceProxyState {
   const s = stats();
   if (s.active === assetId) return "building";
   if (inQueue.has(assetId)) return "queued";
-  if (settled.has(assetId)) {
-    for (let i = s.recent.length - 1; i >= 0; i -= 1) {
-      if (s.recent[i]!.assetId === assetId) return s.recent[i]!.outcome;
-    }
-    return "built";
-  }
+  if (settled.has(assetId)) return sessionOutcomes.get(assetId)?.outcome ?? "built";
   return "none";
 }
 
@@ -351,6 +441,7 @@ export async function rebuildSourceProxy(asset: SourceAsset, onReady: ReadyCallb
   buildRetries.delete(asset.id);
   const s = stats();
   s.recent = s.recent.filter((r) => r.assetId !== asset.id);
+  sessionOutcomes.delete(asset.id);
   ensureSourceProxy(asset, onReady);
 }
 
@@ -368,6 +459,8 @@ export function ensureSourceProxy(asset: SourceAsset, onReady: ReadyCallback): v
   inQueue.add(asset.id);
   queue.push({ asset, onReady });
   stats().queued = queue.length;
+  drainAssetIds.add(asset.id);
+  notifyStateChanged();
   if (!draining) {
     draining = true;
     // Start the drain only when the tab is IDLE, so a background transcode never lands on top of the
@@ -407,6 +500,8 @@ async function drainQueue(): Promise<void> {
       await waitWhileSuspended();
       stats().active = item.asset.id;
       progressAssetId = item.asset.id;
+      progressSourceHeight = null; // unknown until this build's metadata probe answers
+      notifyStateChanged();
       progressLastStep = -1;
       const started = performance.now();
       let requeued = false;
@@ -446,7 +541,10 @@ async function drainQueue(): Promise<void> {
         }
         stats().active = null;
         progressAssetId = null;
+        progressSourceHeight = null;
+        notifyStateChanged();
         if (queue.length === 0) {
+          summarizeDrain(); // computed BEFORE the null so the notice has real counts to read
           progressListener?.(null); // drained — the UI clears/summarizes its notice
         }
       }
@@ -549,6 +647,9 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     record(asset.id, "skipped", 0, `too long (${Math.round(meta.durationSeconds)}s)`);
     return null;
   }
+  // The notice's copy depends on this (see SourceProxyProgress.sourceHeight) — publish it as soon as
+  // the probe answers, before any of the expensive work starts.
+  if (progressAssetId === asset.id) progressSourceHeight = meta.height;
   const scale = Math.min(1, PROXY_LONG_EDGE / Math.max(meta.width, meta.height));
   if (scale >= 1 && blob.size < MIN_SOURCE_BYTES * 2) {
     // Already at/below proxy resolution and not huge — the original decodes fine, UNLESS its GOPs are

@@ -31,7 +31,8 @@
     "gop:test": "tsx src/editor/performance/gop-probe.test.ts",
     "flarexproxy:test": "tsx src/editor/flarex/flarex-proxy-eligibility.test.ts",
     "flarex:clipboard:test": "tsx src/editor/flarex/flarex-clipboard.test.ts",
-    "flarex:align:test": "tsx src/editor/flarex/flarex-align.test.ts"
+    "flarex:align:test": "tsx src/editor/flarex/flarex-align.test.ts",
+    "proxynotice:test": "tsx src/editor/performance/sourceProxyNotice.test.ts"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
