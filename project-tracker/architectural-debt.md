@@ -5714,6 +5714,60 @@ visible toast read as hidden. The centre-point hit test is a one-sample approxim
 did not affect the verdicts above (they rest on the recorder and on badges), but a future run that
 depends on toast visibility should sample several points, not one.
 
+**UPDATE 2026-09-03 (g) — STOP 3, the rescoped ceiling. The 4K arm still cannot testify; the 1080p arm
+can, and the pixels-vs-streams question turns out to be settled BY CONSTRUCTION on the warm path.**
+
+**Warm 4K N=11 — VOID, for two independent reasons, reported rather than dressed up as a ceiling:**
+- **6 of 11 proxies again** — `built:6, failed:0, skipped:4`, every skip `"no local bytes"`. Note what
+  DID change: `failed` went 2 → **0**. Neither the encoder wedge nor the persist failure recurred, which
+  is consistent with commit `bcdd80d` holding (one run — consistent with, not proof of). What commit did
+  not touch is `"no local bytes"`, i.e. DEBT-034. Six proxied plus five raw 4K originals is the same
+  mixed arm as before, and five raw 4K originals explain a freeze on their own.
+- **The preview canvas was ABSENT at sampling time** (`no canvas.preview-scene-canvas found`).
+  `ScenePreviewCanvas` renders `<canvas key={recoveryTick}>`, so a context-loss recovery remounts it,
+  and eleven concurrent 4K decoders is precisely the regime behind `MAX_WC_TOTAL_SESSIONS`'s
+  GPU-process-death scar. ONE observation, not chased — a suspicion, not a finding.
+
+**Warm 1080p N=11 — a real reading, and all eleven proxied** (`built:10, failed:0, skipped:0, queued:0`):
+```
+N=11 warm 1080p   canvasChanged 19/23   clock +18.71s   fps 29.6   minMediaFps 12.7   dropped 65%   capMisses 16
+(for comparison, warm 4K N=6 from update (d))  21/23              52.3        28.1              17%             4
+```
+Eleven proxied streams DELIVER — degraded (12.7fps per layer, 65% dropped) but the canvas is moving.
+Doubling proxied streams 6 → 11 roughly halves fps and quadruples `capMisses`; the picture keeps moving
+throughout, so admission denial still is not the same thing as a freeze.
+
+**THE UNIT QUESTION IS ANSWERED, AND NOT THE WAY IT WAS FRAMED.** `PROXY_LONG_EDGE = 1280`
+(`sourceProxyEngine.ts:53`), applied as `scale = min(1, 1280 / max(width, height))` at `:653`. **Every
+proxy is normalised to a 1280 long edge regardless of source resolution.** A proxied 4K clip and a
+proxied 1080p clip therefore decode at IDENTICAL pixel dimensions (720x1280 for these vertical sources).
+So on the warm path, pixels-per-stream is a CONSTANT by construction, which makes "streams" and "pixels"
+the same unit there — the ADR-021 I-P6 argument has nothing to bite on, because the thing it warns about
+(a count standing in for a workload that varies fourfold) cannot occur once every stream is the same
+size. That is a structural answer, not a measurement, and it is the stronger kind.
+
+**Where the pixel argument DOES apply is the COLD/unproxied path, and that is exactly where the freeze
+lives.** There a stream is whatever the source happens to be — 4K is ~4x the pixels of 1080p — and the
+measurements match: cold 4K froze at N=3 (update (c)) while cold 1080p was still delivering at N=6
+(update (b)). **I-P6's argument applies to the unproxied path in full.** Any admission or degradation
+policy for un-proxied sources expressed in stream counts is describing a workload that varies fourfold
+per stream; the warm path does not need it.
+
+**What remains genuinely unmeasured**: whether ELEVEN PROXIED 4K sources behave like eleven proxied
+1080p ones. The code says their decode load is identical, and I did not get to confirm it empirically
+because the pipeline could not produce eleven 4K proxies. Stated as a prediction, not a result.
+
+**DEBT-034 gains a concrete, size-shaped reproduction from this pair** (observation only — not
+investigated, not fixed, per instruction). Same import path, same count, same content, same durations,
+same session shape; only file size differs:
+```
+~120MB each (4K)    → 4 of 11 assets reached the proxy engine with "no local bytes"
+ ~24MB each (1080p) → 0 of 11
+```
+That points at a size-dependent failure to persist local bytes, and it is now ON THE CRITICAL PATH for
+DEBT-033's ceiling question rather than being a side issue — STOP 3's 4K arm cannot be assembled until
+it is fixed.
+
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
   frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and
