@@ -5111,8 +5111,22 @@ const FlarexClipBadge = memo(function FlarexClipBadge({ compId, onOpen }: { comp
  * `built`/`skipped`/`none` render nothing — the badge exists to explain a struggling preview, and a
  * badge on every healthy clip would be noise.
  */
-const ClipProxyBadge = memo(function ClipProxyBadge({ assetId }: { assetId: string }) {
+const ClipProxyBadge = memo(function ClipProxyBadge({ assetId, bytesMissing }: { assetId: string; bytesMissing?: boolean }) {
   const state = useSourceProxyState(assetId);
+  // PERMANENT, and therefore ranked above every transient state (DEBT-034). This clip's bytes never
+  // reached the device, so no proxy can ever be built for it and no amount of waiting changes that —
+  // the previous badge rendered NOTHING for it, because `skipped` fell through the filter below, which
+  // left the one un-fixable case as the only silent one.
+  if (bytesMissing) {
+    return (
+      <span
+        className="clip-proxy-badge is-missing"
+        title="This clip's media was never saved to this device, so it can't be optimized and won't survive a refresh. It plays its full-resolution original, which can freeze the preview at 4K. Re-import it to fix."
+      >
+        <Zap size={9} />
+      </span>
+    );
+  }
   if (state !== "building" && state !== "queued" && state !== "failed") return null;
   const failed = state === "failed";
   return (
@@ -5619,7 +5633,12 @@ const TimelineClip = memo(function TimelineClip({
         </span>
       ) : null}
       {/* Proxy state (DEBT-033): only renders while a proxy is pending or has failed — see ClipProxyBadge. */}
-      {layer.type === "video" && layer.assetId ? <ClipProxyBadge assetId={layer.assetId} /> : null}
+      {layer.type === "video" && layer.assetId ? (
+        <ClipProxyBadge
+          assetId={layer.assetId}
+          bytesMissing={assets.find((a) => a.id === layer.assetId)?.localBytesMissing === true}
+        />
+      ) : null}
       <span className="clip-label">
         <span className="clip-icon" aria-hidden="true">{clipTypeIcon(layer.type)}</span>
         {layer.linkedGroupId ? <span className="clip-kind">linked</span> : null}

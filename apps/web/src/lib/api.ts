@@ -1,3 +1,4 @@
+import { setNotice } from "./noticeStore";
 import {
   createProjectEffect,
   createDefaultComposition,
@@ -423,6 +424,12 @@ export async function createAsset(input: CreateAssetInput) {
     // instantly. Only a stable marker is stored as the URL; the live object URL is resolved
     // now (for immediate use) and re-resolved by listAssets() / resolveLocalAssetUrls() later.
     let liveUrl = "/assets/orreris-hero.png";
+    // DEBT-034: whether the bytes ACTUALLY landed on device. The catch below used to swallow a failed
+    // write entirely and still record the asset as `ready` with a `localblob:` marker asserting bytes
+    // that were never written — an error path shipping completion (DEBT-015's class). Measured
+    // 2026-09-03: 11 imports of ~120MB lost 4 of them this way, silently, and the loss only surfaced
+    // minutes later at proxy time as "no local bytes". Silent loss is worse than a refused import.
+    let bytesPersisted = false;
     if (file) {
       try {
         const store = await getAssetBlobStore();
@@ -430,12 +437,24 @@ export async function createAsset(input: CreateAssetInput) {
         // the project's OPFS home, library assets under library/. Purely organizational — reads
         // stay id-keyed with a legacy-flat fallback.
         await store.put(id, file, { projectId: input.projectId ?? null });
+        // VERIFY, do not assume. `put` resolving is not the same claim as "the bytes are readable
+        // now": the OPFS write is staged through `createWritable` and a full disk, a revoked grant or
+        // a quota refusal can still leave nothing behind. `has()` is the only authority on this.
+        bytesPersisted = await store.has(id).catch(() => false);
         void requestPersistentAssetStorage();
         // TRACKED (DEBT-019): `file` is the user's own disk-backed File from the picker — the
         // decoder can slice it in place, so never let it be re-fetched into a RAM copy.
         liveUrl = (await store.getObjectUrl(id)) ?? createTrackedObjectUrl(file);
       } catch {
         liveUrl = createTrackedObjectUrl(file); // session-only last resort
+      }
+      if (!bytesPersisted) {
+        // Tell the user NOW, at the moment their import silently became session-only, rather than
+        // letting them discover it at proxy time or after a refresh. Deliberately not a thrown error:
+        // refusing the import outright would lose work the user can still edit with this session.
+        setNotice(
+          `"${file.name}" could not be saved to this device — it will work in this session but will not survive a refresh, and it cannot be optimized for smooth playback.`
+        );
       }
     }
 
@@ -446,6 +465,12 @@ export async function createAsset(input: CreateAssetInput) {
       fileType: file?.type ?? input.fileType ?? "video/mp4",
       // Persist the MARKER, not the (session-only) object URL.
       fileUrl: file ? `${LOCAL_BLOB_PREFIX}${id}` : liveUrl,
+      // DEBT-034. The marker above says "bytes live on device under this id"; when the write failed
+      // that is not true, and this records it rather than letting the asset look identical to a
+      // healthy one. The marker itself is deliberately UNCHANGED — in-session resolution still runs
+      // through the same path, and rewriting the URL scheme here would change behaviour well beyond
+      // this failure case. Consumers that care read the flag.
+      ...(file && !bytesPersisted ? { localBytesMissing: true } : {}),
       durationSeconds: realDuration,
       width: input.width ?? 1080,
       height: input.height ?? 1920,

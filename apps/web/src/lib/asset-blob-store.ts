@@ -106,6 +106,21 @@ export function getAssetBlobStore(): Promise<AssetBlobStore> {
   return (storePromise ??= createStore());
 }
 
+// DEBUG HANDLE (DEBT-034, 2026-09-03), matching the repo's `__rf*` telemetry convention.
+//
+// WHY IT EXISTS: "are this asset's bytes actually on the device?" had no answer reachable from outside
+// the module, and two attempts to infer one from the outside were both WRONG — walking OPFS missed the
+// IndexedDB backend, and even reading both showed 0.04GB against 0.85GB of `estimate().usage`, then
+// disagreed with the proxy engine (which found 4 of 11 assets byte-less, not 11 of 11). The store's own
+// `has()` is the only authority on this question, so it is exposed rather than approximated. Read-only:
+// `has` and the backend `kind`, nothing that can mutate storage.
+if (typeof window !== "undefined") {
+  (window as { __rfAssetBlobStore?: unknown }).__rfAssetBlobStore = {
+    has: async (id: string): Promise<boolean> => (await getAssetBlobStore()).has(id),
+    kind: async (): Promise<string> => (await getAssetBlobStore()).kind
+  };
+}
+
 /** Ask the browser to keep our storage from being evicted under pressure. Best-effort. */
 export async function requestPersistentAssetStorage(): Promise<void> {
   try {

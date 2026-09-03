@@ -150,6 +150,17 @@ export interface SourceAsset {
   cloudUrl?: string | undefined;
   fps?: number | undefined;
   sizeBytes?: number | undefined;
+  /**
+   * TRUE when the local import could NOT persist this asset's bytes on device (DEBT-034). The asset
+   * still works for the rest of the SESSION off an in-memory object URL, but it will not survive a
+   * refresh and it can never be proxied — the proxy engine reports it as `"no local bytes"`.
+   *
+   * It exists because the import used to swallow that failure and record the asset as `ready` with a
+   * `localblob:` marker asserting bytes that were never written. Measured 2026-09-03: importing 11
+   * assets of ~120MB lost 4 of them this way, silently, with the loss only surfacing minutes later at
+   * proxy time. Absent/false means the bytes are on device.
+   */
+  localBytesMissing?: boolean | undefined;
   /** Optional project binding for project-specific generated assets. */
   projectId?: string | undefined;
   /** Owner project for uploaded (local) media. null/absent = user-level library asset (brand/ai/stock),

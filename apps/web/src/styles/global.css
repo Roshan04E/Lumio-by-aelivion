@@ -26307,6 +26307,13 @@ h3.notes-note-md-heading {
   color: #fff1f1;
   background: #c0392b;
 }
+/* DEBT-034: bytes never reached the device — permanent, not a build that might still land, so it reads
+   hotter than `is-failed` (which a rebuild can clear). */
+.timeline-editor .timeline-clip .clip-proxy-badge.is-missing {
+  color: #fff;
+  background: #8e1b0f;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
 .timeline-editor .timeline-clip .clip-proxy-badge-spin {
   animation: clip-proxy-badge-spin 1.6s linear infinite;
 }

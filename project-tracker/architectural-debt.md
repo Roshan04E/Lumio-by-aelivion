@@ -5714,8 +5714,16 @@ visible toast read as hidden. The centre-point hit test is a one-sample approxim
 did not affect the verdicts above (they rest on the recorder and on badges), but a future run that
 depends on toast visibility should sample several points, not one.
 
-**UPDATE 2026-09-03 (g) — STOP 3, the rescoped ceiling. The 4K arm still cannot testify; the 1080p arm
-can, and the pixels-vs-streams question turns out to be settled BY CONSTRUCTION on the warm path.**
+**UPDATE 2026-09-03 (g) — STOP 3, the rescoped ceiling.**
+
+> **THE UNIT RULE, which governs every admission and degradation policy in this area.**
+> `PROXY_LONG_EDGE` normalises every proxy to a 1280 long edge, so **on the WARM path streams and pixels
+> are the same unit by construction, and ADR-021's I-P6 has nothing to bite on**. Where I-P6 applies in
+> full is the **COLD path — and that is exactly where the freeze lives. Any admission or degradation
+> policy for UN-PROXIED sources stated in stream counts is describing a fourfold-varying workload.**
+> The evidence for both halves is below.
+
+The 4K arm still cannot testify; the 1080p arm can.
 
 **Warm 4K N=11 — VOID, for two independent reasons, reported rather than dressed up as a ceiling:**
 - **6 of 11 proxies again** — `built:6, failed:0, skipped:4`, every skip `"no local bytes"`. Note what
@@ -5918,3 +5926,55 @@ session's report rather than against a hypothesis.
   source whose bytes are absent — it is a symptom reporter, not the defect.
 - Expiry condition: a controlled reproduction exists that can make an import lose its bytes on demand,
   and the failing layer is named.
+
+**UPDATE 2026-09-04 — controlled reproduction built, mechanism narrowed to PRESSURE (not a limit), and
+the silent-success half is FIXED. `debt034-import-persist-probe.ts` (new, committed).**
+
+**IT IS PRESSURE, NOT A LIMIT — the founder's distinguishing question, answered.** Eleven ~120MB
+imports (1.33GB handed over), repeated with a fresh browser profile each run:
+```
+run 1  4 missing: seg07 seg08 seg09 seg10
+run 2  4 missing: seg06 seg07 seg08 seg09     ← different SET
+run 3  5 missing: seg06..seg10                 ← different COUNT
+```
+**The failing set MOVES between runs on identical input.** A hard limit fails deterministically at the
+same asset; this does not. Supporting numbers, all from the same runs:
+- **Quota is not the ceiling**: browser-granted quota read 3.25GB before and grew to ~4.07GB during the
+  import; `usage` plateaued at **0.83-0.87GB** — the writes stopped at roughly a fifth of what the
+  browser was willing to give. `navigator.storage.persisted()` was **false** throughout.
+- The plateau is internally consistent with the losses: ~7 of 11 files at ~120MB ≈ 0.85GB.
+- Store backend in use: **OPFS** (`kind: "opfs"`), IndexedDB fallback untouched (0 keys).
+So: the writes succeed until roughly 0.85GB of a 4GB allowance is in flight and then start failing,
+with WHICH ones fail varying run to run. That is the signature of exhaustion under a burst — consistent
+with the founder's "if any stage holds a whole file in memory rather than streaming it to storage",
+though this probe does not yet prove WHERE the pressure is. Not chased further here.
+
+**THE SILENT-SUCCESS HALF IS FIXED (the founder's "make it surface before you make it work").**
+`api.ts`'s `persistLocally` now (a) VERIFIES with `store.has(id)` rather than treating a resolved
+`put()` as proof — the OPFS write is staged through `createWritable`, so resolution is not the same
+claim as readability; (b) tells the user at that moment, naming the file, that it is session-only and
+cannot be optimized; and (c) records `localBytesMissing` on the asset so the loss survives as data
+rather than as a one-off toast. The `localblob:` marker is deliberately UNCHANGED — rewriting the URL
+scheme would change behaviour well beyond this failure case; consumers that care read the flag.
+**Verified, not assumed**: the flag matches the store's own `has()` exactly — 5 flagged missing / 6
+clean, against 5 / 6 from `store.has()`, on a real 11x120MB import.
+
+**A clip that can never be proxied now says so.** `ClipProxyBadge` rendered NOTHING for this case (the
+filter covered `building`/`queued`/`failed`; a byte-less asset settles as `skipped`), so the one
+PERMANENT, un-fixable state was the only silent one. It now renders an `is-missing` badge, ranked above
+every transient state, saying the media was never saved to the device and re-importing is the fix.
+**Honest limit: this badge has NOT been through the T-16 visibility check.** It reuses the exact
+element, class pattern and call site of the badge that was verified visible 19/19, so it inherits that
+position — but inheritance is an argument, not a measurement, and it should be measured before anyone
+cites it as proven.
+
+**New permanent instrument**: `window.__rfAssetBlobStore` (`has`, `kind`), added because "are this
+asset's bytes on the device?" had no answer reachable from outside the module — and two attempts to
+infer one were both wrong (an OPFS walk missed the IndexedDB backend; reading both still showed 0.04GB
+against 0.85GB of reported `usage`, and disagreed with the proxy engine's own count of 4). The store's
+`has()` is the only authority; it is now exposed rather than approximated. **Both wrong readings looked
+like findings** — one of them "11 of 11 assets lost" — and the thing that caught them was cross-checking
+against a consumer that already knew the answer.
+
+- Status after this: silent success FIXED and verified; mechanism narrowed to pressure-under-burst with
+  quota excluded; the failing STAGE still unnamed (the remaining work).
