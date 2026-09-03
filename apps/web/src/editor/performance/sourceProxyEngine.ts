@@ -21,7 +21,7 @@
 import { getAssetBlobStore } from "../../lib/asset-blob-store";
 import { createTrackedObjectUrl, revokeTrackedObjectUrl } from "../../lib/object-url-registry";
 import { createFrameProvider } from "../../export/source-decoder";
-import { MediaEncoder } from "../../export/video-encoder";
+import { MediaEncoder, EncoderStallRecoveredError } from "../../export/video-encoder";
 import { markHotSpot } from "../../lib/perfDiagnostics";
 import {
   getSourceProxy,
@@ -32,6 +32,7 @@ import {
   getSourceProxySegment,
   listSourceProxySegmentIndices,
   clearSourceProxySegments,
+  lastSourceProxySaveError,
   SOURCE_PROXY_VERSION,
 } from "./sourceProxyStore";
 import { decodeSegment } from "./sourceProxySegments";
@@ -274,10 +275,41 @@ let draining = false;
 // with backoff instead of settling it as a permanent "skipped" (which stranded the whole queue on flaky
 // media — the "queued 28, sources play heavy originals, playback freezes" report). After the cap it
 // settles as "failed" so the asset stops looping and the UI can show a real failure.
-class RetryableProxyFetchError extends Error {}
-const PROXY_FETCH_MAX_RETRIES = 3;
-const PROXY_FETCH_RETRY_BACKOFF_MS = 2000;
-const fetchRetries = new Map<string, number>();
+/**
+ * Base for every TRANSIENT build failure: `drainQueue` re-queues these with backoff (bounded by
+ * {@link PROXY_BUILD_MAX_RETRIES}) instead of settling the asset. Anything not derived from this is
+ * terminal for the session.
+ *
+ * Widened from fetch-only on 2026-08-17. The 11x4K measurement built only 5 of 11 proxies, and two of
+ * the six losses were transient conditions being treated as permanent: a wedged-then-reset encoder
+ * (recoverable BY CONSTRUCTION — `EncoderStallRecoveredError` exists to be resumed from) and a persist
+ * failure that discarded an already-completed transcode. Each stranded its clip on the 4K original for
+ * the whole session, which on 4K means a preview frozen 100% of the time (DEBT-033 update (c)).
+ */
+class RetryableProxyBuildError extends Error {}
+class RetryableProxyFetchError extends RetryableProxyBuildError {}
+/** A COMPLETED transcode that could not be persisted. Retrying re-does the transcode, which is
+ *  expensive — but losing it outright is the worse of the two, and the cause is now reported. */
+class RetryableProxyPersistError extends RetryableProxyBuildError {}
+/** A wedged-then-reset encoder reported by the worker, which cannot resume in place (see its own
+ *  note) and hands the retry decision here. The segment cache makes the rebuild cheap. */
+class RetryableProxyEncoderStallError extends RetryableProxyBuildError {}
+/**
+ * THE BOUND, STATED. Each asset gets at most 3 re-queues per session (backoff 2s, 4s, 6s), after
+ * which it settles as `failed` and the UI reports it. Retrying is right because the failures above
+ * are transient by construction; BOUNDING it is equally right, because a wedge that recurs on every
+ * attempt would otherwise loop forever over a genuinely broken asset — an unbounded retry is a new
+ * defect, not a fix. A settled failure is a stated outcome the user can act on; a loop is not.
+ */
+const PROXY_BUILD_MAX_RETRIES = 3;
+const PROXY_BUILD_RETRY_BACKOFF_MS = 2000;
+const buildRetries = new Map<string, number>();
+/**
+ * In-place encoder-stall resumes allowed within ONE main-thread transcode before it gives up and
+ * hands the (bounded) retry decision to the queue. 2 matches the encoder's own internal reset budget
+ * in `video-encoder.ts`, applied one level up so a permanently wedging encoder cannot spin here.
+ */
+const MAX_ENCODER_STALL_RESUMES = 2;
 
 export type SourceProxyState = "building" | "queued" | "built" | "failed" | "skipped" | "none";
 
@@ -306,7 +338,7 @@ export function getSourceProxyState(assetId: string): SourceProxyState {
 
 /**
  * DIAGNOSTIC: force a fresh rebuild of one asset's proxy. Deletes the persisted blob and clears the
- * per-session guards (`settled`/`inQueue`/`fetchRetries` + the recent record) so `ensureSourceProxy`
+ * per-session guards (`settled`/`inQueue`/`buildRetries` + the recent record) so `ensureSourceProxy`
  * treats the asset as brand new and re-transcodes it — used by the Source Viewer's "Rebuild proxy"
  * control to re-run the recipe (and print the build log) for an asset whose proxy looks degraded.
  * `onReady` fires once on success with the new proxy URL. Not used by any automatic path.
@@ -316,7 +348,7 @@ export async function rebuildSourceProxy(asset: SourceAsset, onReady: ReadyCallb
   retirePartialProxy(asset.id); // its segments are gone too — nothing to keep offering
   settled.delete(asset.id);
   inQueue.delete(asset.id);
-  fetchRetries.delete(asset.id);
+  buildRetries.delete(asset.id);
   const s = stats();
   s.recent = s.recent.filter((r) => r.assetId !== asset.id);
   ensureSourceProxy(asset, onReady);
@@ -382,16 +414,17 @@ async function drainQueue(): Promise<void> {
         const url = await buildOne(item.asset);
         if (url) {
           record(item.asset.id, "built", performance.now() - started);
-          fetchRetries.delete(item.asset.id);
+          buildRetries.delete(item.asset.id);
           item.onReady(item.asset.id, url);
         }
       } catch (error) {
-        const attempts = (fetchRetries.get(item.asset.id) ?? 0) + 1;
-        if (error instanceof RetryableProxyFetchError && attempts <= PROXY_FETCH_MAX_RETRIES) {
-          // Transient (truncated download) — keep it inQueue (dedupes external re-requests) but out of
-          // the array until the backoff elapses, then re-add and restart the drain.
-          fetchRetries.set(item.asset.id, attempts);
-          record(item.asset.id, "failed", performance.now() - started, `${error.message} — retry ${attempts}/${PROXY_FETCH_MAX_RETRIES}`);
+        const attempts = (buildRetries.get(item.asset.id) ?? 0) + 1;
+        if (error instanceof RetryableProxyBuildError && attempts <= PROXY_BUILD_MAX_RETRIES) {
+          // Transient (truncated download, wedged-then-reset encoder, failed persist) — keep it inQueue
+          // (dedupes external re-requests) but out of the array until the backoff elapses, then re-add
+          // and restart the drain.
+          buildRetries.set(item.asset.id, attempts);
+          record(item.asset.id, "failed", performance.now() - started, `${error.message} — retry ${attempts}/${PROXY_BUILD_MAX_RETRIES}`);
           requeued = true;
           setTimeout(() => {
             if (settled.has(item.asset.id)) return; // superseded (e.g. built from local bytes since)
@@ -401,10 +434,10 @@ async function drainQueue(): Promise<void> {
               draining = true;
               void drainQueue();
             }
-          }, PROXY_FETCH_RETRY_BACKOFF_MS * attempts);
+          }, PROXY_BUILD_RETRY_BACKOFF_MS * attempts);
         } else {
           record(item.asset.id, "failed", performance.now() - started, error instanceof Error ? error.message : String(error));
-          fetchRetries.delete(item.asset.id);
+          buildRetries.delete(item.asset.id);
         }
       } finally {
         if (!requeued) {
@@ -585,7 +618,16 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     },
     encoded.blob
   );
-  if (!url) throw new Error("proxy persist failed");
+  if (!url) {
+    // The transcode SUCCEEDED — 15-89s of 4K work is already paid for and only the write failed.
+    // Discarding it strands the clip on its 4K original for the whole session (a permanently frozen
+    // preview), which is the worst of the available outcomes, so this is retryable. The cause now
+    // travels with it: "quota exceeded" and "index write failed" are different problems and the
+    // 2026-08-17 measurement could not tell them apart.
+    throw new RetryableProxyPersistError(
+      `proxy persist failed: ${lastSourceProxySaveError() ?? "cause not reported"}`
+    );
+  }
   // The COMPLETE proxy supersedes any partial one. Routing prefers `proxyUrl` unconditionally, so
   // adoption of the complete file is what actually retires the partial; this just releases the blob
   // (on a delay) and stops the engine offering it again.
@@ -862,6 +904,11 @@ function transcodeInWorker(
           fps: message.fps,
           decodableEndSeconds: message.decodableEndSeconds,
         });
+      } else if (message.retryable) {
+        // The worker's encoder wedged and was reset. It cannot resume in place (out-of-order runs —
+        // see its own note), so it hands the decision here: re-queue, bounded, and let the segment
+        // cache make the rebuild cheap rather than settling the asset on its original for the session.
+        reject(new RetryableProxyEncoderStallError(message.message || "source-proxy encoder stalled"));
       } else {
         reject(new Error(message.message || "source-proxy worker failed"));
       }
@@ -963,6 +1010,10 @@ async function transcodeOnMainThread(
       decodableEnd !== undefined && decodableEnd > 0.2 && decodableEnd < durationSeconds ? decodableEnd : durationSeconds;
     const frameCount = Math.max(1, Math.ceil(effectiveDuration * fps));
     let encodedFrames = 0;
+    // Bounded, so a wedge that recurs on EVERY attempt settles as a stated failure instead of looping
+    // forever — an unbounded retry on a genuinely broken asset is a new defect, not a fix. Matches the
+    // encoder's own internal reset budget (2, `video-encoder.ts`), applied one level up.
+    let stallResumes = 0;
     for (let i = 0; i < frameCount; i += 1) {
       // Parks an in-flight transcode within one frame when playback starts (see
       // setSourceProxyBuildSuspended); resumes exactly here on pause. The audio pre-decode is a
@@ -992,7 +1043,33 @@ async function transcodeOnMainThread(
           throw new Error(`decoder stopped producing frames at ~${(i / fps).toFixed(1)}s — aborted (frozen-tail guard)`);
         }
       }
-      await encoder.addVideoFrame(canvas, i);
+      try {
+        await encoder.addVideoFrame(canvas, i);
+      } catch (error) {
+        if (error instanceof EncoderStallRecoveredError) {
+          // The encoder wedged and was RESET; frames past `resumeFrameIndex` were queued but never
+          // muxed. Rewind and re-decode/re-submit them — the same recovery `export-core.ts` performs,
+          // deliberately mirrored rather than reinvented. Valid here because this path submits frames
+          // strictly in order from 0, so the encoder's muxed-chunk count IS the next frame index (the
+          // worker path cannot do this — see the note at its own `addVideoFrame`).
+          //
+          // Honouring `resumeFrameIndex` rather than restarting at 0 is the point: a restart would
+          // silently convert a recoverable stall into a repeat of up to 15-89s of 4K transcode.
+          // TERMINAL, deliberately: this path has already resumed in place twice. A third wedge is
+          // evidence the encoder cannot finish THIS asset, so it settles as a stated failure rather
+          // than handing the queue a fourth attempt at the same 4K transcode.
+          if (stallResumes >= MAX_ENCODER_STALL_RESUMES) {
+            throw new Error(
+              `video encoder wedged ${stallResumes + 1}x (last resume at frame ${error.resumeFrameIndex} of ${frameCount}) — giving up on this build`
+            );
+          }
+          stallResumes += 1;
+          i = error.resumeFrameIndex - 1; // loop increment lands exactly on resumeFrameIndex
+          encodedFrames = error.resumeFrameIndex; // frames [0, resumeFrameIndex) are muxed; the rest are not
+          continue;
+        }
+        throw error;
+      }
       encodedFrames += 1;
       if (encodedFrames % 30 === 0) {
         reportProgress(encodedFrames, frameCount); // same feedback contract as the worker path

@@ -271,10 +271,17 @@ export async function getSourceProxyBlobUrl(assetId: string): Promise<{ url: str
   }
 }
 
+/** Cause of the most recent `saveSourceProxy` null return — see `lastSourceProxySaveError`. */
+let lastSaveError: string | null = null;
+
 /** Persist a freshly transcoded proxy and return its session object URL. */
 export async function saveSourceProxy(record: Omit<SourceProxyRecord, "byteSize" | "savedAt" | "version">, blob: Blob): Promise<string | null> {
+  lastSaveError = null;
   const handle = await getHandle();
-  if (!handle) return null;
+  if (!handle) {
+    lastSaveError = "no OPFS handle (storage unavailable in this context)";
+    return null;
+  }
   try {
     const fileHandle = await handle.dir.getFileHandle(blobName(record.assetId), { create: true });
     const writable = await fileHandle.createWritable();
@@ -289,9 +296,23 @@ export async function saveSourceProxy(record: Omit<SourceProxyRecord, "byteSize"
     const url = URL.createObjectURL(blob);
     urlCache.set(record.assetId, url);
     return url;
-  } catch {
+  } catch (error) {
+    // DO NOT SWALLOW THIS. A bare `catch { return null }` here erased the cause of losing an ALREADY
+    // COMPLETED transcode (15-89s of 4K work), which is why the 2026-08-17 11x4K measurement could
+    // report only "proxy persist failed" and could not say whether it was a quota, a write or an index
+    // failure. The caller decides whether to retry; it can only decide sensibly if it knows why.
+    lastSaveError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     return null;
   }
+}
+
+/**
+ * Why the most recent {@link saveSourceProxy} returned null, or null if it did not fail. Read
+ * IMMEDIATELY after a null return — a single slot, not a log, since the only consumer is the build
+ * that just failed and a second failure's cause is more useful than a first's.
+ */
+export function lastSourceProxySaveError(): string | null {
+  return lastSaveError;
 }
 
 export async function removeSourceProxy(assetId: string): Promise<void> {

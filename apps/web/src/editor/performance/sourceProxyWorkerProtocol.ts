@@ -94,4 +94,17 @@ export type SourceProxyWorkerResponse =
       /** True decodable end from the source's sample table (see FrameProvider.decodableEndSeconds); undefined on the <video> fallback. */
       decodableEndSeconds?: number | undefined;
     }
-  | { type: "error"; message: string; aborted: boolean };
+  | {
+      type: "error";
+      message: string;
+      aborted: boolean;
+      /**
+       * TRANSIENT failure — the engine should re-queue this asset (bounded) rather than settle it.
+       * Carried as a FLAG rather than inferred from `message`, because the engine's retry decision
+       * must not depend on string-matching an error text that anyone may reword. Today's only source
+       * is a wedged-then-reset video encoder (`EncoderStallRecoveredError`), which is recoverable by
+       * construction; the worker cannot resume in place (see the comment at its own handler), so it
+       * hands the retry decision up.
+       */
+      retryable?: boolean;
+    };

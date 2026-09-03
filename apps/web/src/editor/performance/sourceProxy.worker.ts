@@ -82,7 +82,12 @@ scope.onmessage = (event) => {
       scope.postMessage({
         type: "error",
         message: error instanceof Error ? error.message : String(error),
-        aborted: aborted || error instanceof ProxyBuildAborted
+        aborted: aborted || error instanceof ProxyBuildAborted,
+        // A wedged-then-RESET encoder is recoverable by construction, and this worker cannot resume in
+        // place — see the note at the `addVideoFrame` call. Flag it so the engine re-queues the asset
+        // (bounded) instead of settling it as a permanent failure and stranding the clip on its
+        // original, which is what happened to 2 of 11 assets in the 2026-08-17 11x4K measurement.
+        retryable: error instanceof Error && error.name === "EncoderStallRecoveredError"
       });
     }
   })();
@@ -348,6 +353,14 @@ async function build(
             throw new Error(`decoder stopped producing frames at ~${(i / fps).toFixed(1)}s — aborted (frozen-tail guard)`);
           }
         }
+        // WEDGE RESUME DOES NOT TRANSFER TO THIS PATH, and pretending it does would be a defect.
+        // `EncoderStallRecoveredError.resumeFrameIndex` is the encoder's MUXED CHUNK COUNT. On the
+        // in-order paths (export-core, the main-thread transcode) that count equals the next frame
+        // index, so rewinding the loop to it is exact. Here runs are built OUT OF ORDER
+        // (playhead-first), so a muxed-chunk count does not identify a source frame at all and
+        // rewinding `i` to it could land outside the current run entirely. So this path does not
+        // resume: the error propagates, the engine re-queues the asset (bounded), and the rebuild is
+        // cheap because completed segments persist in the segment cache.
         await encoder.addVideoFrame(canvas, i);
         encodedFrames += 1;
         // Live feedback (2026-07-18, user report: silent builds read as a hang): a throttled progress
