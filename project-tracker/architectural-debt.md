@@ -5590,6 +5590,78 @@ ready" reliably becomes either "ready" or a stated failure.
 prevent working playback, which means denial count is not by itself a health signal on the warm path
 either.
 
+**UPDATE 2026-08-17 (e) — the three proxy failure modes traced in code (no browser needed), plus the
+cold-window communication state. Two are outright defects; one premise of ours was wrong.**
+
+**(1) `"Video encoder wedged and was reset — re-render from frame 0"` — a RECOVERABLE condition treated
+as terminal, and this is the clearest defect of the three.** `EncoderStallRecoveredError`
+(`export/video-encoder.ts:123`) exists precisely to be recovered from: the encoder is reset,
+`forceKeyFrame` is set, and the error carries `resumeFrameIndex` so the caller re-renders from there —
+its own doc says "making the recovery gapless — no held frame, no motion jump, no timestamp gap".
+`export-core.ts:566` catches it and does exactly that. **The proxy build path never catches it.**
+`drainQueue`'s handler (`sourceProxyEngine.ts:388`) re-queues only `RetryableProxyFetchError`; anything
+else is recorded `failed`, added to `settled`, and never attempted again this session
+(`sourceProxyEngine.ts:406`, `:412`). So a proxy build that hits a *designed-to-be-resumable* stall is
+permanently abandoned, and the asset is stranded on its 4K original for the rest of the session.
+Retries: NO. Surfaced: no (see (4)). Ever proxyable again: not until reload.
+
+**(2) `"proxy persist failed"` — a proxy that BUILT and was then lost, also terminal.** The transcode
+completed; `saveSourceProxy` (`sourceProxyStore.ts:275`) returned null, which it does by swallowing ANY
+exception in its OPFS write/index path into `catch { return null }` (`:292`), and `buildOne` turns that
+into `throw new Error("proxy persist failed")` (`sourceProxyEngine.ts:588`). Not a `RetryableProxyFetchError`,
+so same terminal path as (1) — except here the expensive work (a full 4K transcode, 15-89s) was already
+done and is thrown away. The failure cause is also erased by that bare `catch`, so nothing can tell a
+quota-exceeded from a locked file from a transient write error. Retries: NO. Surfaced: no.
+
+**(3) `"no local bytes"` x3 — a real precondition, not a race, but the failing precondition itself
+looks like a defect one layer up.** `buildOne` skips when the asset has neither bytes in the on-device
+store nor an `http(s)` `fileUrl` to fetch them from (`sourceProxyEngine.ts:436-443`) — a deliberate,
+documented path (a 2026-07-04 soak added the remote fetch precisely because real project assets were all
+skipping this way). For a LOCAL import, `fileUrl` is a `blob:` URL, so `remote` is null and the skip is
+immediate and terminal. That means the store lookup returned nothing for 3 of 11 locally-imported 4K
+assets (~120MB each, ~1.3GB total) — most plausibly an OPFS write/quota failure during import, which is
+worth confirming separately, since a local import whose bytes silently do not persist is a bigger
+problem than the proxy consequence. `skipped` is terminal in the same way as `failed`. Retries: NO.
+
+**(4) SURFACING — one of our premises was WRONG, and the truth is worse in a specific way.** The claim
+"they get a frozen preview and no explanation" is not accurate: `EditorPage.tsx:1493` registers a
+progress listener and DOES show a notice — *"Optimizing media in the background — N%. Playback may be
+softer until it finishes"*. Two real problems with it, though:
+- **It reports success unconditionally.** On drain it sets *"Media optimization finished — proxies
+  rebuilt at full quality"* whenever any build ran (`EditorPage.tsx:1496`), with no reference to
+  `failed`/`skipped` counts. In the N=11 arm that message would have claimed success over 2 failures and
+  3 skips. A notice that says "finished, at full quality" when 6 of 11 assets are stranded on their
+  originals is worse than silence.
+- **"Playback may be softer" describes the 1080p case.** On 4K the measured reality is a preview frozen
+  100% of the time (update (c)), not softer.
+- Per-asset state exists (`getSourceProxyState`, with a `failed` member and a comment saying it is there
+  so "a frozen preview reads as 'proxy not ready' rather than 'the app is broken'") but is consumed in
+  exactly ONE place: `editor/flarex/FlarexSourceViewer.tsx`. The timeline and the preview — where this
+  freeze happens — surface none of it.
+
+**(5) SERIALISATION IS DELIBERATE, and there is a scar on file for it.** Builds run strictly one at a
+time, and each one waits for an idle window first (`await new Promise(resolve => whenIdle(resolve))`,
+`sourceProxyEngine.ts:374`) — the comment states the intent: "so an active editing burst always wins the
+main thread". They additionally suspend entirely while the transport is playing
+(`waitWhileSuspended`/`setSourceProxyBuildSuspended`, `:185-198`; EditorPage suspends whenever
+`isPlaying`), which the file attributes to the build-only "plays ~4s then freezes" report. So this is
+contention avoidance by design, not an accident — **do not parallelise it** without reopening that
+report. NOT CHANGED here, per instruction; established only.
+
+**But (5) interacts viciously with (1)-(3) and that interaction is the thing to fix first.** Playing 4K
+originals freezes the preview; playing also SUSPENDS the proxy builds that would end the freeze. A user
+who reacts to a frozen preview the obvious way — pressing play again, scrubbing, trying — extends the
+window that is causing it. Nothing tells them that waiting is the winning move.
+
+**Recommendation on tell-vs-wait (STOP 2), argued from the measurements rather than deferred**: TELL,
+never block — and the reliability findings above are what decide it. A readiness gate would be a
+permanent block on any asset that hits (1), (2) or (3), which at 11x4K was 6 of 11. The specific changes
+the data supports, in order: (a) make (1) retry, since it is already designed to be resumable; (b) stop
+(2) discarding a completed transcode, and stop swallowing its cause; (c) make the drain notice report
+`failed`/`skipped` honestly instead of claiming full-quality success; (d) scale the wording to the
+measured severity — at 4K "playback may be softer" is false; (e) surface per-asset `failed`/`skipped`
+where the freeze is (timeline/preview), not only in the Flarex source viewer. None built here.
+
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
   frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and
