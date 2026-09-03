@@ -64,7 +64,7 @@ import {
   type ResourceHandle,
   type ColorEffectLight,
 } from "@orreris/shared";
-import { resolveFontFaceCss } from "../lib/font-install";
+import { installPinnedFont, resolveFontFaceCss } from "../lib/font-install";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { KERNEL_FLAGS, readKernelFlag } from "../playback/kernel-flags";
 import { flarexTraceEnabled, traceFlarexChange } from "../playback/flarex-trace";
@@ -548,6 +548,21 @@ export interface ScenePreviewCanvasProps {
   prewarmTransitionIds?: readonly string[] | undefined;
 }
 
+/**
+ * DEBT-028. `decideSceneReadiness`'s paused branch exempts text/shape not-readiness from holding the
+ * frame — the R1 scrub-lag rationale (a pending raster mid-typing must not freeze the whole viewer),
+ * still live for the real editor. `/editor/__preview-fixture` is the one route that is never the real
+ * editor: it exists solely for automated capture (`render:compare:pixels`), nothing there is ever
+ * mid-typing, and the exemption instead lets the harness screenshot a frame with a text/shape raster
+ * still resolving in the background — the mechanism behind DEBT-028's `flarex-generators` divergence.
+ * Scoped to the pathname rather than a new prop threaded through every `ScenePreviewCanvas` mount site,
+ * because this is the one caller that needs to differ and every other mount stays exactly as it was.
+ */
+function isStrictCaptureReadinessRoute(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.location.pathname.includes("__preview-fixture");
+}
+
 export function ScenePreviewCanvas({
   layers,
   width,
@@ -1024,7 +1039,15 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // ADR-023 S8: `resolveFontFaceCss` embeds a pinned face's BYTES in a path-text SVG. An SVG
       // drawn as an image is an isolated document and cannot see this page's `document.fonts`, so
       // without it a curved run would render in a fallback — the silent substitution D3 forbids.
-      rasterizerRef.current = new SceneTextRasterizer(requestDraw, { resolveAssetUrl, resolveFontFaceCss });
+      // DEBT-029: `awaitPinnedFontInstall` hands the raster this page's OWN install promise —
+      // `installPinnedFont` is memoized per ref key, so this call joins the same install
+      // `installCompositionFonts` already kicked off (or starts it, if this layer somehow beat that
+      // effect) rather than racing document.fonts against it. See the doc in text-shape.ts.
+      rasterizerRef.current = new SceneTextRasterizer(requestDraw, {
+        resolveAssetUrl,
+        resolveFontFaceCss,
+        awaitPinnedFontInstall: (ref, axes) => installPinnedFont(ref, axes)
+      });
       // Repaint the current frame after a (re)build — including a recovery rebuild (recoveryTick), so a paused
       // preview immediately shows the restored GPU scene instead of a blank canvas until the next input change.
       requestDraw();
@@ -1693,6 +1716,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       allStaleness,
       nowMs: now,
       targetTimeSeconds: t,
+      strictNotReadyHold: isStrictCaptureReadinessRoute(),
     });
     if (readiness.hold) {
       noteCoherence(

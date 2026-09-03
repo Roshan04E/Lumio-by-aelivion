@@ -70,7 +70,7 @@ import {
   type TransitionSpec,
   type TransitionWindowSides,
 } from "@orreris/shared";
-import { resolveFontFaceCss } from "../lib/font-install";
+import { installPinnedFont, resolveFontFaceCss } from "../lib/font-install";
 import { getExportSingleContext, getRegionPassesEnabled } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
 import { clipSourceKey, graphicSourceKey, type FrameProvider } from "./source-decoder";
@@ -200,9 +200,12 @@ export class SceneFrameCompositor {
     // No `onReady` callback: the export AWAITS `rasterizer.ensure()` per frame, so there's no draw loop to
     // re-arm (unlike the editor's fire-and-forget `get()`).
     // ADR-023 S8 — see ScenePreviewCanvas: a path-text SVG carries its own faces or declines to draw.
+    // DEBT-029: same hook as ScenePreviewCanvas — cheap and correct even though export's own D3 gating
+    // is expected to have installed every pinned font before the first `ensure()` call.
     this.rasterizer = new SceneTextRasterizer(undefined, {
       resolveAssetUrl: options?.resolveAssetUrl,
-      resolveFontFaceCss
+      resolveFontFaceCss,
+      awaitPinnedFontInstall: (ref, axes) => installPinnedFont(ref, axes)
     });
     this.nestedGroups = options?.nestedGroups;
     this.rawJunctionLayers = options?.rawJunctionLayers ?? [];

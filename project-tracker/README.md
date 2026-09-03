@@ -28,6 +28,16 @@ body immediately below the field block: `**Header updated <date>:** was "<old te
 correction is preserved exactly the way the register already preserves everything else — the
 difference is that the header a reader sees first now agrees with the entry's own conclusion.
 
+## DEBT numbers are taken against every live branch (2026-08-16)
+
+Two branches independently registered a different DEBT-022 the same day (`method-3-gpu-compositor`
+and `artifact/adr021-step3`) — parallel sessions on parallel branches is the normal case here now,
+not an edge case, so "the next free number" must be checked against every branch with tracker
+changes in flight, not just the one in front of you. When a merge surfaces a collision, keep the
+number already used by whichever entry is further along (shipped, retired, or otherwise load-bearing
+elsewhere) and renumber the other — don't silently drop either one, and fix every cross-reference to
+the renumbered entry, not just its own header.
+
 ## Entry format
 
 ```

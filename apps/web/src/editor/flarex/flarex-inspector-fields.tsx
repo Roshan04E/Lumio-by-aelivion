@@ -165,8 +165,13 @@ function colorSectionActive(params: Record<string, unknown>, keys: string[]): bo
   });
 }
 
-/** Params the CANVAS owns, not the inspector — structural payloads with no meaningful text editor. */
-const STRUCTURAL_PARAMS = new Set(["group.members"]);
+/**
+ * Params the CANVAS owns, not the inspector — structural payloads with no meaningful text editor.
+ * `text.fontRefJson` (DEBT-028/ADR-023 D1): a JSON-stringified `FontRef`, the `params` convention for
+ * a non-scalar value (same shape as `effectParams`). No picker writes it yet — fixtures/tests set it
+ * directly via `JSON.stringify(catalogueFontRef(...))` — so a raw-JSON row would only ever be noise.
+ */
+const STRUCTURAL_PARAMS = new Set(["group.members", "text.fontRefJson"]);
 
 const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "text.strokeColor", "text.shadowColor", "backdrop.color", "background.color"]);
 /**

@@ -36,9 +36,9 @@ import {
   tileSpans,
   type TextClusterAnimation
 } from "../text-cluster-animation";
-import { isPinnedFontRef } from "../fonts";
-import { getCompositionFontAxesSource, getCompositionFontRef } from "../composition-style";
-import { fontAxisInstanceFamily, fontVariationSettingsCss, resolveFontVariationAxes } from "../font-variation";
+import { isPinnedFontRef, type PinnedFontRef } from "../fonts";
+import { getCompositionFontAxesSource, getCompositionFontRef, getCompositionRunFontRef } from "../composition-style";
+import { fontAxisInstanceFamily, fontVariationSettingsCss, resolveFontVariationAxes, type FontVariationAxes } from "../font-variation";
 import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
 
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
@@ -80,6 +80,25 @@ export type OverlayStyleOptions = Pick<CompositionStyleOptions, "resolveAssetUrl
         instance: { instanceFamily: string; axisSettings: string | undefined }
       ) => Promise<string | undefined> | string | undefined)
     | undefined;
+  /**
+   * DEBT-029 — await the app's own in-flight install of a PINNED face, before `ensureOverlayFonts`
+   * asks `document.fonts` anything about it.
+   *
+   * `installCompositionFonts` (the app) and `ensureOverlayFonts` (this file) are two independent
+   * routes to "is this font ready", and `document.fonts.check/load` is not a bridge between them:
+   * `fonts.load(spec)` resolves against faces ALREADY in the set, so a spec naming a family whose
+   * `FontFace` has not been `document.fonts.add()`-ed yet does not wait for one to arrive — it
+   * resolves immediately having found nothing to load. If the raster's own font-readiness check runs
+   * before the app's install finishes registering the face, `ensureOverlayFonts` returns having
+   * "waited" on nothing, `ctx.font` silently substitutes, and the wrong raster is cached and shown as
+   * ready — corrected only later, incidentally, by the `loadingdone` listener re-arming the draw loop.
+   * Handing back the SAME promise the app started the install with closes that gap: the app is the
+   * only thing that knows an install is in flight at all, so it is the only thing that can supply it.
+   *
+   * Omitted (worker/export): every pinned font is resolved and registered before the first `ensure()`
+   * call there, so there is nothing in flight to wait on and `check()/load()` already succeed.
+   */
+  awaitPinnedFontInstall?: ((ref: PinnedFontRef, axes: FontVariationAxes | undefined) => Promise<unknown> | undefined) | undefined;
 };
 
 /**
@@ -148,10 +167,27 @@ export function ensureOverlayFonts(layer: TimelineLayer, t: number, styleOptions
   // (`run.fontRef`) needs it to normalize against, same as `getCompositionTextRunStyle`'s other
   // callers below.
   const layerFontRef = getCompositionFontRef(layer);
+
+  // DEBT-029: collect the app's own install promise for every PINNED face this draw needs, so the
+  // `check()/load()` below runs only after each face is genuinely `document.fonts.add()`-ed — see the
+  // doc on `awaitPinnedFontInstall`. A run with no ref of its own inherits the layer's, already added.
+  const installWaits: Promise<unknown>[] = [];
+  const awaitedKeys = new Set<string>();
+  const awaitInstall = (ref: FontRef, axes: FontVariationAxes | undefined) => {
+    if (!styleOptions.awaitPinnedFontInstall || !isPinnedFontRef(ref)) return;
+    const key = `${ref.source}|${ref.fileHash}|${ref.weight}|${ref.style}|${fontVariationSettingsCss(axes) ?? ""}`;
+    if (awaitedKeys.has(key)) return;
+    awaitedKeys.add(key);
+    const wait = styleOptions.awaitPinnedFontInstall(ref, axes);
+    if (wait) installWaits.push(wait.catch(() => undefined));
+  };
+  awaitInstall(layerFontRef, resolveFontVariationAxes(getCompositionFontAxesSource(layer)));
+
   // Every RUN's font, not just the layer's: a rich-text run can carry its own family/weight/size, and
   // a run-level face left unawaited is the same defect scoped to one word.
   for (const run of getVisibleTextRuns(layer, t)) {
     if (!run.text) continue;
+    if (run.fontRef || run.fontFamily) awaitInstall(getCompositionRunFontRef(run, layerFontRef), undefined); // S9a: run-level pins carry no axis instance
     const runStyle = getCompositionTextRunStyle(
       run,
       {
@@ -171,19 +207,27 @@ export function ensureOverlayFonts(layer: TimelineLayer, t: number, styleOptions
       })
     );
   }
-  if (!specs.size) return;
 
   // A malformed shorthand makes check() THROW rather than return false; treat that as "cannot tell"
   // and fall through to load(), which reports the same problem by rejecting (and is caught below).
-  const pending = [...specs].filter((spec) => {
-    try {
-      return !fonts.check(spec);
-    } catch {
-      return true;
-    }
-  });
-  if (!pending.length) return;
-  return Promise.all(pending.map((spec) => fonts.load(spec).catch(() => undefined))).then(() => undefined);
+  const checkAndLoadPending = (): Promise<void> | void => {
+    if (!specs.size) return;
+    const pending = [...specs].filter((spec) => {
+      try {
+        return !fonts.check(spec);
+      } catch {
+        return true;
+      }
+    });
+    if (!pending.length) return;
+    return Promise.all(pending.map((spec) => fonts.load(spec).catch(() => undefined))).then(() => undefined);
+  };
+
+  // Install waits go FIRST and unconditionally, not merged into the same Promise.all as the check/load
+  // pass below: `check()`/`load()` must not run until every pinned face is actually registered, or the
+  // race this hook exists to close simply moves from "unawaited" to "awaited in parallel with itself".
+  if (installWaits.length) return Promise.all(installWaits).then(() => checkAndLoadPending() ?? undefined);
+  return checkAndLoadPending();
 }
 
 // ─── Texture fill (D2) ───────────────────────────────────────────────────────────────────────────

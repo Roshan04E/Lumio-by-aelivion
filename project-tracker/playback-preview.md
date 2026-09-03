@@ -2342,6 +2342,37 @@ performance language is not evidence that the cause is performance.
 **Gated:** flarex:test (+3), pixel gate flarex fixtures 0.000% (generators 2×), compproxy, cache-gate,
 coherence 5666/5666, both typechecks.
 
+**UPDATE 2026-08-16 — this closes, on different evidence than either mechanism first proposed for it.
+Confirmed by re-testing the pinned fixture repeatedly, per the founder's own instruction to check
+rather than assume.**
+
+Two closes, not one, and they are different mechanisms:
+
+1. **The exact shape this entry names — "one side has the generator, the other does not" — is closed
+   by `strictNotReadyHold`** (`scene-readiness.ts`, shipped earlier the same session as DEBT-028/029).
+   `decideSceneReadiness`'s paused branch exempted text/shape not-readiness from holding the frame at
+   all (the live-editor R1 scrub-lag rationale); the capture harness route now opts OUT of that
+   exemption, so a genuinely MISSING raster can no longer reach the screenshot. This is precisely a
+   fix for "one side has nothing."
+2. **DEBT-028/029 found a SEPARATE, categorical mechanism that fits "alternates between wildly wrong
+   and exactly right" better than a smooth timing race ever could — font-availability/fallback state.**
+   `flarex-generators` requested `fontFamily: "Inter"`, unpinned and not installed anywhere either
+   renderer's page reaches; browser font-substitution for a family that resolves to nothing is not a
+   graded degradation, it is a discrete pick — the SAME substitute twice, or a DIFFERENT one, with
+   nothing in between. That is the right shape for "86.895% or 0.000%, nothing observed between them,"
+   which a near-miss timing race would not usually produce (a race that is *almost* late tends to show
+   partial/graded damage, not a clean binary split). Pinning the font (DEBT-029) removes the
+   OPEN-ENDED version of this — the fallback is no longer a browser-dependent guess — and reduces the
+   fixture to a smaller, BOUNDED font-install-timing race (DEBT-029, still open, capped well under 1%
+   in every reading this session), not the unbounded either-exactly-right-or-wildly-wrong pattern this
+   entry recorded.
+
+**Not claimed: that (2) is a re-derivation of the EXACT July 2026 cause**, since that state cannot be
+re-run today — the fixture, the compiler and the font-install pipeline have all moved since. What IS
+established directly: the LARGE-magnitude, unbounded flip this entry describes has not reproduced once
+in several dozen runs this session (max observed ~1%, always with a pinned font in place), across both
+of the mechanisms now closed. Practically, this entry's symptom is gone; DEBT-029 tracks what remains.
+
 
 ## v33c — the playhead lies during PLAYBACK; pause is only where the truth arrives (2026-07-29)
 

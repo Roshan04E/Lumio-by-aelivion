@@ -1,5 +1,12 @@
 import type { ProjectGraph, SourceAsset, TimelineLayer, TransitionKind } from "./types";
-import { applyCaptionTrackToComposition, captionStylePresets, createCaptionTrack, parseTranscriptInput } from "./captions";
+import {
+  applyCaptionTrackToComposition,
+  captionPresetLook,
+  captionStylePresets,
+  createCaptionTrack,
+  parseTranscriptInput,
+  type CaptionStylePreset
+} from "./captions";
 import { createBoxMask } from "./clip-masks";
 import { LEGACY_PROJECT_COLOR_SETTINGS, type ColorEffectLight } from "./color/color-management";
 import { registerFragmentEffect } from "./color/fragment-effects/registry";
@@ -7,7 +14,10 @@ import { SHADER_MANIFEST_ID_PARAM_KEY } from "./plugin-effect-adapter";
 import { createFlarexNode } from "./flarex/node-defs";
 import { createFlarexComp } from "./flarex/registry";
 import type { FlarexComp } from "./flarex/types";
+import { catalogueFontRef } from "./font-catalogue";
+import { isPinnedFontRef, type FontRef } from "./fonts";
 import type { TrackingPathArtifactData } from "./masks";
+import { textStylePreset } from "./text-style-schema";
 
 const fixtureImageSvg = encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
@@ -1108,7 +1118,12 @@ function buildFlarexGeneratorsComp(): FlarexComp {
   text.params = {
     ...text.params,
     content: "FLAREX",
-    fontFamily: "Inter",
+    // DEBT-028: was raw `fontFamily: "Inter"` — "Inter" is not installed anywhere either renderer's
+    // page reaches, and the two Chrome launches picked DIFFERENT fallback faces for it (0.691%,
+    // stable across runs). Pinned to a BUNDLED catalogue face so both renderers install the same
+    // bytes instead of guessing a fallback — see `collectFlarexGeneratorTextLayers`.
+    fontFamily: "Arimo",
+    fontRefJson: JSON.stringify(catalogueFontRef("Arimo", 700)),
     fontSize: 140,
     fontWeight: 700,
     color: "#ffd166",
@@ -1141,9 +1156,14 @@ function buildFlarexTextStrokeShadowComp(): FlarexComp {
   text.params = {
     ...text.params,
     content: "OUTLINE",
-    fontFamily: "Inter",
+    // DEBT-028: same fix as `buildFlarexGeneratorsComp` — raw "Inter" diverged even MORE here
+    // (1.759%, masked by this fixture's loose tolerance bar until re-derived). 800 has no exact
+    // catalogue cut; `catalogueFontRef` snaps to Arimo's nearest (700) and `fontWeight` is set to
+    // match rather than naming a weight that isn't the one actually pinned.
+    fontFamily: "Arimo",
+    fontRefJson: JSON.stringify(catalogueFontRef("Arimo", 800)),
     fontSize: 150,
-    fontWeight: 800,
+    fontWeight: 700,
     color: "#ffffff",
     align: "center",
     x: 0.5,
@@ -2149,6 +2169,65 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
   }
 }
 
+/**
+ * ADR-023 D1, structural (DEBT-028/029). A fixture that names a text layer's font by CSS string
+ * instead of a pinned `FontRef` cannot make a claim about pixels — renderer font-fallback resolution
+ * for a family that resolves to nothing is not guaranteed to agree, and it did not: `flarex-generators`
+ * and `flarex-text-stroke-shadow` both diverged (0.691%/1.759%) on raw `fontFamily: "Inter"`, and the
+ * second one PASSED, silently, under a tolerance bar wide enough to absorb the noise.
+ *
+ * A convention ("pin your fixture's fonts") does not hold on its own — this repo already proved that
+ * with two unpinned fixtures sitting in the same file this function is now in. So this refuses to
+ * BUILD a fixture carrying an unpinned text layer, rather than handing back a fixture that can silently
+ * produce a number. `{source:"system"}` is still legal on a real PROJECT (D1a: a legacy project's font
+ * never moves automatically) — it is not legal here, because a fixture's entire job is the pixel claim
+ * a system ref cannot back.
+ *
+ * No exceptions. The caption track carried one from 2026-08-16 to 2026-08-17 (pinning it exposed
+ * DEBT-029's web-preview font-install race to fixtures that shared nothing but the caption), removed
+ * once DEBT-029's fix (`awaitPinnedFontInstall`) made the pin safe — see the caption construction site
+ * above for the re-pin and DEBT-029's tracker entry for the close. This function now refuses EVERY
+ * unpinned text layer with no carve-out, which is the actual claim this gate exists to make.
+ */
+function assertFixtureFontsArePinned(graph: ProjectGraph): void {
+  const offenders: string[] = [];
+  const checkLayers = (layers: readonly TimelineLayer[], where: string): void => {
+    for (const layer of layers) {
+      if (layer.type !== "text") continue;
+      if (!layer.fontRef || !isPinnedFontRef(layer.fontRef)) {
+        offenders.push(`${where}/${layer.id} (fontFamily: "${layer.fontFamily ?? "?"}")`);
+      }
+    }
+  };
+  checkLayers(graph.composition!.tracks.flatMap((track) => track.layers), "composition");
+  for (const [compId, nested] of Object.entries(graph.compositions ?? {})) {
+    checkLayers(nested.tracks.flatMap((track) => track.layers), `compositions.${compId}`);
+  }
+  for (const [compId, comp] of Object.entries(graph.flarexComps ?? {})) {
+    for (const node of Object.values(comp.nodes)) {
+      if (node.type !== "text") continue;
+      const raw = typeof node.params.fontRefJson === "string" ? node.params.fontRefJson : "";
+      let ref: FontRef | undefined;
+      try {
+        ref = raw ? (JSON.parse(raw) as FontRef) : undefined;
+      } catch {
+        ref = undefined;
+      }
+      if (!ref || !isPinnedFontRef(ref)) {
+        offenders.push(`flarexComps.${compId}/${node.id} (fontFamily: "${String(node.params.fontFamily ?? "?")}")`);
+      }
+    }
+  }
+  if (!offenders.length) return;
+  throw new Error(
+    `render-comparison fixture refused to load: ${offenders.length} text layer(s)/node(s) name a font ` +
+      `by raw CSS string instead of a pinned FontRef (DEBT-028) — ${offenders.join(", ")}. ` +
+      `Pin with catalogueFontRef(family, weight) (prefer a BUNDLED catalogue family: no mirror write, ` +
+      `no network) and, for a Flarex Text+ node, set fontRefJson: JSON.stringify(ref) on the node's ` +
+      `params. A fixture that cannot pin its font cannot claim its pixels are comparable.`
+  );
+}
+
 export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = "default") {
   const variant = variantFor(key);
   const imageAsset: SourceAsset = {
@@ -2327,7 +2406,12 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     text: variant.textContent ?? "HI",
     startSeconds: 0,
     durationSeconds: 12,
-    fontFamily: "Arial",
+    // DEBT-028: was raw `fontFamily: "Arial"` — Arial happens to be a real system font on the usual
+    // dev box, which is exactly the unpinned-but-lucky state that made "Inter" (not installed) diverge
+    // instead of merely being risky. Pinned so this fixture's claim does not depend on what the render
+    // machine happens to have.
+    fontFamily: "Arimo",
+    fontRef: catalogueFontRef("Arimo", 400),
     fontSize: variant.textFontSize ?? 110,
     textWidthPercent: 86,
     textAlign: variant.textAlignOverride ?? "center",
@@ -2420,8 +2504,29 @@ New Drop
 
 00:00:01.400 --> 00:00:03.200
 Save this style now`);
-  const captionStyle = captionStylePresets[0]!;
-  const captionTrack = createCaptionTrack(transcript, captionStyle.id, "new, drop, save");
+  /**
+   * DEBT-029, closed 2026-08-17. Pinning this was tried once before, reverted (it exposed the
+   * web-preview font-install race to the whole fixture suite), and re-tried now that the race itself
+   * is fixed (`awaitPinnedFontInstall`, `text-shape.ts`) — 4 consecutive full/narrowed sweeps at
+   * 0.000% before this change even touched captions, which is what makes re-trying it now sound.
+   *
+   * A LOCAL preset object, not a mutation of `captionStylePresets` — that array's own doc is explicit
+   * that "a richer fontRef added while we are in here would silently repaint captions in work someone
+   * already finished", and `caption:golden` locks the shipped six byte-for-byte. `captionPresetLook`
+   * resolves the real preset's envelope (through the schema's own migration reader, matching how
+   * `createCaptionLayer` reads any preset) and only `fontFamily`/`fontRef` are overridden on top —
+   * every other field (color, stroke, size) stays exactly what `captionStylePresets[0]` says, so this
+   * fixture's caption keeps its real look and only stops naming an unpinned font.
+   */
+  const pinnedCaptionPreset: CaptionStylePreset = {
+    ...captionStylePresets[0]!,
+    envelope: textStylePreset({
+      ...captionPresetLook(captionStylePresets[0]!),
+      fontFamily: "Arimo",
+      fontRef: catalogueFontRef("Arimo", 400)
+    })
+  };
+  const captionTrack = createCaptionTrack(transcript, pinnedCaptionPreset.id, "new, drop, save");
 
   // Transition fixture (Phase 4.2): two same-track image clips joined by a crossDissolve, sampled
   // MID-transition (the comp frame renderComparisonFrameSeconds = 0.45s is inside the 0.4–0.8s window).
@@ -2605,7 +2710,7 @@ Save this style now`);
     editableFields: {
       transcript,
       captionTrack,
-      captionStyle: captionStyle.id
+      captionStyle: pinnedCaptionPreset.id
     },
     version: 1,
     composition: {
@@ -2680,13 +2785,13 @@ Save this style now`);
   const compositionWithCaptions =
     useTextFixture || variant.soloMedia || variant.transition || nestedFixture
       ? graph.composition!
-      : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
+      : applyCaptionTrackToComposition(graph.composition!, captionTrack, pinnedCaptionPreset);
+
+  const finalGraph: ProjectGraph = { ...graph, composition: compositionWithCaptions };
+  assertFixtureFontsArePinned(finalGraph);
 
   return {
-    graph: {
-      ...graph,
-      composition: compositionWithCaptions
-    },
+    graph: finalGraph,
     assets: [imageAsset, mismatchedAspectAsset, hostTransformMediaAsset, fillTextureAsset],
     currentTime: renderComparisonFrameSeconds
   };

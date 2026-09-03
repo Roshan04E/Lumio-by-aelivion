@@ -142,6 +142,27 @@ export function catalogueFaces(): Array<{ family: string; category: CatalogueFam
 }
 
 /**
+ * The bundled copy of a pinned catalogue hash, if the catalogue ships one.
+ *
+ * A catalogue `FontRef` names a store (`fontStoreKeyFor` → `fonts/catalogue/<hash>`), but that store
+ * is not the only place the hash's bytes live: `CatalogueFace.file` says this repo ALSO ships them,
+ * at a path relative to each app's public root. Resolving a pinned ref is therefore a question —
+ * "does this hash have a bundled copy?" — not a single formula, and answering it by re-hashing the
+ * mirror's key would put the store back in the loop the bundled path exists to skip.
+ *
+ * Matched by `fileHash`, not by family/weight/style: those describe what a picker showed, and a ref
+ * that survived normalization carries only the hash as its render identity (D1).
+ */
+export function catalogueFileForHash(fileHash: string): string | undefined {
+  for (const entry of fontCatalogue) {
+    for (const face of entry.faces) {
+      if (face.fileHash === fileHash) return face.file;
+    }
+  }
+  return undefined;
+}
+
+/**
  * The `FontRef` a pick writes. **This one function is what the whole S2 contract hangs off**: it
  * emits a `fileHash`, so the manifest pins bytes rather than a name, so the worker can install them
  * or abort. A picker that wrote `fontFamily: "Anton"` would leave every S2 obligation unreachable

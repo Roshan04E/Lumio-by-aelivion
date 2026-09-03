@@ -16,6 +16,8 @@
  */
 
 import { compositionMediaDefaults } from "../composition-style";
+import type { CompositionLayerStyleInput } from "../composition-style";
+import { isPinnedFontRef, type FontRef } from "../fonts";
 import { getLayerSpeed, getSpeedRamp } from "../timeline";
 import type { TimelineComposition, TimelineLayer } from "../types";
 import {
@@ -132,6 +134,27 @@ export function isFlarexGeneratorVirtualLayer(layer: Pick<TimelineLayer, "type">
 }
 
 /**
+ * A Text+ node's pinned font, if it carries a well-formed one.
+ *
+ * `fontRefJson` is the `params` convention for a non-scalar value (`FlarexNode.params` is flat
+ * scalars only — see `effectParams`'s precedent): a JSON-stringified {@link FontRef}, empty string
+ * when unset. Shared between {@link buildFlarexGeneratorLayer} (what the raster draws with) and
+ * {@link collectFlarexGeneratorTextLayers} (what the font-install scan sees), so the two can never
+ * disagree about what a node's pin means. Only a PINNED ref is worth returning — a malformed value or
+ * a `{source:"system"}` ref carried here would mean nothing (D1a: system refs have no bytes to pin).
+ */
+function flarexTextNodeFontRef(params: Record<string, string | number | boolean>): FontRef | undefined {
+  const raw = params.fontRefJson;
+  if (typeof raw !== "string" || !raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as FontRef;
+    return isPinnedFontRef(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The virtual layer backing one generator node.
  *
  * Deliberately NEUTRAL in transform and opacity: placement (Text x/y) and Background opacity are
@@ -164,6 +187,7 @@ function buildFlarexGeneratorLayer(
   };
   if (kind === "text") {
     const align = str("align", "center");
+    const fontRef = flarexTextNodeFontRef(params);
     return {
       ...base,
       type: "text",
@@ -181,6 +205,7 @@ function buildFlarexGeneratorLayer(
       shadowColor: str("shadowColor", "#000000"),
       shadowOffsetX: num("shadowOffsetX", 0),
       shadowOffsetY: num("shadowOffsetY", 0),
+      ...(fontRef ? { fontRef } : {}),
     };
   }
   return {
@@ -193,6 +218,39 @@ function buildFlarexGeneratorLayer(
     heightPercent: 100,
     borderRadius: 0,
   };
+}
+
+/**
+ * Every Text+ node across every comp that pins a font, shaped just enough for
+ * `collectPinnedFontRefs`/`collectPinnedFontInstances` to read — id/family/weight/fontRef, nothing a
+ * raster needs. ADR-023 D3's font-install scan (`installCompositionFonts` on the web side,
+ * `resolveManifestFonts` on the worker side) only ever walked `composition.tracks`, which a Text+
+ * node's virtual layer is not part of: it is synthesized on demand, deep inside scene-building, by
+ * {@link buildFlarexGeneratorLayer}. A node that pinned a font would therefore never get it INSTALLED
+ * — `ensureOverlayFonts`'s `document.fonts.load()` can only wait on a `FontFace` something else already
+ * registered, and nothing ever would have. This is that missing "something else": both install scans
+ * now concat this list onto their own, so a Text+ node's pin reaches `document.fonts` the same way a
+ * timeline text layer's does.
+ */
+export function collectFlarexGeneratorTextLayers(
+  flarexComps: Record<string, FlarexComp> | undefined,
+): CompositionLayerStyleInput[] {
+  if (!flarexComps) return [];
+  const out: CompositionLayerStyleInput[] = [];
+  for (const comp of Object.values(flarexComps)) {
+    for (const node of Object.values(comp.nodes)) {
+      if (node.type !== "text") continue;
+      const fontRef = flarexTextNodeFontRef(node.params);
+      if (!fontRef) continue; // nothing pinned — nothing for the install scan to do
+      out.push({
+        id: `__flarex_font_scan_${comp.id}_${node.id}`,
+        fontFamily: typeof node.params.fontFamily === "string" ? node.params.fontFamily : "Inter",
+        fontWeight: typeof node.params.fontWeight === "number" ? node.params.fontWeight : 700,
+        fontRef,
+      });
+    }
+  }
+  return out;
 }
 
 /**

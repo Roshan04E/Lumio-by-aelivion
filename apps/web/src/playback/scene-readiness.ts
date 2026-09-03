@@ -76,6 +76,17 @@ export interface ReadinessDecisionInputs {
   readonly allStaleness: Readonly<Record<string, number | null>>;
   readonly nowMs: number;
   readonly targetTimeSeconds: number;
+  /**
+   * DEBT-028. The paused branch below exempts text/shape not-readiness from holding the frame at all
+   * (the R1 scrub-lag rationale, `ScenePreviewCanvas.tsx`: a pending text raster mid-typing must not
+   * freeze the whole viewer). That reason is still live for the real editor and this flag must not
+   * touch it — it exists ONLY so a non-interactive caller (today: the `__preview-fixture` route
+   * `render:compare:pixels` screenshots, where nothing is ever mid-typing) can opt OUT of the
+   * exemption and hold on a pending text/shape raster the same way a `playing` composite already
+   * does, at that layer's own cap (short for text/shape, long for media — unchanged). Defaults to
+   * `false`, i.e. today's exact behaviour, everywhere this is not explicitly set.
+   */
+  readonly strictNotReadyHold?: boolean;
 }
 
 export interface ReadinessDecision {
@@ -97,7 +108,10 @@ export interface ReadinessDecision {
  * no coherence policy at all and `tolerateLag` stood in for one.
  */
 export function decideSceneReadiness(inputs: ReadinessDecisionInputs): ReadinessDecision {
-  const heldIds = inputs.playing ? inputs.notReadyIds : inputs.notReadyIds.filter(inputs.isMediaLayerId);
+  const heldIds =
+    inputs.playing || inputs.strictNotReadyHold
+      ? inputs.notReadyIds
+      : inputs.notReadyIds.filter(inputs.isMediaLayerId);
   const notReadyHold = heldIds.some(
     (id) =>
       inputs.nowMs - (inputs.blockedSince.get(id) ?? inputs.nowMs) <

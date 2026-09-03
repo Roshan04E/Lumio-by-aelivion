@@ -646,14 +646,23 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
       shadowColor: z.string().default("#000000"),
       shadowOffsetX: num(0, -200, 200),
       shadowOffsetY: num(0, -200, 200),
+      // ADR-023 D1, extended to Text+ (2026-08-16). `fontFamily` alone is a WISH, not a render
+      // identity — the fixture set proved it: `fontFamily: "Inter"` diverged between renderers because
+      // "Inter" is not installed anywhere either page reaches. A JSON-stringified `FontRef` (the
+      // `params` convention for a non-scalar value — see `effectParams`), empty string when unset =
+      // legacy/unpinned. Kept out of the inspector (`STRUCTURAL_PARAMS`, `text.fontRefJson`) because a
+      // raw JSON blob is not a property row; the picker that will WRITE this is not built yet, and
+      // fixtures/tests set it directly via `JSON.stringify(catalogueFontRef(...))`.
+      fontRefJson: z.string().default(""),
     }).strict(),
     // Only PLACEMENT animates. x/y are applied by the compiler onto the composite quad, so they
     // animate for free; `fontSize` cannot — it changes the rasterized glyphs, and the raster is built
     // once per content change (not per frame) by the shared text rasterizer. Stroke/shadow are the same
     // shape of param as fontSize (they change the raster, not the quad), so they stay unkeyframeable too.
     keyframeable: ["x", "y"],
-    // D11/T-8 — the family this node rasterizes with is part of its identity.
-    fontParams: ["fontFamily"],
+    // D11/T-8 — the family this node rasterizes with is part of its identity, and so is WHICH bytes
+    // that family resolves to.
+    fontParams: ["fontFamily", "fontRefJson"],
     phase: 1,
   },
   background: {

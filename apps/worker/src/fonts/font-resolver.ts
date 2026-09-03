@@ -24,8 +24,11 @@
 import { getObjectStream, isR2StorageEnabled, resolveStorageConfig } from "@orreris/storage";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   canServeFont,
+  catalogueFileForHash,
+  collectFlarexGeneratorTextLayers,
   collectPinnedFontInstances,
   fontAxisInstanceFamily,
   fontObjectKey,
@@ -33,9 +36,15 @@ import {
   FontResolutionError,
   fontStoreKeyFor,
   type CompositionLayerStyleInput,
+  type FlarexComp,
   type InstalledFontFace,
   type PinnedFontRef
 } from "@orreris/shared";
+
+// apps/worker/public — the same tree `getBundleLocation` hands Remotion as `publicDir`
+// (remotion-renderer.ts:266), so a bundled catalogue file resolves from the identical bytes the
+// render itself would serve via `staticFile()`.
+const workerPublicRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 
 /** Read one stored object's bytes, or `undefined` if it is not there. Absence is an answer, not a throw. */
 async function readStoredBytes(relativeKey: string): Promise<Buffer | undefined> {
@@ -54,6 +63,28 @@ async function readStoredBytes(relativeKey: string): Promise<Buffer | undefined>
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Bytes of a pinned catalogue face, preferring the bundled copy this app ships over the mirror.
+ *
+ * Same reasoning as the editor's `installPinnedFont` (`font-install.ts`): the mirror is seeded FROM
+ * the bundled file, never the other way round, so the bundled hash is never a key the mirror holds.
+ * A render pinning one of the five pre-S2.6 families must not depend on the network to resolve it —
+ * that is the entire reason those bytes are bundled — so this checks `file:` before it ever touches
+ * storage, and falls back to the mirror only for a catalogue hash the bundle does not carry.
+ */
+async function readCatalogueBytes(fileHash: string): Promise<Buffer | undefined> {
+  const bundled = catalogueFileForHash(fileHash);
+  if (bundled) {
+    try {
+      return await fs.readFile(path.join(workerPublicRoot, bundled));
+    } catch {
+      // Fall through to the mirror: a repo whose bundled file went missing is still allowed to have
+      // mirrored the same hash independently.
+    }
+  }
+  return readStoredBytes(fontObjectKey({ store: "catalogue", fileHash }));
 }
 
 /**
@@ -123,7 +154,7 @@ export async function resolveFontsForLayers(
       missing.push(ref);
       continue;
     }
-    const bytes = await readStoredBytes(fontObjectKey(storeKey));
+    const bytes = storeKey.store === "catalogue" ? await readCatalogueBytes(storeKey.fileHash) : await readStoredBytes(fontObjectKey(storeKey));
     if (!bytes) {
       missing.push(ref);
       continue;
@@ -146,10 +177,17 @@ export async function resolveFontsForLayers(
   return faces;
 }
 
-/** Convenience for the render entry points: every layer in a manifest. */
+/**
+ * Convenience for the render entry points: every layer in a manifest, PLUS every Text+ node's pin.
+ *
+ * `manifest.layers` alone misses Flarex generator nodes — their virtual layer is synthesized on demand
+ * deep inside scene-building, never present in the flattened list `RenderManifest.layers` is built
+ * from. Concatenating `collectFlarexGeneratorTextLayers(manifest.flarexComps)` is the worker-side half
+ * of the same fix `VideoPreview.tsx`'s `installCompositionFonts` call needed (DEBT-028).
+ */
 export async function resolveManifestFonts(
-  manifest: { layers: CompositionLayerStyleInput[] },
+  manifest: { layers: CompositionLayerStyleInput[]; flarexComps?: Record<string, FlarexComp> | undefined },
   viewerId: string | undefined
 ): Promise<InstalledFontFace[]> {
-  return resolveFontsForLayers(manifest.layers, viewerId);
+  return resolveFontsForLayers(manifest.layers.concat(collectFlarexGeneratorTextLayers(manifest.flarexComps)), viewerId);
 }

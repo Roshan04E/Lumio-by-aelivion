@@ -42,11 +42,17 @@ const maxDiffRatio = Number(process.env.PIXEL_MAX_DIFF_RATIO ?? 0.035);
 // machine states) — `advanced-transition` reads 2.809% (80% of the 3.5% global budget), not the 3.131%
 // originally recorded above. Figures only; neither bar nor the global threshold changed.
 //
-// `flarex-generators` MOVED OFF the loose bar 2026-08-13 (project-tracker/infrastructure.md v6): its
-// 0.000%-vs-86.895% flake was a capture-timing race (`awaitCaptureReadiness` in this file), not
-// picture non-determinism, and it is now gated on the same instrument that measures it rather than on
-// a blind sleep. Measured 0.000% on 3 consecutive full sweeps post-fix, against a documented ~40%
-// failure rate pre-fix — see 0.005 below, same tier as its siblings.
+// `flarex-generators` MOVED OFF the loose bar 2026-08-13 (project-tracker/infrastructure.md v6) on the
+// theory that its 0.000%-vs-86.895% flake was a capture-timing race, now gated on the readiness
+// instrument. **That tightening was WRONG and has been reverted — see DEBT-029.** The real cause
+// (bisected, `infrastructure.md` v8) was `fontFamily: "Inter"` resolving to a different browser
+// fallback per renderer launch. Pinning it (DEBT-028/029) fixed THAT divergence but surfaced a SECOND
+// one: a web-preview-only race between `installCompositionFonts`'s async font install and
+// `ensureOverlayFonts`'s per-raster readiness check, which could let a raster's first paint draw before
+// its pinned font was registered. **DEBT-029 closed 2026-08-17** (`awaitPinnedFontInstall`, text-shape.ts)
+// — `flarex-generators`/`flarex-text-stroke-shadow` now have their own tight bar in the "TEXT-PINNING
+// FIXTURES" block below; the other fixtures built on a pinned text layer that were never part of this
+// race stay wherever their own 3-run stability classification put them.
 //
 // An explicit PIXEL_MAX_DIFF_RATIO overrides every per-fixture bar — the escape hatch for a machine
 // whose GPU rasterizes differently enough to make the tight bars flaky.
@@ -74,7 +80,9 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
   // agree on it exactly.
   "flarex-tracked-mask-early": 0.005,
   "flarex-tracked-mask-late": 0.005,
-  "flarex-generators": 0.005,
+  // `flarex-generators`/`flarex-text-stroke-shadow` now have their own tight bar in the
+  // "TEXT-PINNING FIXTURES" block below (DEBT-029 closed 2026-08-17) — not here, on purpose: this
+  // block is for fixtures that were never part of the font-install race in the first place.
   /**
    * Stabilize is the one new fixture that cannot hold a 0.5% bar, and the reason is worth stating
    * rather than hiding behind the 3.5% global.
@@ -205,7 +213,54 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
   "portal-transition": 0.005,
   "linear-portal-transition": 0.005,
   "motion-smear-transition": 0.005,
-  "linear-motion-smear-transition": 0.005
+  "linear-motion-smear-transition": 0.005,
+
+  /**
+   * TEXT-PINNING FIXTURES (DEBT-028/029, 2026-08-16) — every fixture converted off a raw CSS font
+   * stack onto a pinned `catalogueFontRef` (D1), re-measured across 3 independent full sweeps rather
+   * than bar-set from one green run — the exact discipline this repo's own tolerance-bar history
+   * argues for (a bar calibrated on a single reading is how `flarex-text-stroke-shadow` sat unnoticed
+   * at 1.759% under the old 3.5% global for who knows how long).
+   *
+   * Three readings split the set cleanly into two groups:
+   *
+   *   STABLE ZERO, all 3 runs 0.000%: default, text-warp-shaped, per-line-pill, path-text. Tight bar.
+   *
+   *   STABLE NONZERO, the IDENTICAL pixel count all 3 runs — deterministic, not flaky, and worth its
+   *   own bar for the same reason `liquid-morph-transition`'s family got one above: text-warp
+   *   (0.797%, 16532px ×3), graded-text (0.625%, 12953px ×3), masked-text (0.387%, 8022px ×3),
+   *   tilted-text (0.226%, 4694px ×3), cluster-text (0.290%, 6007px ×3). All five are a GRADE/MASK/
+   *   TILT/WARP/CLUSTER pass layered on the same base text layer `scaled-text` uses bare — whatever
+   *   makes these reproduce exactly, the plain case does not share it (see the next group), and that
+   *   is a real, unexplained asymmetry worth a second look, not chased here.
+   *
+   * A THIRD group was ABSENT from this table when it was first written: scaled-text,
+   * stroke-paint-order, bidi-direction, region-text, shadow-stack, multi-stroke, flarex-generators and
+   * flarex-text-stroke-shadow all read a DIFFERENT value on at least one of the 3 runs (including
+   * flat 0.000% on some runs and up to ~0.96% on others, same code, same bytes, same machine) —
+   * DEBT-029, a race between `installCompositionFonts`'s async font install and `ensureOverlayFonts`'s
+   * per-raster check. **`flarex-generators`/`flarex-text-stroke-shadow` moved OUT of this group and
+   * into the table below 2026-08-17**, once DEBT-029's fix (`awaitPinnedFontInstall` — see
+   * `text-shape.ts`) made the raster actually wait on the install rather than racing it: 4 consecutive
+   * full/narrowed sweeps all read 0.000%/0.000%, meeting the ≥3-consecutive-0.000% bar DEBT-029 itself
+   * set for calling this closed. The remaining six (scaled-text, stroke-paint-order, bidi-direction,
+   * region-text, shadow-stack, multi-stroke) carry no pinned Flarex node font, were not part of that
+   * race, and were not re-tested — they stay on the loose 3.5% global until someone measures them and
+   * names whatever their own cause turns out to be, rather than assuming DEBT-029's fix covers them too.
+   */
+  default: 0.005,
+  "text-warp-shaped": 0.005,
+  "per-line-pill": 0.005,
+  "path-text": 0.005,
+  "text-warp": 0.009,
+  "graded-text": 0.007,
+  "masked-text": 0.0045,
+  "tilted-text": 0.003,
+  "cluster-text": 0.0035,
+  // DEBT-029, closed 2026-08-17: 4 consecutive 0.000%/0.000% sweeps post-fix. Not 0 — headroom for the
+  // ordinary sub-pixel AA noise every other tight bar above already carries.
+  "flarex-generators": 0.001,
+  "flarex-text-stroke-shadow": 0.001
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

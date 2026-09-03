@@ -33,8 +33,16 @@ process.env.STORAGE_DRIVER = "local";
 process.env.STORAGE_ROOT = tempRoot;
 
 const { buildRenderManifest } = await import("@orreris/render-templates");
-const { createRenderComparisonFixture, renderComparisonFrameSeconds, fontIndexFace, fontIndexFamily, fontLicenseObjectKey, planFaceChange, FontResolutionError } =
-  await import("@orreris/shared");
+const {
+  createRenderComparisonFixture,
+  renderComparisonFrameSeconds,
+  catalogueFontRef,
+  fontIndexFace,
+  fontIndexFamily,
+  fontLicenseObjectKey,
+  planFaceChange,
+  FontResolutionError
+} = await import("@orreris/shared");
 const { mirrorCatalogueFont, mirrorGoogleFont } = await import("@orreris/storage");
 const { renderManifestStill } = await import("./remotion-renderer");
 const { assertQuietBrowserMachine, listAutomationBrowsers } = await import("./browser/browser-preflight");
@@ -110,6 +118,34 @@ async function main(): Promise<void> {
   assertQuietBrowserMachine({ label: "font:install-gate", scriptMarker: "font-install-gate" });
   process.stdout.write(`preflight: ${listAutomationBrowsers().length} automation browser process(es) alive (must be 0)\n`);
   fs.mkdirSync(outDir, { recursive: true });
+
+  /**
+   * ---- THE BUNDLED ARM, run BEFORE anything mirrors. ------------------------------------------
+   *
+   * Every arm below seeds the store first, so every one of them exercises the MIRROR path. That
+   * left the bundled path — `catalogueFontRef`'s synchronous pin, the route every layer took for
+   * the five pre-S2.6 families before a picker existed — with no gate at all, and it was broken: the
+   * catalogue hash a bundled pick writes is never a hash `mirrorCatalogueFont` produces (the mirror
+   * is seeded FROM the bundled file, D1's round trip runs the other way), so resolving it as a plain
+   * `fonts/catalogue/<hash>` store object 404s. `tempRoot` here has nothing in it yet — no mirror
+   * write has happened in this process — so a pass proves the bundled ref resolves with the store
+   * completely empty, which is the whole reason these five are bundled rather than fetched.
+   */
+  const bundledRef = catalogueFontRef("Anton", 400, "normal");
+  assert.ok(bundledRef, "Anton must be a catalogue family — the bundled arm is void otherwise.");
+  const bundledPng = await renderWithFont(bundledRef, "bundled-anton");
+  const bundledSystemPng = await renderWithFont({ source: "system", fontFamily: "Anton" }, "bundled-anton-system");
+  process.stdout.write(
+    `bundled (unmirrored) → pinned=${hashOf(bundledPng).slice(0, 12)}  system-named=${hashOf(bundledSystemPng).slice(0, 12)}\n`
+  );
+  assert.notEqual(
+    hashOf(bundledPng),
+    hashOf(bundledSystemPng),
+    "BUNDLED INSTALL PATH NOT PROVEN — a catalogue ref pinned straight from `catalogueFontRef`, with no mirror " +
+      "write anywhere in this process, rendered identically to Anton named as a system stack. Either the bundled " +
+      "ref fell back to a substitute (T-17: the badge would fire correctly on a broken path — see " +
+      "font-install.ts's catalogue case), or this host has Anton installed and the comparison proves nothing."
+  );
 
   // Seed the mirror through the REAL path, from a real OFL binary.
   const bytes = fs.readFileSync(antonPath);
