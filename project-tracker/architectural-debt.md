@@ -5465,6 +5465,83 @@ the corrected run.
 in this same file, a single clean reading against a possibly-stochastic phenomenon is not a distribution.
 The N=6-vs-N=10 boundary should be treated as indicative, not established.
 
+**UPDATE 2026-08-17 (c) — REPRODUCED AT LAST, by measuring the CANVAS instead of the pipeline. The
+freeze is real, it starts at N=3 on 4K media, and every number the HUD shows except the new per-layer
+minimum reads healthy while it happens.**
+
+The founder, shown healthy delivery numbers over a frozen preview: *"I don't know how you are recording
+the fps, maybe that's playing somewhere else but not at the previewer panel."* Every instrument in this
+chapter counted at the SOURCE (decoder ticks, pool census, repaint rate); none counted at the SCREEN.
+`flarex-canvas-truth-probe.ts` (new, committed) screenshots the real preview canvas
+(`canvas.preview-scene-canvas`) at 2Hz and hashes the bytes — identical hashes across successive samples
+while the clock advances IS a frozen preview, measured where the user looks. (Not an in-page
+`getImageData` readback: a WebGL canvas without `preserveDrawingBuffer` reads back blank after
+compositing, so the readback would report black, black never changes, and the instrument would
+MANUFACTURE the freeze it was built to detect.)
+
+Founder's conditions reproduced: real Pexels 4K footage — **2160x3840 vertical 4K, 30fps**, 11 distinct
+20s stream-copy segments of `13271143_2160_3840_30fps.mp4` (distinct files → distinct blob URLs → no
+session sharing; shared origin means near-identical content across layers, stated not hidden) — N =
+1/3/5/6/11, COLD, no proxy wait.
+
+```
+N   canvasChanged/total  clockAdvanced  fps(med)  minMediaFps(med)  mediaSum(med)  dropped(med)  capMisses
+1   23/23                16.27s         73.8      29.7              29.7           0%            0
+3    0/23                18.10s         66.7       0.0               0.0           3%            0
+5    1/23                19.29s         58.5       0.0               0.0           4%            0
+6    1/23                19.42s         56.0       0.0               1.3           5%            0
+11   5/23                15.22s         51.8       0.0               0.0           3%            0
+```
+
+**At N=3 the canvas did not change ONCE across 23 samples spanning 18.1 seconds of advancing clock,
+while `fps` read 66.7 and `dropped` read 3%.** That is the founder's report, reproduced exactly and
+measured at the screen. N=5/6/11's single-digit "changed" counts are the moments layers unmounted or
+playback ended, not motion.
+
+**The instrument validates itself in its own control arm**: N=1 changed 23/23. So a 0/23 at N=3 is a
+real freeze, not a blind probe — the distinction this chapter has repeatedly failed to make.
+
+**Where the founder's proposed mechanism was right, and where the measurement corrects it.** Right: our
+instruments could not see the freeze, and the canvas is the only thing that could settle it. Corrected:
+the predicted signature was "videos keep decoding and presenting (rVFC healthy) while the compositor
+stops drawing them". Measured, `mediaFps`/`minMediaFps` read ~0 at N>=3 too — the elements were NOT
+still presenting. So the decode side and the canvas agree; the numbers that lie here are **`fps` (56-67)
+and `dropped` (3-5%)**, both of which describe the compositor's repaint loop faithfully redrawing an
+unchanging picture. The per-layer-minimum fix shipped earlier DOES catch this case (0.0 at every frozen
+arm) — on 4K media it is the one HUD row that told the truth.
+
+**Media resolution is a first-class variable and our earlier conclusion was a 1080p artifact.** Update
+(b) above measured cold 1080p and reported "fine at N=6" (per-layer minimum 26.8fps sustained). On 4K
+the same N=6 is frozen solid. Any future statement about "the cliff is at N" is meaningless without
+stating the resolution it was measured at.
+
+`capMisses = 0` in every arm, again — this freeze involves no WebCodecs admission denial at all.
+`videoPool.active` tracked N exactly (6 at N=6, 11 at N=11): eleven concurrent 4K `<video>` elements on
+the uncapped native path, against the ~2-3 hardware decode sessions that file's own header names.
+
+### THE PATTERN, which outranks any individual fix: every instrument gap in this chapter counted the system's internal activity instead of what reached the user
+
+Four gaps, one shape:
+1. `mediaFps` SUMMED across layers — six layers at 12.5fps and one at 75 read identically.
+2. `fps` is the compositor's repaint rate — it counts redraws, including redraws of an unchanged frame,
+   so it reads 56-67 over a picture that has not moved in 18 seconds.
+3. `__rfWcMode` is keyed by source URL — layers sharing a clip are undercounted, so a per-layer question
+   got a per-URL answer.
+4. This one: delivery counted at the decoder's callback, never at the canvas.
+
+Each was plausible, cheap, and wrong in the same direction: **it reported that the machine was busy, and
+was read as reporting that the user could see something.** The rule this chapter earns: an instrument
+that measures a stage of the pipeline can only ever falsify claims about that stage. A claim about what
+the user SEES requires a measurement taken where the user looks. When those two disagree, the pipeline
+instrument is the one that is wrong, no matter how many of them agree with each other.
+
+- Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
+  Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
+  frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and
+  canvas agreeing that nothing arrives.
+- Expiry condition: unchanged from above, plus — any future playback-health claim in this repo must cite
+  a canvas-level measurement, not a pipeline counter.
+
 ---
 
 ### STOP 2 — HUD fix, `frame-stats.ts` / `PreviewStatsOverlay.tsx` (shipped, not a debt entry)
