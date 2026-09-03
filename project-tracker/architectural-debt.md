@@ -5662,6 +5662,58 @@ the data supports, in order: (a) make (1) retry, since it is already designed to
 measured severity — at 4K "playback may be softer" is false; (e) surface per-asset `failed`/`skipped`
 where the freeze is (timeline/preview), not only in the Flarex source viewer. None built here.
 
+**UPDATE 2026-09-03 (f) — the notice commit MEASURED AT THE CANVAS at last. Copy verified correct;
+DELIVERY is the weak half, and two of my own intermediate readings were instrument artifacts.**
+
+`debt033-notice-truth-probe.ts` run against 4K, cold, web dev server only (no Docker/Postgres — see the
+correction above). Result: **4 passed, 0 failed**, but the route there is the finding.
+
+**T-16 first: the probe's marker assertions were `textContent`/`classList` only — no pixels, no opacity
+chain.** That is the same defect this chapter exists to catch, one layer up, so a visibility checker was
+added (real box intersecting the viewport; `display`/`visibility`/cumulative-opacity walked up the whole
+ancestor chain; centre-point hit test for coverage) and **falsified against four markers whose answers
+are known by construction** — one visible, three hidden by opacity, by display, and by an opaque cover.
+Self-test PASS (`plainVisible:true, hiddenByAncestorOpacity:false, hiddenByAncestorDisplay:false,
+hiddenByCover:false`); the run VOIDs itself if that ever fails, because an unfalsified checker passes
+every assertion and proves nothing. (Page-side code had to be authored as SOURCE STRINGS: tsx's
+`keepNames` wraps function-valued consts in `__name()`, which does not exist in the page and killed the
+first run outright — the trap already on file.)
+
+**VERIFIED at the canvas:**
+- **C — a frozen preview is never unexplained.** In the cold arm the canvas was frozen 0/19 samples
+  changed across 15.5s of ADVANCING clock, and **19/19 of those frozen samples carried a visible clip
+  badge** (3 badges, visibility-checked, not merely present in the DOM).
+- **A — no false success.** No completion notice fired while builds were in flight, and the drain
+  message's counts matched the engine's own (`all 1 optimized` against `{total:1,built:1,failed:0}`).
+- **B — no "softer" over 4K.** Zero occurrences.
+- **D — the copy is right, and it does fire.** Exact recorded text: *"Optimizing media in the background
+  — 5%. Playing this 4K source will freeze the preview until it finishes. Playing pauses optimizing, so
+  leaving it parked finishes soonest"* — the resolution-derived wording and the trap instruction both
+  present, on a real 4K source.
+
+**TWO OF MY OWN INTERMEDIATE CONCLUSIONS WERE WRONG, AND THE WAY THEY WERE WRONG IS THE LESSON.**
+1. *"No toast ever appeared"* — asserted after a 6s parked window. Progress reports every 30 ENCODED
+   frames of a build that took 71s, so the window could not contain the event. **A claim reported from a
+   window too short to contain what it looks for is not a finding.**
+2. *"D FAILS — no 'Optimizing' toast observed"* — asserted from 2Hz visibility sampling across 100s.
+   A MutationObserver then recorded **40 toasts** in that same regime. Sampling can only ever report on
+   the instants it sampled; it cannot see a marker that lives between two samples.
+
+**THE REMAINING REAL DEFECT — DELIVERY, not wording, and it is NOT fixed.** Recorder lifetimes for one
+build: 3341ms, 1137ms, 2181ms — then **every update from 20% to 100% lived 0ms**, replaced by the next
+within one observer batch. `.editor-toast` runs a 2.6s `forwards` fade ending at `opacity: 0` and then
+**stays in the DOM invisible**. Measured at the end of a run, the completion notice read
+`cumulativeOpacity: 0, visible: false` — *"Media optimization finished — all 1 optimized"* was in the
+DOM and invisible. So the user is told correctly, briefly, and then not at all, for the remaining
+minutes of a multi-clip 4K build. The copy commit fixed WHAT is said; nothing yet fixes FOR HOW LONG.
+Open, not attempted here.
+
+**One honest limit of the new checker**: the end-of-run diagnosis showed `hitIsSelfOrKin:false` with the
+hit landing on an `svg`, so a decorative icon overlapping the toast's CENTRE POINT can make a genuinely
+visible toast read as hidden. The centre-point hit test is a one-sample approximation of coverage. It
+did not affect the verdicts above (they rest on the recorder and on badges), but a future run that
+depends on toast visibility should sample several points, not one.
+
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
   frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and

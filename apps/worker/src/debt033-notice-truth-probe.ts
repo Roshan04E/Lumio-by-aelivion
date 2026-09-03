@@ -38,6 +38,7 @@ const N = Number(process.env.PROBE_N ?? 3);
 const CANVAS_SELECTOR = "canvas.preview-scene-canvas";
 const SAMPLE_INTERVAL_MS = 500;
 const PLAY_SAMPLES = 20; // 10s of playback while builds are pending
+const PARKED_SAMPLES = Number(process.env.PROBE_PARKED_SAMPLES ?? 12);
 const DRAIN_TIMEOUT_MS = Number(process.env.PROBE_DRAIN_TIMEOUT_MS ?? 420_000);
 
 interface Surface {
@@ -75,23 +76,143 @@ function clips(count: number): string[] {
   return files.slice(0, count);
 }
 
-async function readSurfaces(page: Page): Promise<Surface> {
-  return page.evaluate(() => {
-    const w = window as unknown as {
-      __rfSourceProxy?: { built: number; failed: number; skipped: number; queued: number; active: string | null };
-      __rfProxyDrainSummary?: { total: number; built: number; failed: number; skipped: number };
-    };
-    const toast = document.querySelector(".editor-toast");
-    const overlay = document.querySelector(".preview-proxy-state");
-    const badges = Array.from(document.querySelectorAll(".clip-proxy-badge"));
-    return {
-      toast: toast?.textContent?.trim() ?? null,
-      overlay: overlay?.textContent?.trim() ?? null,
-      badges: { total: badges.length, failed: badges.filter((b) => b.classList.contains("is-failed")).length },
-      proxy: w.__rfSourceProxy ?? null,
-      drain: w.__rfProxyDrainSummary ?? null,
-    };
+/**
+ * T-16. A marker read out of the DOM is NOT a marker the user can see, and this probe's whole purpose
+ * is to check what reaches the user — asserting `textContent` would repeat, one layer up, the exact
+ * defect this chapter exists to catch. So visibility is established in the page:
+ *
+ *   1. a real box — non-zero rect, intersecting the viewport;
+ *   2. the ANCESTOR CHAIN — `display:none`, `visibility:hidden/collapse` or a cumulative opacity at or
+ *      below 0.01 anywhere up the tree hides a descendant no matter what its own style says;
+ *   3. NOT COVERED — hit-test the element's centre and require the hit to be the element itself, an
+ *      ancestor of it, or a descendant of it. An opaque panel drawn over a "visible" badge is exactly
+ *      the failure a style-only check waves through.
+ *
+ * Installed as a page global so the sampler and the self-test share ONE implementation — a checker
+ * verified in one form and used in another is not a verified checker.
+ */
+/**
+ * A STRING, not a function, and that is load-bearing. tsx compiles with esbuild `keepNames`, which
+ * wraps every function-valued const/arrow in a `__name(...)` call that does not exist in the page —
+ * so a checker written as TypeScript and handed to `page.evaluate` dies with "__name is not defined"
+ * and takes the whole run with it. Page-side code in this repo's probes is authored as source text.
+ */
+/**
+ * TOAST RECORDER. Sampling at 2Hz can only report on the instants it sampled, and this probe's first
+ * two runs concluded "no toast ever appeared" from exactly that — a claim a short-lived toast would
+ * survive untouched. It matters here because `NoticeToast` renders NOTHING for the strings "Saved" and
+ * "Unsaved", so any autosave landing after a progress update blanks the toast; the notice could be
+ * firing correctly and living for 200ms between two samples.
+ *
+ * A MutationObserver sees every appearance regardless of when it happens, with timestamps and
+ * lifetimes, so "the user was never told" and "the user was told for 200ms" become distinguishable —
+ * they are different defects with different fixes.
+ */
+const INSTALL_TOAST_RECORDER = `
+  window.__probeToasts = [];
+  window.__probeToastObserver = new MutationObserver(function () {
+    var el = document.querySelector(".editor-toast");
+    var text = el ? (el.textContent || "").trim() : null;
+    var log = window.__probeToasts;
+    var last = log.length ? log[log.length - 1] : null;
+    if (last && last.text === text) { last.lastSeen = performance.now(); return; }
+    log.push({ text: text, firstSeen: performance.now(), lastSeen: performance.now() });
   });
+  window.__probeToastObserver.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+`;
+
+const INSTALL_VISIBILITY_CHECKER = `
+  window.__probeVisible = function (el) {
+    if (!(el instanceof HTMLElement)) return false;
+    var rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+    var opacity = 1;
+    for (var node = el; node; node = node.parentElement) {
+      var style = getComputedStyle(node);
+      if (style.display === "none") return false;
+      if (style.visibility === "hidden" || style.visibility === "collapse") return false;
+      opacity *= Number(style.opacity === "" ? 1 : style.opacity);
+      if (opacity <= 0.01) return false;
+    }
+    var x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
+    var y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
+    var hit = document.elementFromPoint(x, y);
+    if (!hit) return false;
+    return hit === el || el.contains(hit) || hit.contains(el);
+  };
+`;
+
+/**
+ * FALSIFY THE CHECKER BEFORE TRUSTING IT. A visibility test that returns true for everything would
+ * pass every assertion in this probe and prove nothing — so it is run against four markers whose
+ * answers are known by construction: one genuinely visible, and three hidden by the three distinct
+ * mechanisms above. If any answer is wrong the visibility claims are VOID rather than reported.
+ */
+async function selfTestVisibilityChecker(page: Page): Promise<{ ok: boolean; detail: string }> {
+  // Page-side body as source text — same `keepNames` reason as INSTALL_VISIBILITY_CHECKER above.
+  return page.evaluate(`(function () {
+    var visible = window.__probeVisible;
+    var host = document.createElement("div");
+    host.style.cssText = "position:fixed;left:40px;top:40px;z-index:2147483000;";
+    document.body.appendChild(host);
+    var mk = [];
+    var wraps = ["", "opacity:0;", "display:none;", "position:relative;"];
+    for (var i = 0; i < wraps.length; i++) {
+      var outer = document.createElement("div");
+      outer.style.cssText = wraps[i];
+      var inner = document.createElement("div");
+      inner.style.cssText = "width:24px;height:24px;background:#0f0;";
+      outer.appendChild(inner);
+      host.appendChild(outer);
+      mk.push(inner);
+    }
+    var lid = document.createElement("div");
+    lid.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;background:#fff;z-index:2147483600;";
+    document.body.appendChild(lid);
+    var coveredAnswer = visible(mk[3]);
+    lid.remove();
+    var answers = {
+      plainVisible: visible(mk[0]),
+      hiddenByAncestorOpacity: visible(mk[1]),
+      hiddenByAncestorDisplay: visible(mk[2]),
+      hiddenByCover: coveredAnswer
+    };
+    host.remove();
+    var ok = answers.plainVisible === true && answers.hiddenByAncestorOpacity === false &&
+      answers.hiddenByAncestorDisplay === false && answers.hiddenByCover === false;
+    return { ok: ok, detail: JSON.stringify(answers) };
+  })()`) as Promise<{ ok: boolean; detail: string }>;
+}
+
+async function readSurfaces(page: Page): Promise<Surface> {
+  // Page-side body as source text (keepNames again — the `.find(el => …)` callbacks alone would
+  // reintroduce `__name`). Every surface is filtered through the T-16 checker: a toast sitting in the
+  // DOM at opacity 0 mid fade-out, or a badge behind a panel, is not something the user was told.
+  return page.evaluate(`(function () {
+    var visible = window.__probeVisible;
+    if (!visible) return { toast: null, overlay: null, badges: { total: 0, failed: 0 }, proxy: null, drain: null, checkerMissing: true };
+    var toastEl = null;
+    var toasts = document.querySelectorAll(".editor-toast");
+    for (var i = 0; i < toasts.length; i++) { if (visible(toasts[i])) { toastEl = toasts[i]; break; } }
+    var overlayEl = null;
+    var overlays = document.querySelectorAll(".preview-proxy-state");
+    for (var j = 0; j < overlays.length; j++) { if (visible(overlays[j])) { overlayEl = overlays[j]; break; } }
+    var badgeEls = document.querySelectorAll(".clip-proxy-badge");
+    var badgeTotal = 0, badgeFailed = 0;
+    for (var k = 0; k < badgeEls.length; k++) {
+      if (!visible(badgeEls[k])) continue;
+      badgeTotal++;
+      if (badgeEls[k].classList.contains("is-failed")) badgeFailed++;
+    }
+    return {
+      toast: toastEl ? (toastEl.textContent || "").trim() : null,
+      overlay: overlayEl ? (overlayEl.textContent || "").trim() : null,
+      badges: { total: badgeTotal, failed: badgeFailed },
+      proxy: window.__rfSourceProxy || null,
+      drain: window.__rfProxyDrainSummary || null
+    };
+  })()`) as Promise<Surface>;
 }
 
 async function addClipsToTimeline(page: Page, count: number): Promise<number> {
@@ -122,8 +243,24 @@ async function main(): Promise<void> {
   const page = context.pages()[0] ?? (await context.newPage());
   page.on("pageerror", (e) => process.stdout.write(`[pageerror] ${String(e)}\n`));
 
+  // Survives the SPA's own navigations (reachEditor walks /create → /editor/…), so the checker is
+  // present in whatever document the sampler ends up reading.
+  await page.addInitScript({ content: INSTALL_VISIBILITY_CHECKER });
+
   await reachEditor(page, { clipPath: all[0]!, flags: "wcDecode=1" });
   await page.waitForTimeout(3_000);
+  await page.evaluate(INSTALL_VISIBILITY_CHECKER); // belt and braces for the current document
+  await page.evaluate(INSTALL_TOAST_RECORDER);
+
+  const visSelfTest = await selfTestVisibilityChecker(page);
+  console.log(`visibility checker self-test: ${visSelfTest.ok ? "PASS" : "FAIL"} — ${visSelfTest.detail}`);
+  if (!visSelfTest.ok) {
+    // T-16: an unfalsified checker would pass every marker assertion below and prove nothing. Refuse
+    // rather than report — a green run on a broken instrument is the worst outcome available here.
+    console.log("VOID — the visibility checker failed its own falsification, so no marker claim can be trusted.");
+    await browser.close();
+    process.exit(2);
+  }
   if (N > 1) await importAssets(page, all.slice(1, N));
   const placed = await addClipsToTimeline(page, N);
   console.log(`placed on timeline: ${placed}/${N}`);
@@ -138,7 +275,12 @@ async function main(): Promise<void> {
   // ---------------------------------------------------------------------------------------------
   console.log("\n## PHASE 1 — parked, builds in flight");
   const parked: Surface[] = [];
-  for (let i = 0; i < 12; i++) {
+  // LONG ENOUGH TO SEE A PROGRESS PING. The first run of this probe watched 6s and saw no toast at
+  // all, which cannot distinguish "the copy is wrong" from "we did not watch long enough": progress
+  // is reported every 30 ENCODED FRAMES, and a 4K build measured 71.7s end to end, so the first ping
+  // can land many seconds in. A claim reported from a window too short to contain the event is not a
+  // finding. Parked (not playing), so builds actually run.
+  for (let i = 0; i < PARKED_SAMPLES; i++) {
     await page.waitForTimeout(SAMPLE_INTERVAL_MS);
     const s = await readSurfaces(page);
     parked.push(s);
@@ -146,6 +288,54 @@ async function main(): Promise<void> {
       `  t=${((i + 1) * SAMPLE_INTERVAL_MS) / 1000}s badges=${s.badges.total}(${s.badges.failed} failed) proxy=${JSON.stringify(s.proxy)}\n        toast: ${s.toast ?? "-"}`
     );
   }
+
+  // EVERY toast that existed during phase 1, not merely the ones a sample happened to land on.
+  const toastLog = (await page.evaluate(`window.__probeToasts || []`)) as Array<{
+    text: string | null;
+    firstSeen: number;
+    lastSeen: number;
+  }>;
+  console.log(`\n  toast recorder — ${toastLog.length} distinct toast state(s) during phase 1:`);
+  for (const entry of toastLog) {
+    console.log(`    ${(entry.lastSeen - entry.firstSeen).toFixed(0)}ms  ${entry.text === null ? "(none)" : `"${entry.text}"`}`);
+  }
+  const optimizingEver = toastLog.filter((e) => e.text != null && /Optimizing/i.test(e.text));
+
+  /**
+   * WHY the recorder and the sampler disagree. The recorder saw the toast in the DOM; the visibility
+   * sampler rejected it at every one of hundreds of instants. Both cannot be describing the same
+   * user experience, and the difference decides whether claim D is real: correct copy that is never
+   * VISIBLE is the same class of defect as a correct counter nobody can act on. `.editor-toast` runs
+   * a 2.6s `forwards` fade ending at opacity 0 and then STAYS in the DOM invisible, so some rejection
+   * is expected — but not all of them, if updates land every ~2.5s. This reports the rejection reason
+   * rather than leaving the disagreement unexplained.
+   */
+  const toastVisibilityDiagnosis = await page.evaluate(`(function () {
+    var el = document.querySelector(".editor-toast");
+    if (!el) return { present: false };
+    var rect = el.getBoundingClientRect();
+    var opacity = 1, hiddenBy = null;
+    for (var node = el; node; node = node.parentElement) {
+      var st = getComputedStyle(node);
+      if (st.display === "none" && !hiddenBy) hiddenBy = "display:none on " + node.className;
+      if ((st.visibility === "hidden" || st.visibility === "collapse") && !hiddenBy) hiddenBy = "visibility on " + node.className;
+      opacity *= Number(st.opacity === "" ? 1 : st.opacity);
+    }
+    var x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
+    var y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
+    var hit = document.elementFromPoint(x, y);
+    return {
+      present: true,
+      text: (el.textContent || "").trim().slice(0, 60),
+      rect: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
+      cumulativeOpacity: Number(opacity.toFixed(3)),
+      hiddenBy: hiddenBy,
+      hitIsSelfOrKin: hit ? (hit === el || el.contains(hit) || hit.contains(el)) : false,
+      hitEl: hit ? hit.tagName + "." + String(hit.className).slice(0, 40) : null,
+      visible: window.__probeVisible(el)
+    };
+  })()`);
+  console.log(`  toast visibility diagnosis at end of phase 1: ${JSON.stringify(toastVisibilityDiagnosis)}`);
 
   const buildingSamples = parked.filter((s) => s.proxy != null && (s.proxy.queued > 0 || s.proxy.active !== null));
   const toastsWhileBuilding = buildingSamples.map((s) => s.toast).filter((t): t is string => Boolean(t));
@@ -159,11 +349,15 @@ async function main(): Promise<void> {
       !toastsWhileBuilding.some((t) => /softer/i.test(t)),
       toastsWhileBuilding.find((t) => /softer/i.test(t)) ?? `${toastsWhileBuilding.length} toasts seen`
     );
-    const optimizing = toastsWhileBuilding.filter((t) => /Optimizing/i.test(t));
+    // Asserted against the RECORDER, not the samples: whether the copy is right is a different
+    // question from whether a 2Hz sampler happened to catch it, and only the recorder can separate
+    // "never shown" from "shown too briefly to read".
     check(
       "D: the in-progress notice says playing pauses optimizing",
-      optimizing.length > 0 && optimizing.every((t) => /Playing pauses optimizing/i.test(t)),
-      optimizing[0] ?? "no 'Optimizing' toast observed"
+      optimizingEver.length > 0 && optimizingEver.every((e) => /Playing pauses optimizing/i.test(e.text!)),
+      optimizingEver.length === 0
+        ? "no 'Optimizing' toast EVER entered the DOM during phase 1 (recorder, not sampling)"
+        : `${optimizingEver.length} seen, longest ${Math.max(...optimizingEver.map((e) => e.lastSeen - e.firstSeen)).toFixed(0)}ms: "${optimizingEver[0]!.text}"`
     );
     check(
       "A: no completion notice fires while builds are still in flight",
