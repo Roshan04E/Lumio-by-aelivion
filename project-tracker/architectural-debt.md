@@ -5765,6 +5765,15 @@ session's report rather than against a hypothesis.
   frozen canvas. It could not be run on this machine: Docker's image store is empty and every pull
   fails at the TLS layer, so there is no Postgres, no API, and no editor to drive. Run on the new
   machine with:
+  > **CORRECTION 2026-09-03 — the Docker/Postgres blocker above is NOT real, and this matters for every
+  > future browser probe on a fresh box.** `editor-session.ts` mints a LOCAL project: `/create` is
+  > reachable signed-out and "nothing touches Postgres" (its own header says so). Verified this session
+  > by starting `pnpm --filter @orreris/web dev` ALONE — no api, no worker, no Docker, no database —
+  > and getting HTTP 200 on `/create`; earlier probe runs in this same session drove the full editor
+  > that way. So the notice probe is runnable with the web dev server alone. What actually blocked it
+  > here was the browser-preflight RAM floor (2.3 GB free against a 5.0 GB floor, with 2.1 GB of that
+  > held by a leftover `vmmemWSL` from the failed Docker attempts — i.e. the workaround for the
+  > non-blocker became the blocker). Do not stand up Postgres to run a browser probe.
   `PROBE_4K_DIR=<dir of >=3 distinct 4K clips> PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker tsx src/debt033-notice-truth-probe.ts`
 - **STOP 3 is therefore still open**, for the same reason. The rescoped ceiling question — with all
   eleven proxies verified built, is the proxied ceiling CONSTANT IN STREAMS or does it still move with
