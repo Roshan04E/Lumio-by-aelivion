@@ -5410,6 +5410,61 @@ retry mechanism; the native fallback degrades against an UNKNOWN, UNINSTRUMENTED
 a fix (a cap on `active`, admission accounting, or a scale-down trigger for this path) is explicitly out
 of scope for this entry per the founder's "scope only — do not build" instruction.
 
+**UPDATE 2026-08-17 (b) — the cold arms' DELIVERY, measured at last. The gap is closed, and the answer
+is neither of the two the founder framed: cold delivery is FINE at N=6 and collapses at N=10.**
+
+`flarex-cold-delivery-probe.ts` (new, committed), COLD arms only (no proxy wait), sampling
+`__rfFrameStats` once a second for 10s per arm, `capMisses` re-read per arm to prove each was cold:
+
+```
+N   fps(med)  minMediaFps(med)  minMediaFps(min)  mediaSum(med)  elemLayers  dropped(med)  capMisses
+1   74.7      n/a               n/a               0.0            0           0%            0
+3   72.5      29.6              0.0               29.5           1           0%            0
+6   50.6      26.8              0.0               112.4          4           21%           0
+10  25.7      0.0               0.0               18.2           8           65%           0
+```
+
+`capMisses = 0` in every arm — all four genuinely cold, no WebCodecs admission gate anywhere in this
+picture. `videoPool.active` tracked N almost exactly (1 → 4 → 8), the uncapped native path taking on
+eight concurrent `<video>` elements at N=10 against the ~2-3 hardware sessions its own header names.
+
+**At N=6 the per-layer minimum holds 26-29fps steadily** (the sources are ~30fps, so that is near-full
+delivery) with 21% dropped — degraded, but delivering. **At N=10 it is 0.0 across the whole window**
+with 65% dropped. So the cold cliff sits between 6 and 10, NOT at 6.
+
+**THE LOUD SENTENCE, per the founder's instruction: the founder's reported state has not been
+reproduced in EITHER condition, at any N.** They observed a picture frozen ~95% of the time while their
+HUD read fps 62, dropped 6%, Media 75. The closest arm here (N=6 cold: `videoPool.active = 4`, matching
+their "Decoders 4+4") reads WORSE on the HUD — fps 50.6, dropped 21% — and yet its picture was
+DELIVERING at ~27fps per layer. Their freeze is characterised by *healthy-looking numbers over a frozen
+picture*; every collapse this probe produced came with visibly bad numbers attached. Those are different
+states. The admission cliff (warm) does not explain their freeze because their run was cold with zero
+denials; the native-path collapse (cold) does not explain it either, because at their layer count it
+degrades gracefully and at the count where it does collapse the numbers scream. **Something else is
+going on, and it has not been found.**
+
+**The most likely next question, named but NOT chased** (founder bounded this run at STOP 1): with N
+clips stacked on N tracks, only the TOPMOST opaque layer is visible. `minMediaFps` reports the worst
+layer anywhere in the stack; the user sees only the top one. A top layer frozen while five hidden layers
+deliver would produce exactly the founder's signature — summed Media healthy, per-layer minimum possibly
+healthy too, and a frozen picture. Neither the HUD nor this probe currently distinguishes "the visible
+layer stalled" from "some layer stalled". That is a different instrument gap from the sum-vs-minimum one
+already fixed, and it is the first thing to test next.
+
+**One confound found and removed mid-run, recorded because it produced a plausible false positive.** The
+first execution of this probe selected imported clips smallest-first with no duration filter, drawing
+0.7s-4.4s clips that ENDED partway through the 10s window. An ended clip stops ticking rVFC and reads
+`minMediaFps = 0.0` — indistinguishable from the stalled-decoder collapse under test. That run showed
+"collapse at N=6" (minMedia 0.0, layer count decaying 3 → 1 while fps recovered) and would have
+CONFIRMED the founder's hypothesis on false evidence. `editor-session.ts:65` already carries this scar
+for the seed clip ("a seed clip must outlast the window that samples it"); the rule had never been
+applied to imported clips. `seedClips` now filters on `mvhd` duration ≥15s. The numbers above are from
+the corrected run.
+
+**Reproducibility caveat, stated rather than assumed away**: one run per arm. Per DEBT-032's own lesson
+in this same file, a single clean reading against a possibly-stochastic phenomenon is not a distribution.
+The N=6-vs-N=10 boundary should be treated as indicative, not established.
+
 ---
 
 ### STOP 2 — HUD fix, `frame-stats.ts` / `PreviewStatsOverlay.tsx` (shipped, not a debt entry)

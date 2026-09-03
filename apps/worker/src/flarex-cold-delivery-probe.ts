@@ -46,6 +46,8 @@ const N_LADDER = [1, 3, 6, 10];
 const COLD_WAIT_MS = 2_000;
 const SAMPLE_COUNT = 10;
 const SAMPLE_INTERVAL_MS = 1_000;
+/** Every clip must outlast the whole sample window with margin — see `seedClips`. */
+const MIN_CLIP_SECONDS = 15;
 
 interface DeliverySample {
   t: number;
@@ -57,6 +59,37 @@ interface DeliverySample {
   playing: boolean;
 }
 
+/** Duration from the mp4 `mvhd` box (same dependency-free read `editor-session.ts` uses), or null. */
+function mp4DurationSeconds(file: string): number | null {
+  try {
+    const bytes = fs.readFileSync(file);
+    const at = bytes.indexOf(Buffer.from("mvhd"));
+    if (at < 0) return null;
+    const version = bytes[at + 4];
+    if (version === 0) {
+      const timescale = bytes.readUInt32BE(at + 16);
+      return timescale > 0 ? bytes.readUInt32BE(at + 20) / timescale : null;
+    }
+    const timescale = bytes.readUInt32BE(at + 24);
+    return timescale > 0 ? Number(bytes.readBigUInt64BE(at + 28)) / timescale : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clips that OUTLAST the sample window, smallest-first among those.
+ *
+ * THE FIRST RUN OF THIS PROBE WAS CONFOUNDED BY EXACTLY THIS and the result had to be thrown away:
+ * picking smallest-first without a duration filter selected 0.7s-4.4s clips, which ENDED partway
+ * through the 10s window. A layer whose clip has finished stops ticking `requestVideoFrameCallback`
+ * and therefore reads `minMediaFps = 0.0` — indistinguishable from the stalled-decoder collapse this
+ * probe exists to detect. The layer count visibly decayed (3 → 1 at N=6, 7 → 2 at N=10) while fps
+ * recovered, which is the signature of load draining away, not of a machine coping.
+ *
+ * `editor-session.ts:65` already carries this scar for the SEED clip ("a seed clip must outlast the
+ * window that samples it") — the same rule has to apply to every imported clip, not just the seed.
+ */
 function seedClips(count: number): string[] {
   const dir = path.join(repoRoot, "apps/api/storage/finals");
   const files = fs
@@ -64,8 +97,13 @@ function seedClips(count: number): string[] {
     .filter((name) => name.endsWith(".mp4"))
     .map((name) => path.join(dir, name))
     .filter((file) => fs.statSync(file).size > 0)
-    .sort((a, b) => fs.statSync(a).size - fs.statSync(b).size);
-  if (files.length < count) throw new Error(`need ${count} distinct clips, found ${files.length}`);
+    .map((file) => ({ file, seconds: mp4DurationSeconds(file) }))
+    .filter((entry) => entry.seconds != null && entry.seconds >= MIN_CLIP_SECONDS)
+    .sort((a, b) => fs.statSync(a.file).size - fs.statSync(b.file).size)
+    .map((entry) => entry.file);
+  if (files.length < count) {
+    throw new Error(`need ${count} distinct clips of >=${MIN_CLIP_SECONDS}s, found ${files.length}`);
+  }
   return files.slice(0, count);
 }
 
