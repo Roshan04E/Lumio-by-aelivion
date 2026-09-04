@@ -6102,3 +6102,25 @@ failed with `NotReadableError: The requested file could not be read, typically d
 problems that have occurred after a reference to a file was acquired.` — a READ failure on the source
 File, not a write failure. It appeared in both post-fix runs. Recorded so it is not mistaken for a quota
 symptom later.
+
+**UPDATE 2026-09-04 (c) — T-16 CLOSED on the permanent badge: 4 of 4 VISIBLE, measured.**
+`debt034-badge-visibility-probe.ts` (new, committed). The declared gap is now a measurement: the badge
+no longer inherits its standing from the 19/19 badge, it has its own. Checker falsified first
+(`plainVisible:true, hiddenByAncestorOpacity:false, hiddenByAncestorDisplay:false, hiddenByCover:false`),
+run VOIDs if that ever fails.
+
+**Two false FAILs on the way, and both were the instrument, not the badge — the same lesson as the play
+trap, in a different costume:**
+1. **4 of 4 "not visible", every one with `cumulativeOpacity: 1`.** They sat at y=886-1021 in a 900px
+   viewport: BELOW THE FOLD, because nine stacked tracks do not fit on screen. **"Hidden" (opacity,
+   display, covered — the user can never see it) and "off-screen" (the user scrolls to the clip, as they
+   must to look at it at all) are different claims**, and a checker that requires viewport intersection
+   reports the second as the first. Scrolling to the element is the fair precondition.
+2. **Then 2-3 of 4-5 still "covered"**, hit-testing to `studio-panel`, `timeline-timebar`,
+   `asset-control-strip`. Cause: scrolling every badge in sequence leaves only the LAST one well
+   positioned and the others wherever that final scroll dropped them. **That measures the scroll
+   position, not the badge.** Judged one at a time — scroll to a badge, check that badge — all four pass.
+
+The rule worth keeping from both: a visibility checker must be told what question it is answering. "Is
+this on screen right now, in the state I happened to leave the page in" is not "can the user see this
+when they look at the thing it belongs to."
