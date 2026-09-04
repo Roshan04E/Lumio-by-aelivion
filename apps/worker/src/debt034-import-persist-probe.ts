@@ -147,6 +147,16 @@ const READ_STATE = `(async function () {
 async function runOnce(channel: string | undefined, run: number, files: string[]) {
   const browser = await chromium.launch({ ...(channel ? { channel } : {}), headless: false });
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  // MEASURE BOTH STORAGE REGIMES, do not assume which one the product lives in. A fresh automation
+  // profile has no site engagement, so Chrome DENIES navigator.storage.persist() — every DEBT-034
+  // reading so far came from the non-persisted, best-effort regime, which is evictable and allotted on
+  // much tighter terms. Chrome auto-grants persistence to an origin holding the notifications
+  // permission, so PROBE_GRANT_PERSIST=1 buys the persisted regime without any product change and makes
+  // "is ~0.8GB the product's ceiling or the harness's?" an answerable question rather than a caveat.
+  if (process.env.PROBE_GRANT_PERSIST === "1") {
+    await context.grantPermissions(["notifications"], { origin: "http://localhost:5173" }).catch(() => undefined);
+    console.log("  granted notifications permission (Chrome auto-grants persistent storage to such origins)");
+  }
   const page = context.pages()[0] ?? (await context.newPage());
   page.on("pageerror", (e) => process.stdout.write(`[pageerror] ${String(e)}\n`));
 

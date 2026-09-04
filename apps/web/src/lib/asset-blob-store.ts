@@ -123,11 +123,34 @@ if (typeof window !== "undefined") {
 
 /** Ask the browser to keep our storage from being evicted under pressure. Best-effort. */
 export async function requestPersistentAssetStorage(): Promise<void> {
-  try {
-    await (navigator.storage as StorageManager & { persist?: () => Promise<boolean> })?.persist?.();
-  } catch {
-    /* ignore — not critical */
-  }
+  await ensurePersistentAssetStorage();
+}
+
+let persistRequest: Promise<boolean> | null = null;
+/**
+ * Request persistent storage ONCE, and resolve to whether it was granted.
+ *
+ * ORDERING IS THE WHOLE POINT (DEBT-034, 2026-09-04). The old call site fired this AFTER a successful
+ * `put`, so it could only ever run in the case where storage was NOT the problem — the imports that
+ * needed the larger allowance were exactly the ones that never reached the request. Measured: eleven
+ * ~120MB imports threw `QuotaExceededError` on 5 of 11, at ~0.7-0.9GB, while `estimate().quota`
+ * advertised 3.25-4.09GB and `persisted()` stayed false throughout.
+ *
+ * A non-persisted origin gets BEST-EFFORT, evictable storage on much tighter terms than a persisted
+ * one, so asking first is not a formality — it is the difference between the two regimes. Idempotent
+ * because the browser answer never changes within a session, and awaiting it per file would put a
+ * permission round-trip in front of every write.
+ */
+export function ensurePersistentAssetStorage(): Promise<boolean> {
+  return (persistRequest ??= (async () => {
+    try {
+      const storage = navigator.storage as StorageManager & { persist?: () => Promise<boolean>; persisted?: () => Promise<boolean> };
+      if (await storage?.persisted?.()) return true; // already granted — do not re-prompt
+      return (await storage?.persist?.()) ?? false;
+    } catch {
+      return false; // not supported / blocked — the caller carries on with best-effort storage
+    }
+  })());
 }
 
 async function createStore(): Promise<AssetBlobStore> {

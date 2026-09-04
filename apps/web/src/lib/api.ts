@@ -12,11 +12,40 @@ interface PersistOutcomeLog {
   resolvedButMissing: number;
   errors: string[];
   missingSizes: number[];
+  grant?: { before: unknown; granted: boolean; after: unknown };
 }
 function persistLog(): PersistOutcomeLog {
   const w = globalThis as unknown as { __rfImportPersist?: PersistOutcomeLog };
   return (w.__rfImportPersist ??= { ok: 0, threw: 0, resolvedButMissing: 0, errors: [], missingSizes: [] });
 }
+/**
+ * Records the storage regime ONCE, around the persistence request, so "which regime were we measuring?"
+ * is answered by data rather than by assumption. A non-persisted origin gets best-effort, evictable
+ * storage on much tighter terms, and every DEBT-034 reading so far came from a fresh Playwright profile
+ * with `persisted() === false` — so the granted quota in BOTH states is the number that says whether
+ * ~0.8GB was the product's ceiling or the harness's.
+ */
+async function notePersistGrant(): Promise<void> {
+  const log = persistLog();
+  if (log.grant) {
+    await ensurePersistentAssetStorage();
+    return;
+  }
+  const read = async () => {
+    try {
+      const e = await navigator.storage?.estimate?.();
+      const p = await (navigator.storage as StorageManager & { persisted?: () => Promise<boolean> })?.persisted?.();
+      return { quota: e?.quota ?? null, usage: e?.usage ?? null, persisted: p ?? null };
+    } catch {
+      return { quota: null, usage: null, persisted: null };
+    }
+  };
+  const before = await read();
+  const granted = await ensurePersistentAssetStorage();
+  const after = await read();
+  log.grant = { before, granted, after };
+}
+
 function notePersistOutcome(outcome: "ok" | "threw" | "resolved-but-missing", sizeBytes: number, error?: unknown): void {
   const log = persistLog();
   if (outcome === "ok") {
@@ -60,7 +89,7 @@ import {
   type TemplateDefinition,
   type ToolDefinition
 } from "@orreris/shared";
-import { getAssetBlobStore, requestPersistentAssetStorage } from "./asset-blob-store";
+import { ensurePersistentAssetStorage, getAssetBlobStore } from "./asset-blob-store";
 import { createTrackedObjectUrl } from "./object-url-registry";
 // Runtime-only use (inside function bodies) — safe across the api⇄sync circular edge; no top-level call.
 import {
@@ -465,6 +494,10 @@ export async function createAsset(input: CreateAssetInput) {
     if (file) {
       try {
         const store = await getAssetBlobStore();
+        // BEFORE the write, not after it (DEBT-034). Fired post-`put`, this could only ever run when
+        // storage was not the problem; the imports that needed the bigger allowance never reached it.
+        // Idempotent, so this is one round-trip per session, not per file.
+        await notePersistGrant();
         // Local taxonomy mirror (plans/media-cloud-architecture.md): project-owned bytes live under
         // the project's OPFS home, library assets under library/. Purely organizational — reads
         // stay id-keyed with a legacy-flat fallback.
@@ -477,7 +510,6 @@ export async function createAsset(input: CreateAssetInput) {
         // landed". They are different defects with different fixes, and the swallowing catch below
         // made them indistinguishable. Reached only when put() did NOT throw.
         notePersistOutcome(bytesPersisted ? "ok" : "resolved-but-missing", file.size);
-        void requestPersistentAssetStorage();
         // TRACKED (DEBT-019): `file` is the user's own disk-backed File from the picker — the
         // decoder can slice it in place, so never let it be re-fetched into a RAM copy.
         liveUrl = (await store.getObjectUrl(id)) ?? createTrackedObjectUrl(file);

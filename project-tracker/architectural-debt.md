@@ -6063,3 +6063,42 @@ asking for persistent storage BEFORE the first large write rather than after a s
 (`requestPersistentAssetStorage` is currently fired post-put, and only on success), keeping the store
 inside a measured budget with eviction of what is reconstructible, and telling the user their device is
 out of room — which the surfacing fix already does per-file.
+
+**UPDATE 2026-09-04 (b) — the ordering bug is FIXED, and it changes nothing HERE, which is itself the
+answer to the profile question. THE ~0.85GB CEILING IS A HARNESS ARTIFACT.**
+
+The ordering defect was real: `requestPersistentAssetStorage()` fired AFTER a successful `put`, so it
+could only ever run in the case where storage was not the problem. Now `ensurePersistentAssetStorage()`
+(idempotent, once per session) is **awaited before the first write**. That is correct regardless of what
+follows.
+
+**It does not help in this harness, because Chrome REFUSES the request:**
+```
+grant: { before: { quota: 3.25GB, usage: 0.03GB, persisted: false },
+         granted: FALSE,
+         after:  { quota: 3.25GB, usage: 0.03GB, persisted: false } }
+result: 5 of 11 still fail, QuotaExceededError, enforced ceiling ~0.74-0.86GB
+```
+Persistence is granted on ENGAGEMENT heuristics (site engagement score, bookmarks, installed PWA), and a
+fresh automation profile has none. A second run granting the `notifications` permission — the documented
+auto-grant route — **also returned `granted: false`** (4 of 11 failed, ~0.86GB). So the persisted regime
+could not be reached from here at all.
+
+**SAY IT LOUDLY, as instructed: every DEBT-034 number on file was measured in the NON-PERSISTED,
+zero-engagement, best-effort regime, which is evictable and allotted on much tighter terms than a real
+user's profile.** `estimate().quota` advertised 3.25-4.09GB while the browser enforced ~0.85GB — the
+advertised figure is not the enforced one in this regime either. A real long-lived Chrome profile with
+engagement is a different allowance, and **whether a real user ever hits this is still unmeasured**.
+Consequences to carry forward:
+- **DEBT-034 does NOT close**, but its real-user severity is now in doubt rather than assumed high.
+- **A caveat lands on the earlier DEBT-033 arms too**: the 4-of-11 `"no local bytes"` skips that voided
+  the warm 4K N=11 ceiling arm were this same quota refusal, in this same artificial regime. That arm
+  was blocked by the harness, not by the product.
+- **Do NOT build a store budget or an eviction policy on ~0.85GB** — it is a number from a profile no
+  user has.
+
+**One new failure mode seen in passing, not chased**: alongside the QuotaExceededErrors, one import
+failed with `NotReadableError: The requested file could not be read, typically due to permission
+problems that have occurred after a reference to a file was acquired.` — a READ failure on the source
+File, not a write failure. It appeared in both post-fix runs. Recorded so it is not mistaken for a quota
+symptom later.
