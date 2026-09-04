@@ -5819,6 +5819,49 @@ was individually plausible:
    advances continuously inside a build and answers the actual question. A probe that can only observe
    an event rarer than its own window cannot tell a working fix from a broken one.
 
+**UPDATE 2026-09-04 (i) — THE PLAY GATE. Founder rule: never start playback on un-optimized media; show
+the work and its real progress instead. Built and verified 8/8 at the canvas.**
+
+Everything measured in this chapter is the argument for it: playing 4K originals does not degrade, it
+COLLAPSES (canvas unchanged across 23 samples spanning 18.1s of advancing clock) while the HUD reported
+56-67fps over a picture that had not moved. So pressing play with builds in flight now opens
+`ProxyOptimizationDialog` instead: one row per asset, a percentage from the ENCODER'S OWN FRAME COUNTER
+(`getSourceProxyTasks` ← `reportProgress`), and playback starting by itself the moment the wait is over.
+
+**BLOCKING vs TERMINAL is what keeps the gate from being the trap the founder warned about when we
+first discussed gating.** Only `queued`/`building` block — those finish. `failed` and `skipped` never
+will (a `skipped: "no local bytes"` asset can never be proxied this session, DEBT-034), so waiting on
+them would replace a freeze with a PERMANENT BLOCK on a clip the user cannot diagnose. They are listed
+with their reason and excluded from the wait, and "Play anyway" is always present — a default, never a
+cage. Placement itself is never gated: a clip always lands on the timeline and stays fully editable.
+
+Verified by `debt033-play-gate-probe.ts` (new), cold 4K N=3, **8 passed / 0 failed**: the window opens,
+`playing` stays false, the transport clock does not advance (0.00 → 0.00), a task's percentage ADVANCES
+(`waiting → 5%` — real frames, not a timer), "Play anyway" is offered, the window closes by itself, and
+playback then starts with no second gesture and the canvas moves 9/9 samples.
+
+**URGENT MODE, shipped alongside it.** Builds waited for an idle window before starting and took a
+paint/GC breather every 30 frames — politeness that protects an EDITING SESSION. While the gate window
+is open there is no editing session: the user is watching a progress bar, waiting on that exact work.
+`setSourceProxyUrgent(true)` drops both while the window is up. The per-frame yield STAYS, because the
+window's own progress bar needs the main thread — a build that starves the UI reporting on it is its own
+defect. Concurrency and the suspend-during-playback rule are deliberately untouched: those carry the
+2026-07-27 GPU-crash and 2026-07-06 freeze scars respectively.
+
+**THREE VOIDED RUNS ON THE WAY, ALL THE SAME SELF-INFLICTED ERROR: I changed the product underneath a
+running instrument.** The pixel-budget sweep was mid-flight when the gate landed, so the dev server
+hot-reloaded it and later arms measured the GATE rather than decode (`VOID — clock did not advance`,
+three in a row); killed and discarded rather than salvaged. Then a gate run picked up a half-finished
+engine edit (`ReferenceError: urgent is not defined`) and reported three failures that were the broken
+module, not the feature. Then killing the sweep orphaned 8 Chrome processes, which preflight correctly
+refused to run against. **Rule earned: no product edits while a probe is running against the dev
+server.** The repo already had the machine-quiet precondition; this is the software-quiet twin.
+
+One further instrument correction, kept because it will recur: the gate probe first asserted "the canvas
+did not change" and FAILED — the modal's backdrop covers the canvas, so an element screenshot of that
+region captures the dialog painted over it. Sameness is unmeasurable through a modal; the transport
+CLOCK is the honest witness that playback never started.
+
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
   frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and

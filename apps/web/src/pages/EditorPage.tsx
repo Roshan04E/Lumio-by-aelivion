@@ -305,12 +305,15 @@ import {
   setSourceProxyPartialListener,
   setSourceProxyPlayheadResolver,
   setSourceProxyProgressListener,
-  getSourceProxyDrainSummary
+  getSourceProxyDrainSummary,
+  getBlockingSourceProxyTasks,
+  setSourceProxyUrgent
 } from "../editor/performance/sourceProxyEngine";
 import { describeProxyDrainOutcome, describeProxyPlaybackCost } from "../editor/performance/sourceProxyNotice";
 import { setWorldAssetProvider } from "../ai/world";
 import { isBackgroundWorkAllowed, setBackgroundGate, subscribeBackgroundGate } from "../editor/performance/backgroundScheduler";
 import { isPlaybackStalled, startPlaybackLivenessWatch, subscribePlaybackLiveness } from "../editor/performance/playbackLiveness";
+import { ProxyOptimizationDialog } from "../components/ProxyOptimizationDialog";
 import { ensureDegradationControllerStarted } from "../editor/performance/degradation";
 import { captureSpanProxyFromViewer, verifySpanProxyAgainstViewer, ViewerCaptureAborted } from "../editor/performance/viewerProxyCapture";
 import { getProxyViewerCaptureEnabled } from "../color/render-engine";
@@ -1002,6 +1005,14 @@ export function EditorPage() {
   const [generateStudioOpen, setGenerateStudioOpen] = useState(false);
   const [generateStudioPrefill, setGenerateStudioPrefill] = useState<GenerateStudioPrefill | undefined>(undefined);
   const [isPlaying, setIsPlaying] = useState(false);
+  /** Non-null while the "Optimizing media" window is up — the asset ids it is waiting on. */
+  const [proxyGateAssetIds, setProxyGateAssetIds] = useState<string[] | null>(null);
+  // While the gate window is up the user is waiting on these builds and doing nothing else, so the
+  // engine drops the politeness it keeps for an active editing session (see setSourceProxyUrgent).
+  useEffect(() => {
+    setSourceProxyUrgent(proxyGateAssetIds !== null);
+    return () => setSourceProxyUrgent(false);
+  }, [proxyGateAssetIds]);
   const [playbackStart, setPlaybackStart] = useState<{ clockMs: number; timeSeconds: number } | null>(null);
   // Transport "A" (Auto) toggle: ON = adaptive quality may drop playback res below the chosen
   // profile under load; OFF = the manual ¼/½/1 choice is absolute (strong-GPU users).
@@ -7631,10 +7642,38 @@ export function EditorPage() {
     setIsPlaying(true);
   }
 
+  /**
+   * Asset ids the composition actually uses. Only these are worth waiting on — an unrelated import
+   * still optimizing in the background must never hold up playback of a timeline that does not use it.
+   */
+  function timelineAssetIds(): string[] {
+    const ids = new Set<string>();
+    for (const track of composition?.tracks ?? []) {
+      for (const layer of track.layers) {
+        if (layer.type === "video" && layer.assetId) ids.add(layer.assetId);
+      }
+    }
+    return Array.from(ids);
+  }
+
+  /**
+   * FOUNDER RULE (2026-09-04): never start playback on un-optimized media — show the work instead.
+   * Playing 4K originals does not degrade, it collapses (canvas frozen 100% of the time, measured), so
+   * the honest response to "play" is to show what has to finish and how far along it is.
+   *
+   * Only `queued`/`building` block. Terminal outcomes never resolve, and waiting on them would turn a
+   * freeze into a permanent block on a clip the user cannot diagnose — the dialog lists those with
+   * their reason instead. "Play anyway" always exists, so this is a default, never a cage.
+   */
   function togglePlayback() {
     stopShuttle();
     if (isPlayingRef.current) {
       pausePlaybackAtLiveClock();
+      return;
+    }
+    const blocking = getBlockingSourceProxyTasks(timelineAssetIds());
+    if (blocking.length > 0) {
+      setProxyGateAssetIds(timelineAssetIds());
       return;
     }
     startEnginePlayback();
@@ -8815,6 +8854,22 @@ export function EditorPage() {
       </div>
       {/* Transient action feedback — module-store leaf, so toasts don't re-render EditorPage. */}
       <NoticeToast />
+      {proxyGateAssetIds ? (
+        <ProxyOptimizationDialog
+          assetIds={proxyGateAssetIds}
+          assets={assets}
+          onReady={() => {
+            // Everything blocking has finished — close and play, with no second gesture from the user.
+            setProxyGateAssetIds(null);
+            startEnginePlayback();
+          }}
+          onCancel={() => setProxyGateAssetIds(null)}
+          onPlayAnyway={() => {
+            setProxyGateAssetIds(null);
+            startEnginePlayback();
+          }}
+        />
+      ) : null}
 
       {/* Ambiguous transition target — several clips under the playhead; ask which one. */}
       {transitionChoice ? (

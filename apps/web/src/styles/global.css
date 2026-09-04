@@ -26438,3 +26438,111 @@ h3.notes-note-md-heading {
   line-height: 1.35;
   color: var(--nle-dim);
 }
+
+/* ── "Optimizing media" gate (DEBT-033, 2026-09-04) ────────────────────────────────────────────
+   Shown instead of starting playback on media whose proxies are still building. Deliberately a real
+   modal: the measured alternative is a preview frozen 100% of the time with a HUD reporting 60fps. */
+.proxy-optimize-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 8, 12, 0.62);
+  backdrop-filter: blur(2px);
+}
+.proxy-optimize-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(70vh, 640px);
+  overflow: auto;
+  padding: 20px 22px 18px;
+  border-radius: 14px;
+  background: #14171d;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  color: #e8ecf3;
+}
+.proxy-optimize-head h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.proxy-optimize-head p {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #9aa4b4;
+}
+.proxy-optimize-progress-summary {
+  font-size: 12px;
+  color: #c7d0dd;
+  margin-bottom: 10px;
+}
+.proxy-optimize-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.proxy-optimize-row {
+  display: grid;
+  grid-template-columns: 1fr 120px 56px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.proxy-optimize-row.is-terminal {
+  grid-template-columns: 1fr auto;
+  color: #f0b6ab;
+}
+.proxy-optimize-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proxy-optimize-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.proxy-optimize-bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #3f7dd6, #5aa2f5);
+  transition: width 240ms ease;
+}
+.proxy-optimize-pct {
+  text-align: right;
+  color: #9aa4b4;
+  font-variant-numeric: tabular-nums;
+}
+.proxy-optimize-terminal {
+  font-size: 11.5px;
+  text-align: right;
+}
+.proxy-optimize-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.proxy-optimize-secondary {
+  padding: 7px 13px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e8ecf3;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.proxy-optimize-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.proxy-optimize-footnote {
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #7d8797;
+}

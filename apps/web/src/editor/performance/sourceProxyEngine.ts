@@ -275,6 +275,9 @@ function reportProgress(encodedFrames: number, totalFrames: number): void {
   const s = stats() as SourceProxyStats & { progressFrames?: number; progressTotal?: number };
   s.progressFrames = encodedFrames;
   s.progressTotal = totalFrames;
+  // Wake state subscribers so the optimization window shows REAL progress rather than a spinner. Fires
+  // once per 30 encoded frames (~1Hz), not per frame.
+  notifyStateChanged();
   if (!progressListener || !progressAssetId || totalFrames <= 0) return;
   const percent = Math.max(0, Math.min(100, Math.round((encodedFrames / totalFrames) * 100)));
   const step = Math.floor(percent / 5);
@@ -433,6 +436,63 @@ export function getSourceProxyState(assetId: string): SourceProxyState {
   return "none";
 }
 
+export interface SourceProxyTask {
+  assetId: string;
+  state: SourceProxyState;
+  /** 0-100 for the build actually running; null for queued and settled tasks. */
+  percent: number | null;
+  /** Terminal reason for `failed`/`skipped` — e.g. "no local bytes". */
+  note?: string | undefined;
+}
+
+/**
+ * Per-asset optimization status for a specific set of assets — what the "Optimizing media" window
+ * shows, and what the transport consults before starting playback.
+ *
+ * BLOCKING vs TERMINAL is the distinction that keeps this from becoming a trap. `queued` and
+ * `building` WILL finish, so waiting on them is honest. `failed` and `skipped` will NOT — a
+ * `skipped: "no local bytes"` asset can never be proxied in this session no matter how long anyone
+ * waits (DEBT-034) — so treating those as "not ready yet" would block the transport permanently on a
+ * clip the user cannot diagnose. They are reported with their reason and excluded from the wait.
+ */
+export function getSourceProxyTasks(assetIds: readonly string[]): SourceProxyTask[] {
+  const s = stats() as SourceProxyStats & { progressFrames?: number; progressTotal?: number };
+  const seen = new Set<string>();
+  const tasks: SourceProxyTask[] = [];
+  for (const assetId of assetIds) {
+    if (seen.has(assetId)) continue;
+    seen.add(assetId);
+    const state = getSourceProxyState(assetId);
+    const active = s.active === assetId && s.progressTotal ? Math.round(((s.progressFrames ?? 0) / s.progressTotal) * 100) : null;
+    tasks.push({
+      assetId,
+      state,
+      percent: active === null ? null : Math.max(0, Math.min(100, active)),
+      note: sessionOutcomes.get(assetId)?.note
+    });
+  }
+  return tasks;
+}
+
+/**
+ * URGENT: the user is sitting in front of the "Optimizing media" window waiting on these builds, so the
+ * politeness that protects an editing session is now just delay. Skips the idle-window wait between
+ * builds and the paint/GC breather inside the main-thread transcode; the per-frame yield stays, because
+ * the window's own progress bar needs the main thread.
+ *
+ * Deliberately NOT a change to concurrency or to the suspend-during-playback rule — both of those carry
+ * the 2026-07-27 GPU-process crash and the 2026-07-06 "plays ~4s then freezes" scars respectively.
+ */
+let urgent = false;
+export function setSourceProxyUrgent(value: boolean): void {
+  urgent = value;
+}
+
+/** Tasks that WILL complete if waited on. Terminal outcomes are deliberately not included. */
+export function getBlockingSourceProxyTasks(assetIds: readonly string[]): SourceProxyTask[] {
+  return getSourceProxyTasks(assetIds).filter((t) => t.state === "queued" || t.state === "building");
+}
+
 /**
  * DIAGNOSTIC: force a fresh rebuild of one asset's proxy. Deletes the persisted blob and clears the
  * per-session guards (`settled`/`inQueue`/`buildRetries` + the recent record) so `ensureSourceProxy`
@@ -503,7 +563,13 @@ async function drainQueue(): Promise<void> {
       stats().queued = queue.length;
       // Wait for an idle window before starting each build so an active editing burst always wins
       // the main thread; the per-frame yields inside buildOne keep it responsive once running.
-      await new Promise<void>((resolve) => whenIdle(resolve));
+      //
+      // URGENT skips that wait (2026-09-04). The idle-window rule protects an INTERACTION — the user
+      // editing while work happens behind them. While the "Optimizing media" window is open there is no
+      // such interaction: the user is watching a progress bar, waiting on this exact work, and yielding
+      // to an idle moment that will not come just makes them wait longer. Same reasoning as the
+      // play-trap fix — do not protect an activity that is not occurring.
+      if (!urgent) await new Promise<void>((resolve) => whenIdle(resolve));
       await waitWhileSuspended();
       stats().active = item.asset.id;
       progressAssetId = item.asset.id;
@@ -1184,8 +1250,12 @@ async function transcodeOnMainThread(
       // Yield after EVERY frame so the transcode never holds the main thread longer than one frame's
       // work — the user's clicks/scrubs interleave instead of waiting behind a batch. A longer
       // setTimeout breather every N frames additionally lets the browser do paint/GC.
+      // The per-frame yield ALWAYS stays: the optimization window's own progress bar needs the main
+      // thread to repaint, and a build that starves the UI it is reporting to is its own defect. Only
+      // the extra breather — there to leave room for paint/GC while the user edits — is dropped when
+      // the user is explicitly waiting on this build.
       await yieldToMain();
-      if (i % BREATHER_EVERY_FRAMES === 0) {
+      if (!urgent && i % BREATHER_EVERY_FRAMES === 0) {
         await new Promise((resolve) => setTimeout(resolve, BREATHER_MS));
       }
     }
