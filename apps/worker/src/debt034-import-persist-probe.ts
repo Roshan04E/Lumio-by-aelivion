@@ -121,6 +121,7 @@ const READ_STATE = `(async function () {
   // handle. Inferring it from outside was wrong twice — an OPFS walk misses the IndexedDB backend, and
   // reading both still showed 0.04GB against 0.85GB of reported usage while disagreeing with the proxy
   // engine's own count. The directory listings above are kept only as context around this answer.
+  out.persistLog = window.__rfImportPersist || null;
   out.storeKind = null;
   var api = window.__rfAssetBlobStore;
   if (api) { try { out.storeKind = await api.kind(); } catch (e) { out.storeKind = "err:" + String(e); } }
@@ -198,6 +199,7 @@ async function runOnce(channel: string | undefined, run: number, files: string[]
       `persisted=${after.persisted}, store=${(after as any).storeKind}, opfs files ${after.opfsFiles} / ${fmtGB(after.opfsBytes)}, idb keys ${(after as any).idbKeys?.length ?? "?"}`
   );
   console.log(`  [run ${run}] bytes handed to the importer: ${fmtGB(handed)}`);
+  console.log(`  [run ${run}] PERSIST OUTCOMES: ${JSON.stringify((after as any).persistLog)}`);
   if (after.walkError) console.log(`  [run ${run}] OPFS walk error: ${after.walkError}`);
   if (!after.assetKeyFound) console.log(`  [run ${run}] ⚠ no local-assets key found in localStorage — rows below may be incomplete`);
 

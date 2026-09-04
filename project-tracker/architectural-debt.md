@@ -6021,3 +6021,45 @@ against a consumer that already knew the answer.
 
 - Status after this: silent success FIXED and verified; mechanism narrowed to pressure-under-burst with
   quota excluded; the failing STAGE still unnamed (the remaining work).
+
+**UPDATE 2026-09-04 — THE STAGE IS NAMED, AND IT CORRECTS THE UPDATE ABOVE. It IS quota, it DOES throw,
+and my "pressure, not a limit" call was WRONG.**
+
+Two hypotheses were on the table and both are now falsified by direct evidence:
+- **Concurrency (founder's, "eleven OPFS writables open at once")** — falsified by code, no run needed.
+  `processUploadFiles` (`EditorPage.tsx:12945`) is `for (const … of entries) { await onUploadAsset(…) }`,
+  and `persistLocally` awaits `store.put`. **Imports are already serialised, one file at a time.** A
+  write queue would change nothing because one is effectively already there.
+- **Mine ("pressure, not a limit")** — falsified by instrumenting throw-vs-silent-loss, which is exactly
+  the split the founder asked for. Result from eleven ~120MB imports:
+  ```
+  { ok: 6, threw: 5, resolvedButMissing: 0,
+    errors: 5x "QuotaExceededError: The operation failed because it would cause the application to
+                exceed its storage quota." }
+  ```
+  **Every failure THREW, none silently lost data.** It is an ordinary, correctly-reported browser error
+  that the old `catch {}` swallowed — not an exotic commit failure.
+
+**WHY I GOT IT WRONG, because the reasoning error is the reusable part.** I concluded "quota is
+excluded" because `navigator.storage.estimate().quota` read 3.25-4.09GB while `usage` plateaued at
+~0.85GB — a fifth of the offer. **`estimate().quota` is not the enforced limit**; the browser refused at
+roughly 0.7-0.9GB regardless of what it advertised. And the "moving failure set" that convinced me of
+pressure is fully explained by a fixed BYTE boundary landing mid-list: the clips ascend 106→138MB, and
+the first six total ~698MB ≈ the 0.72GB usage observed. Which clips fail shifts by one when the boundary
+falls between two files; the CUMULATIVE BYTES do not move. **I compared identity sets when the thing
+being bounded was bytes** — a determinism test that asks the wrong question returns a confident wrong
+answer.
+
+**A LIMIT ON WHAT THIS MEASURES, and it matters before anyone acts on the number.** Every run here used
+a FRESH PLAYWRIGHT PROFILE with `navigator.storage.persisted() === false`, i.e. best-effort storage in a
+throwaway profile. A real user's Chrome profile — long-lived, possibly with persistence granted — may be
+given a very different allowance. **So the MECHANISM is established (quota refusal, thrown, previously
+swallowed) while the THRESHOLD is not transferable.** Whether a real profile hits this at eleven 4K
+clips is unmeasured, and the earlier DEBT-033 arms that showed 4-of-11 skips were also Playwright
+profiles, so they cannot settle it either.
+
+**What this implies for the fix** (not built here): a write queue is NOT the answer. The candidates are
+asking for persistent storage BEFORE the first large write rather than after a successful one
+(`requestPersistentAssetStorage` is currently fired post-put, and only on success), keeping the store
+inside a measured budget with eviction of what is reconstructible, and telling the user their device is
+out of room — which the surfacing fix already does per-file.

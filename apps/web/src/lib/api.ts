@@ -1,4 +1,36 @@
 import { setNotice } from "./noticeStore";
+
+/**
+ * DEBT-034 import-persist telemetry (`window.__rfImportPersist`). Records, per local import, whether the
+ * on-device write THREW or RESOLVED-AND-LOST-THE-DATA — two different defects that the old swallowing
+ * `catch` rendered identical from the outside, and which need different fixes (an error to handle vs a
+ * commit that silently does nothing).
+ */
+interface PersistOutcomeLog {
+  ok: number;
+  threw: number;
+  resolvedButMissing: number;
+  errors: string[];
+  missingSizes: number[];
+}
+function persistLog(): PersistOutcomeLog {
+  const w = globalThis as unknown as { __rfImportPersist?: PersistOutcomeLog };
+  return (w.__rfImportPersist ??= { ok: 0, threw: 0, resolvedButMissing: 0, errors: [], missingSizes: [] });
+}
+function notePersistOutcome(outcome: "ok" | "threw" | "resolved-but-missing", sizeBytes: number, error?: unknown): void {
+  const log = persistLog();
+  if (outcome === "ok") {
+    log.ok += 1;
+    return;
+  }
+  if (outcome === "threw") {
+    log.threw += 1;
+    log.errors.push(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+  } else {
+    log.resolvedButMissing += 1;
+  }
+  log.missingSizes.push(sizeBytes);
+}
 import {
   createProjectEffect,
   createDefaultComposition,
@@ -441,11 +473,16 @@ export async function createAsset(input: CreateAssetInput) {
         // now": the OPFS write is staged through `createWritable` and a full disk, a revoked grant or
         // a quota refusal can still leave nothing behind. `has()` is the only authority on this.
         bytesPersisted = await store.has(id).catch(() => false);
+        // DEBT-034 diagnosis: separate "the write THREW" from "every promise resolved and no data
+        // landed". They are different defects with different fixes, and the swallowing catch below
+        // made them indistinguishable. Reached only when put() did NOT throw.
+        notePersistOutcome(bytesPersisted ? "ok" : "resolved-but-missing", file.size);
         void requestPersistentAssetStorage();
         // TRACKED (DEBT-019): `file` is the user's own disk-backed File from the picker — the
         // decoder can slice it in place, so never let it be re-fetched into a RAM copy.
         liveUrl = (await store.getObjectUrl(id)) ?? createTrackedObjectUrl(file);
-      } catch {
+      } catch (error) {
+        notePersistOutcome("threw", file.size, error);
         liveUrl = createTrackedObjectUrl(file); // session-only last resort
       }
       if (!bytesPersisted) {
