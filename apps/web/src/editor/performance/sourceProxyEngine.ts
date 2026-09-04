@@ -373,7 +373,49 @@ function noteMeasuredDense(assetId: string, profile: GopProfile | null): void {
   }
 }
 const queue: Array<{ asset: SourceAsset; onReady: ReadyCallback }> = [];
-let draining = false;
+/**
+ * Drain loops currently running. Was a boolean; it is a COUNT so build concurrency can be measured.
+ *
+ * DEFAULT IS 1 AND STAYS 1 UNTIL A MEASUREMENT SAYS OTHERWISE. Concurrency here is not a build
+ * setting — every build opens a decode session plus an encoder, drawing on the same
+ * `MAX_WC_TOTAL_SESSIONS = 4` that PLAYBACK uses, and `preview-frame-pool.ts:107` records what a
+ * second cap beside that one costs: a 3+4 split raised the real ceiling to 7, every decoder reset at
+ * once under scrubbing, the GPU process died, and afterwards no source could re-acquire a provider.
+ * So this exists to answer "does parallelism buy throughput at all?" before anyone claims a slot on a
+ * shared budget. If the bottleneck is the GPU's video block (~2-3 concurrent hardware decode sessions
+ * per `video-element-pool.ts`) rather than CPU threads, three builds each run at a third speed, the
+ * curve is flat, and the crash risk would have bought nothing.
+ */
+let activeDrains = 0;
+let buildConcurrency = 1;
+
+/** Publish the live loop count so a probe can VERIFY concurrency took effect rather than trust the
+ *  setter — a measurement that assumes its own independent variable applied is not a measurement. */
+function publishDrainCount(): void {
+  (stats() as SourceProxyStats & { activeDrains?: number }).activeDrains = activeDrains;
+}
+
+/** Measurement seam. Clamped to the total session cap — this must never be the thing that exceeds it. */
+export function setSourceProxyConcurrency(n: number): void {
+  buildConcurrency = Math.max(1, Math.min(4, Math.floor(n)));
+  spawnDrains();
+}
+export function getSourceProxyConcurrency(): number {
+  return buildConcurrency;
+}
+
+/** Start drain loops up to the configured concurrency, bounded by what is actually queued. */
+function spawnDrains(): void {
+  while (activeDrains < buildConcurrency && queue.length > 0) {
+    activeDrains += 1;
+    publishDrainCount();
+    void drainQueue().finally(() => {
+      activeDrains -= 1;
+      publishDrainCount();
+      if (queue.length > 0) spawnDrains();
+    });
+  }
+}
 
 // Truncated / flaky remote downloads (notably the R2 `/storage` proxy cutting a stream short —
 // ERR_CONTENT_LENGTH_MISMATCH) are TRANSIENT. Surfaced as this error, drainQueue re-queues the asset
@@ -484,6 +526,16 @@ export function getSourceProxyTasks(assetIds: readonly string[]): SourceProxyTas
  * the 2026-07-27 GPU-process crash and the 2026-07-06 "plays ~4s then freezes" scars respectively.
  */
 let urgent = false;
+if (typeof window !== "undefined") {
+  // Measurement seam for the build-throughput probe. Deliberately a debug handle rather than a UI
+  // control: nothing in the product changes the value, and the default stays 1 until a curve says
+  // parallelism actually buys throughput (see `activeDrains`).
+  (window as { __rfSourceProxyConcurrency?: (n: number) => number }).__rfSourceProxyConcurrency = (n: number) => {
+    setSourceProxyConcurrency(n);
+    return getSourceProxyConcurrency();
+  };
+}
+
 export function setSourceProxyUrgent(value: boolean): void {
   urgent = value;
 }
@@ -528,13 +580,12 @@ export function ensureSourceProxy(asset: SourceAsset, onReady: ReadyCallback): v
   stats().queued = queue.length;
   drainAssetIds.add(asset.id);
   notifyStateChanged();
-  if (!draining) {
-    draining = true;
+  if (activeDrains === 0) {
     // Start the drain only when the tab is IDLE, so a background transcode never lands on top of the
     // user's initial open-and-edit burst. requestIdleCallback fires when the main thread has spare
     // time (and re-checks each build via the same gate through drainQueue → whenIdle); a timeout
     // fallback guarantees it still runs on browsers without rIC.
-    whenIdle(() => void drainQueue());
+    whenIdle(spawnDrains);
   }
 }
 
@@ -549,7 +600,10 @@ function whenIdle(run: () => void): void {
 }
 
 async function drainQueue(): Promise<void> {
-  try {
+  // No try/finally here: `spawnDrains` owns the activeDrains counter (in its own `.finally`) and
+  // re-spawns if work arrived while this loop's tail ran. Keeping a second bookkeeping site would let
+  // the two disagree about how many loops are live, which is the whole thing the counter must get right.
+  {
     if (!(await sourceProxyStoreAvailable())) {
       // No OPFS → feature off for this session; mark everything settled so we don't loop.
       for (const item of queue.splice(0)) {
@@ -598,10 +652,7 @@ async function drainQueue(): Promise<void> {
             if (settled.has(item.asset.id)) return; // superseded (e.g. built from local bytes since)
             queue.push(item);
             stats().queued = queue.length;
-            if (!draining) {
-              draining = true;
-              void drainQueue();
-            }
+            spawnDrains();
           }, PROXY_BUILD_RETRY_BACKOFF_MS * attempts);
         } else {
           record(item.asset.id, "failed", performance.now() - started, error instanceof Error ? error.message : String(error));
@@ -622,14 +673,9 @@ async function drainQueue(): Promise<void> {
         }
       }
     }
-  } finally {
-    draining = false;
-    // Work may have arrived while the tail of the loop ran.
-    if (queue.length > 0 && !draining) {
-      draining = true;
-      void drainQueue();
-    }
   }
+  // NOTE: the caller (`spawnDrains`) owns the activeDrains counter and re-spawns if work arrived while
+  // the tail of this loop ran, so there is no bookkeeping to undo here.
 }
 
 /** Returns the proxy URL, or null when skipped (already settled via `record`). Throws on failure. */

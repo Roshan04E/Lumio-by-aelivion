@@ -5986,6 +5986,34 @@ session's report rather than against a hypothesis.
 
 ---
 
+### DEBT-035 — the proxy cache is keyed by ASSET ID, so the same file re-imported rebuilds from scratch
+
+- Registered: 2026-09-04, from a founder question during the play-gate work: *"orreris keeps making
+  optimized media each time — if it has it, it should just point to it."*
+- **Proxies ARE reused, but only per asset id.** `getSourceProxy(assetId, sourceByteSize)`
+  (`sourceProxyStore.ts:221`) returns the persisted proxy, rebuilding only when the byte size or the
+  recipe `version` changed. Within a profile, an asset already optimized is pointed at, not rebuilt —
+  so the founder's observation is not the cache failing.
+- **What DOES rebuild**: every import mints a fresh id (`asset_local_${Date.now()}_${random}`,
+  `api.ts`), and the cache is keyed by that id. So the SAME FILE imported twice — or imported into two
+  projects — has two ids, misses the cache both times, and is transcoded twice. Identical bytes, two
+  full 4K transcodes at 15-89s each.
+- **Why it got more expensive on 2026-09-04**: before the play gate this was wasted background work the
+  user never saw. Now playback WAITS on the queue, so re-importing a clip that was already optimized
+  puts the user in a five-minute progress window for work already done once.
+- **Why it is an extension, not a rewrite**: `sourceByteSize` is already part of the reuse guard, so
+  the store already reasons about source bytes. A content-addressed key (hash of the bytes, or a
+  cheap size+sample digest) fits the existing record shape; the id stays the asset's identity while the
+  proxy's identity becomes its content.
+- Not yet investigated: whether two ASSETS sharing one proxy blob breaks any assumption in
+  `removeSourceProxy` / `retirePartialProxy` / `clearSourceProxySegments`, which today delete by asset
+  id and would need reference counting before a shared blob can be dropped safely. **That is the real
+  design question in this entry, and it should be answered before the key changes.**
+- Expiry condition: re-importing a file that was optimized earlier in the same profile is instant, and
+  deleting one of two assets sharing a proxy does not strand the other.
+
+---
+
 ### DEBT-034 — a local import can report success with NO BYTES ON DEVICE (data integrity, not proxies)
 
 - Registered: 2026-09-03, split out of DEBT-033's 11x4K measurement on founder instruction — NOT fixed
