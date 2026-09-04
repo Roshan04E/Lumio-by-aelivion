@@ -36,6 +36,7 @@ import {
   SOURCE_PROXY_VERSION,
 } from "./sourceProxyStore";
 import { decodeSegment } from "./sourceProxySegments";
+import { PROXY_LONG_EDGE, proxyDimensionsFor, proxyScaleFor } from "./sourceProxyDimensions";
 import { buildPrefixProxy, measurePrefixCoverage } from "./sourceProxyPrefixMux";
 import { probeGopProfile, needsProxyForDecodeCost, describeGopProfile, type GopProfile } from "./gop-probe";
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
@@ -50,7 +51,6 @@ import type { SourceAsset } from "@orreris/shared";
 // gets MORE effective at high fps) so 60fps proxies land ~√2× the v6 size, not 2×.
 // v6 (2026-07-18) history: 1280 long edge + 0.18 bpp ≈ 5 Mbps at 720p30 — Premiere's proxy tier.
 // Bump SOURCE_PROXY_VERSION when touching ANY of these constants.
-const PROXY_LONG_EDGE = 1280;
 const PROXY_FPS = 60;
 // Keyframe every N FRAMES (not seconds). The preview's WebCodecs pool decodes seek-on-demand and, when
 // it falls behind, can only "reset its lag" by jumping to a keyframe — so the max catch-up decode is one
@@ -657,7 +657,7 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   // The notice's copy depends on this (see SourceProxyProgress.sourceHeight) — publish it as soon as
   // the probe answers, before any of the expensive work starts.
   if (progressAssetId === asset.id) progressSourceHeight = meta.height;
-  const scale = Math.min(1, PROXY_LONG_EDGE / Math.max(meta.width, meta.height));
+  const scale = proxyScaleFor(meta.width, meta.height);
   if (scale >= 1 && blob.size < MIN_SOURCE_BYTES * 2) {
     // Already at/below proxy resolution and not huge — the original decodes fine, UNLESS its GOPs are
     // sparse. Resolution is only half of decode cost; a 720p source with 5-second GOPs still grinds a
@@ -670,8 +670,7 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     }
     logProxy(asset.id, `proxy-sized but sparse GOP — rebuilding for keyframe density (${describeGopProfile(profile)})`);
   }
-  const width = Math.max(2, Math.round((meta.width * scale) / 2) * 2);
-  const height = Math.max(2, Math.round((meta.height * scale) / 2) * 2);
+  const { width, height } = proxyDimensionsFor(meta.width, meta.height);
 
   // Past every skip/fast path — a real transcode is about to start (cold-origin UX signal).
   notifyFirstBuild();

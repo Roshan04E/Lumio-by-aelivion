@@ -8,6 +8,7 @@
  */
 
 import { describeProxyDrainOutcome, describeProxyPlaybackCost } from "./sourceProxyNotice";
+import { proxyDimensionsFor } from "./sourceProxyDimensions";
 import type { SourceProxyDrainSummary } from "./sourceProxyEngine";
 
 let passed = 0;
@@ -81,6 +82,33 @@ for (const [label, text] of [
   check(`${label} tells the user playing pauses the build`, /Playing pauses optimizing/.test(text));
   check(`${label} tells the user parking is fastest`, /parked finishes soonest/.test(text));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// (e) THE WARM PATH'S UNIT, asserted rather than argued (2026-09-04).
+//
+// The un-proxied (COLD) decode budget is expressed in PIXELS, because a stream there is whatever the
+// source happens to be — 4K carries ~4x the pixels of 1080p. The WARM path is budgeted in STREAM COUNT,
+// and the justification is not a hypothesis about behaviour: PROXY_LONG_EDGE normalises every proxy to
+// the same long edge, so sources of wildly different sizes encode to IDENTICAL dimensions and cost the
+// decoder the same. That is arithmetic — and checking the arithmetic is cheaper AND stronger evidence
+// than a browser arm run on media confounded in the direction of the answer.
+const uhdProxy = proxyDimensionsFor(2160, 3840); // Pexels 4K vertical → scale 0.333
+const hdProxy = proxyDimensionsFor(1080, 1920); // the matched 1080p set → scale 0.667
+check(`4K source proxies to 720x1280 — got ${uhdProxy.width}x${uhdProxy.height}`, uhdProxy.width === 720 && uhdProxy.height === 1280);
+check(`1080p source proxies to 720x1280 — got ${hdProxy.width}x${hdProxy.height}`, hdProxy.width === 720 && hdProxy.height === 1280);
+check(
+  "a 4K and a 1080p source produce IDENTICAL proxy dimensions (why the warm path may count streams)",
+  uhdProxy.width === hdProxy.width && uhdProxy.height === hdProxy.height
+);
+// Landscape too, so the claim is about the LONG EDGE and not an artifact of two portrait fixtures.
+const uhdLand = proxyDimensionsFor(3840, 2160);
+check(`landscape 4K proxies to 1280x720 — got ${uhdLand.width}x${uhdLand.height}`, uhdLand.width === 1280 && uhdLand.height === 720);
+// Never upscale: a source already below the long edge keeps its own size.
+const small = proxyDimensionsFor(640, 360);
+check(`a sub-proxy-sized source is not upscaled — got ${small.width}x${small.height}`, small.width === 640 && small.height === 360);
+// H.264 chroma needs even dimensions, so odd input must round rather than truncate to odd.
+const odd = proxyDimensionsFor(1921, 1081);
+check(`odd dimensions round to even — got ${odd.width}x${odd.height}`, odd.width % 2 === 0 && odd.height % 2 === 0);
 
 console.log(`\nsource-proxy notice: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
