@@ -5862,6 +5862,32 @@ did not change" and FAILED — the modal's backdrop covers the canvas, so an ele
 region captures the dialog painted over it. Sameness is unmeasurable through a modal; the transport
 CLOCK is the honest witness that playback never started.
 
+**UPDATE 2026-09-04 (j) — build throughput: the baseline is measured, the CURVE IS NOT. Handing over
+mid-measurement, so here is exactly what is known and what is not.**
+
+**Known, measured** (`debt033-queue-stall-probe.ts`, 5x4K, concurrency 1): a 4K proxy takes **~60s**,
+builds run back to back, and the queue drains normally — first `built` at 63s, `queued` counting down.
+The background gate is OPEN throughout (`__rfBgGate.reasons: []` after a brief startup `pressure`), JS
+heap 60-110MB. So neither the gate nor memory pressure parks the queue, and the earlier
+"15-89s per clip" figures were measured with URGENT mode active (gate window open); the ordinary path is
+slower because of the idle-window wait and the per-30-frame breather.
+
+**With the play gate shipped, that ~60s/clip IS the user's wait**, which is why the founder moved
+throughput ahead of the pixel budget.
+
+**NOT known: whether concurrency 2 or 3 buys anything.** The matrix (`debt033-build-throughput-probe.ts`,
+concurrency 1/2/3, repeats, proxies-per-minute) has not produced a single completed arm. Re-run it on
+the new machine before touching concurrency; the seam (`__rfSourceProxyConcurrency`, default 1) is in
+place and verifies itself via the published `activeDrains` count.
+
+**AN INSTRUMENT ERROR OF MINE, recorded because it cost a run and is the chapter's own signature.** I
+watched Chrome burn 0.38s of CPU across 8 seconds and concluded the queue was "PARKED, not slow", then
+killed a 10-minute run on that basis. It was wrong: the transcode runs in a WORKER with hardware-
+accelerated decode and encode, so **low main-process CPU cannot distinguish "stalled" from "working on
+the GPU"**. The diagnostic that actually answered it read the queue's own counters
+(`__rfSourceProxy.built` advancing) rather than a proxy signal for them. Same shape as every other
+instrument gap here: a measurement of the system's internals read as a measurement of the thing itself.
+
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
   frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and
