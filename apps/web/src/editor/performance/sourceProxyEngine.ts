@@ -268,6 +268,13 @@ export function setSourceProxyProgressListener(listener: ((progress: SourceProxy
   progressListener = listener;
 }
 function reportProgress(encodedFrames: number, totalFrames: number): void {
+  // Published on the stats object BEFORE the listener's step throttle, so it advances continuously.
+  // Exists because "is a build actually PROGRESSING right now?" had no observable answer: `built` only
+  // moves on completion, and a 4K build runs for 30-90s (minutes for a long source), so a probe asking
+  // whether work advances during playback could not tell "suspended" from "still working on it".
+  const s = stats() as SourceProxyStats & { progressFrames?: number; progressTotal?: number };
+  s.progressFrames = encodedFrames;
+  s.progressTotal = totalFrames;
   if (!progressListener || !progressAssetId || totalFrames <= 0) return;
   const percent = Math.max(0, Math.min(100, Math.round((encodedFrames / totalFrames) * 100)));
   const step = Math.floor(percent / 5);

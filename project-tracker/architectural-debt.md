@@ -5776,6 +5776,49 @@ That points at a size-dependent failure to persist local bytes, and it is now ON
 DEBT-033's ceiling question rather than being a side issue — STOP 3's 4K arm cannot be assembled until
 it is fixed.
 
+**UPDATE 2026-09-04 (h) — THE PLAY/PAUSE TRAP IS BROKEN, verified at the canvas, with the 2026-07-06
+suspension rule left intact.**
+
+The trap: proxy builds suspend while the transport plays (the "plays ~4s then freezes" scar). On cold
+4K the preview is frozen 100% of the time, so pressing play suspends the ONLY work that ends the
+freeze — the user's instinct extends the exact window causing it. The rule is stated in terms of
+`isPlaying`, which is a claim about the TRANSPORT, not about whether anything reaches the screen. **We
+were protecting smooth playback that was not occurring.**
+
+`playbackLiveness.ts` (new) reports one narrow fact — playback is running and delivering NOTHING — off
+the `minMediaFps` signal built earlier in this chapter, and `EditorPage` releases only the `"playing"`
+gate reason on it. Every condition is deliberately conservative, and each one is there to avoid
+resurrecting the scar: `activeMediaLayers > 0` (a still/text comp delivers no frames BY DESIGN — zero
+layers is not a stall); `minMediaFps === 0`, not merely low (degraded-but-delivering playback is
+precisely what the rule protects); sustained 3s (startup, seeks and source swaps make brief gaps);
+and recovery at the FIRST delivered frame with no dwell — **slow to conclude dead, instant to concede
+alive**.
+
+**Verified by `debt033-play-trap-probe.ts` (new), which runs the user's own worst behaviour: press play
+on cold 4K and NEVER pause.**
+```
+t= 4s  stalled=true   playing=true  minMedia=0.0  prog=0     ← condition fires
+t=12s  stalled=true   playing=true  minMedia=0.0  prog=30    ← build ADVANCING during playback
+t=22s  stalled=true   playing=true  minMedia=0.0  prog=120
+t=42s  stalled=FALSE  playing=true  minMedia=2.3            ← one frame arrived; protection restored
+t=46s  stalled=true   playing=true  minMedia=0.0  prog=270   ← delivery gone again
+t=80s  stalled=true   playing=true  minMedia=0.0  prog=480   (transport still playing at run end: true)
+```
+Under the old rule the build would have been parked for the whole of playback, so **this cannot be
+explained by "we waited longer"**. The t=42s row is the important one for the scar: the moment a single
+frame was delivered the exception withdrew and the protection came back, unprompted.
+
+**TWO FALSE VERDICTS ON THE WAY, both from the instrument rather than the code**, recorded because each
+was individually plausible:
+1. A **false PASS**. With 20s clips the composition ENDED at ~21s, `playing` went false, and a build
+   completing at 36s was counted — with the transport stopped. It says nothing about the trap. Fixed by
+   making `playing === true` part of the condition, not context around it.
+2. A **false FAIL**. With 120s clips playback outlasted the window, but a 120s 4K build outlasts it too,
+   so `built` stayed 0 for 180s and read as "the trap is intact". **Completion was the wrong signal
+   entirely**; `progressFrames` (new, published from `reportProgress` before its own step throttle)
+   advances continuously inside a build and answers the actual question. A probe that can only observe
+   an event rarer than its own window cannot tell a working fix from a broken one.
+
 - Status of DEBT-033 after this: the freeze is REPRODUCED and INSTRUMENTED, mechanism not yet isolated.
   Known: not WebCodecs admission (capMisses 0 at every N), resolution-dependent (1080p N=6 fine, 4K N=3
   frozen), on the uncapped native `<video>` path (`videoPool.active` = N), with decode delivery and

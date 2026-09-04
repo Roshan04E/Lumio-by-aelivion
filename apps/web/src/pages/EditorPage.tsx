@@ -310,6 +310,7 @@ import {
 import { describeProxyDrainOutcome, describeProxyPlaybackCost } from "../editor/performance/sourceProxyNotice";
 import { setWorldAssetProvider } from "../ai/world";
 import { isBackgroundWorkAllowed, setBackgroundGate, subscribeBackgroundGate } from "../editor/performance/backgroundScheduler";
+import { isPlaybackStalled, startPlaybackLivenessWatch, subscribePlaybackLiveness } from "../editor/performance/playbackLiveness";
 import { ensureDegradationControllerStarted } from "../editor/performance/degradation";
 import { captureSpanProxyFromViewer, verifySpanProxyAgainstViewer, ViewerCaptureAborted } from "../editor/performance/viewerProxyCapture";
 import { getProxyViewerCaptureEnabled } from "../color/render-engine";
@@ -2117,8 +2118,23 @@ export function EditorPage() {
   // filmstrips, waveforms, still proxies — must never compete with playback (the "plays ~4s then
   // freezes" family), an in-flight timeline gesture, or an export. Each condition feeds the single
   // gate in backgroundScheduler.ts; producers consult the gate instead of each condition separately.
+  //
+  // ONE NARROW EXCEPTION (DEBT-033, 2026-09-04): when playback is running and delivering NOTHING, this
+  // gate is protecting smooth playback that is not occurring — and the work it holds back (the ingest
+  // proxies) is the only thing that will end the freeze. On a cold 4K timeline the user's instinct,
+  // press play again, therefore extends the exact window causing the problem. `isPlaybackStalled()` is
+  // deliberately hard to satisfy (video layers mounted, per-layer delivery at zero, sustained 3s) and
+  // concedes the moment a single frame arrives, so degraded-but-delivering playback — which is what the
+  // 2026-07-06 scar is actually about — keeps its protection untouched.
   useEffect(() => {
-    setBackgroundGate("playing", isPlaying);
+    const stop = startPlaybackLivenessWatch();
+    const sync = () => setBackgroundGate("playing", isPlaying && !isPlaybackStalled());
+    sync();
+    const unsubscribe = subscribePlaybackLiveness(sync);
+    return () => {
+      unsubscribe();
+      stop();
+    };
   }, [isPlaying]);
   // Timeline gesture: any pointer press inside the timeline closes the gate until release. Capture
   // phase on window so the imperative gesture handlers (do-not-touch zone) stay untouched.
